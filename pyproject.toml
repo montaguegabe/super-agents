@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "super-agents"
+version = "0.1.0"
+description = "MCP wrapper for controlling Codex app-server threads, turns, plan mode, and steering."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.12.4",
+  "websockets>=12.0",
+]
+
+[project.scripts]
+super-agents-mcp = "super_agents.mcp_server:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/super_agents"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.uv]
+exclude-newer = "10 days"
+index-strategy = "first-index"
+
+[tool.uv.pip]
+exclude-newer = "10 days"
+index-strategy = "first-index"
