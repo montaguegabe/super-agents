@@ -4,6 +4,21 @@ Super Agents is a local MCP server that wraps the Codex app server. It gives age
 
 ## Install
 
+Python/uv entrypoint:
+
+```bash
+uv sync --extra dev
+uv run super-agents-mcp
+```
+
+Add an MCP server entry that runs:
+
+```bash
+uv --directory /path/to/super-agents run super-agents-mcp
+```
+
+Legacy TypeScript entrypoint, retained during the parallel transition:
+
 ```bash
 npm install
 npm run build
@@ -12,7 +27,7 @@ npm run build
 Then add an MCP server entry that runs:
 
 ```bash
-node /Users/gabemontague/Projects/super-agents/dist/index.js
+node /path/to/super-agents/dist/index.js
 ```
 
 The server starts `codex app-server` automatically when it cannot reach the configured websocket endpoint.
@@ -53,3 +68,15 @@ The state file remains keyed by thread id and is backward compatible with older 
 ## Notes
 
 This wrapper does not silently approve app-server callbacks. If plan mode asks a question or a sandboxed turn asks for approval, use `codex_turn_progress` to see the pending request and then call `codex_answer_request` explicitly.
+
+## Python Port Transition
+
+The Python implementation is now available in parallel with the existing TypeScript implementation. It uses the official low-level Python MCP SDK for stdio MCP handling, while preserving the existing websocket transport to `codex app-server`, tool names, tool schemas, callback handling, label/session behavior, and the `~/.super-agents/state.json` format.
+
+Transition phases:
+
+1. Keep both implementations available and run both test suites.
+2. Point MCP clients at the uv command after parity is verified in local use.
+3. Remove the TypeScript package flow only after the Python entrypoint has replaced it in all active MCP configs.
+
+Python modules are split so Openbase Coder code can later import the app-server websocket client and session metadata/state helpers directly, without depending on MCP stdio startup.
