@@ -20,6 +20,7 @@ uv --directory /path/to/super-agents run super-agents-mcp
 Legacy TypeScript entrypoint, retained during the parallel transition:
 
 ```bash
+cd legacy
 npm install
 npm run build
 ```
@@ -27,7 +28,7 @@ npm run build
 Then add an MCP server entry that runs:
 
 ```bash
-node /path/to/super-agents/dist/index.js
+node /path/to/super-agents/legacy/dist/index.js
 ```
 
 The server starts `codex app-server` automatically when it cannot reach the configured websocket endpoint.
