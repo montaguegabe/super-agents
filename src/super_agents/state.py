@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Iterator, Literal, TypeVar
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 JsonObject = dict[str, Any]
 TrackedStatus = Literal["running", "completed", "failed", "waiting", "cancelled"]
 StoredStatus = TrackedStatus | Literal["unknown"]
 Mode = Literal["default", "plan"]
+T = TypeVar("T")
 
 
 @dataclass(slots=True)
@@ -20,6 +27,7 @@ class TurnSummary:
     started_at: str
     updated_at: str
     mode: Mode | None = None
+    reasoning_effort: str | None = None
     finished_at: str | None = None
     prompt_preview: str | None = None
     last_useful_message: str | None = None
@@ -32,6 +40,7 @@ class TurnSummary:
                 "turnId": self.turn_id,
                 "status": self.status,
                 "mode": self.mode,
+                "reasoningEffort": self.reasoning_effort,
                 "startedAt": self.started_at,
                 "updatedAt": self.updated_at,
                 "finishedAt": self.finished_at,
@@ -84,11 +93,71 @@ class SessionRecord:
 
 
 @dataclass(slots=True)
-class StateFile:
-    sessions: dict[str, SessionRecord] = field(default_factory=dict)
+class RoutineRecord:
+    name: str
+    prompt: str
+    time: str
+    updated_at: str
+    timezone: str | None = None
+    enabled: bool = True
+    target_name: str | None = None
+    thread_id: str | None = None
+    cwd: str | None = None
+    mode: Mode | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    approval_policy: str | None = None
+    sandbox_type: str | None = None
+    service_tier: str | None = None
+    developer_instructions: str | None = None
+    created_at: str | None = None
+    last_run_date: str | None = None
+    last_started_at: str | None = None
+    last_thread_id: str | None = None
+    last_turn_id: str | None = None
+    last_status: str | None = None
+    last_error: str | None = None
 
     def to_json(self) -> JsonObject:
-        return {"sessions": {key: value.to_json() for key, value in self.sessions.items()}}
+        return without_none(
+            {
+                "name": self.name,
+                "prompt": self.prompt,
+                "time": self.time,
+                "timezone": self.timezone,
+                "enabled": self.enabled,
+                "targetName": self.target_name,
+                "threadId": self.thread_id,
+                "cwd": self.cwd,
+                "mode": self.mode,
+                "model": self.model,
+                "reasoningEffort": self.reasoning_effort,
+                "approvalPolicy": self.approval_policy,
+                "sandboxType": self.sandbox_type,
+                "serviceTier": self.service_tier,
+                "developerInstructions": self.developer_instructions,
+                "createdAt": self.created_at,
+                "updatedAt": self.updated_at,
+                "lastRunDate": self.last_run_date,
+                "lastStartedAt": self.last_started_at,
+                "lastThreadId": self.last_thread_id,
+                "lastTurnId": self.last_turn_id,
+                "lastStatus": self.last_status,
+                "lastError": self.last_error,
+            }
+        )
+
+
+@dataclass(slots=True)
+class StateFile:
+    sessions: dict[str, SessionRecord] = field(default_factory=dict)
+    routines: dict[str, RoutineRecord] = field(default_factory=dict)
+
+    def to_json(self) -> JsonObject:
+        return {
+            "sessions": {key: value.to_json() for key, value in self.sessions.items()},
+            "routines": {key: value.to_json() for key, value in self.routines.items()},
+        }
 
 
 def read_state_file(path: Path) -> StateFile:
@@ -97,7 +166,8 @@ def read_state_file(path: Path) -> StateFile:
     except Exception:
         return StateFile()
     sessions = as_session_record_map(raw.get("sessions") if isinstance(raw, dict) else None)
-    return StateFile(sessions=sessions)
+    routines = as_routine_record_map(raw.get("routines") if isinstance(raw, dict) else None)
+    return StateFile(sessions=sessions, routines=routines)
 
 
 def write_state_file(path: Path, state: StateFile) -> None:
@@ -107,6 +177,34 @@ def write_state_file(path: Path, state: StateFile) -> None:
         tmp.write(payload)
         tmp_name = tmp.name
     os.replace(tmp_name, path)
+
+
+@contextlib.contextmanager
+def state_file_lock(path: Path) -> Iterator[None]:
+    """Exclusive inter-process lock for one Super Agents state file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def read_state_file_locked(path: Path) -> StateFile:
+    with state_file_lock(path):
+        return read_state_file(path)
+
+
+def update_state_file(path: Path, callback: Callable[[StateFile], T]) -> T:
+    with state_file_lock(path):
+        state = read_state_file(path)
+        result = callback(state)
+        write_state_file(path, state)
+        return result
 
 
 def as_session_record_map(value: Any) -> dict[str, SessionRecord]:
@@ -154,6 +252,7 @@ def as_turn_summary_map(value: Any) -> dict[str, TurnSummary] | None:
             turn_id=normalized_turn_id,
             status=status,
             mode=as_mode(get_string(raw_turn, "mode")),
+            reasoning_effort=get_string(raw_turn, "reasoningEffort"),
             started_at=get_string(raw_turn, "startedAt")
             or get_string(raw_turn, "updatedAt")
             or "1970-01-01T00:00:00.000Z",
@@ -166,6 +265,47 @@ def as_turn_summary_map(value: Any) -> dict[str, TurnSummary] | None:
         )
         turns[normalized_turn_id] = turn
     return turns or None
+
+
+def as_routine_record_map(value: Any) -> dict[str, RoutineRecord]:
+    if not isinstance(value, dict):
+        return {}
+    routines: dict[str, RoutineRecord] = {}
+    for name, raw_routine in value.items():
+        if not isinstance(raw_routine, dict):
+            continue
+        normalized_name = get_string(raw_routine, "name") or str(name)
+        prompt = get_string(raw_routine, "prompt")
+        time_value = get_string(raw_routine, "time")
+        if not prompt or not time_value:
+            continue
+        routine = RoutineRecord(
+            name=normalized_name,
+            prompt=prompt,
+            time=time_value,
+            timezone=get_string(raw_routine, "timezone"),
+            enabled=raw_routine.get("enabled") if isinstance(raw_routine.get("enabled"), bool) else True,
+            target_name=get_string(raw_routine, "targetName"),
+            thread_id=get_string(raw_routine, "threadId"),
+            cwd=get_string(raw_routine, "cwd"),
+            mode=as_mode(get_string(raw_routine, "mode")),
+            model=get_string(raw_routine, "model"),
+            reasoning_effort=get_string(raw_routine, "reasoningEffort"),
+            approval_policy=get_string(raw_routine, "approvalPolicy"),
+            sandbox_type=get_string(raw_routine, "sandboxType"),
+            service_tier=get_string(raw_routine, "serviceTier"),
+            developer_instructions=get_string(raw_routine, "developerInstructions"),
+            created_at=get_string(raw_routine, "createdAt"),
+            updated_at=get_string(raw_routine, "updatedAt") or "1970-01-01T00:00:00.000Z",
+            last_run_date=get_string(raw_routine, "lastRunDate"),
+            last_started_at=get_string(raw_routine, "lastStartedAt"),
+            last_thread_id=get_string(raw_routine, "lastThreadId"),
+            last_turn_id=get_string(raw_routine, "lastTurnId"),
+            last_status=get_string(raw_routine, "lastStatus"),
+            last_error=get_string(raw_routine, "lastError"),
+        )
+        routines[normalized_name] = routine
+    return routines
 
 
 def get_string(value: JsonObject, key: str) -> str | None:

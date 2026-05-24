@@ -2,19 +2,131 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
 import websockets
 
+import super_agents.app_server_client as app_server_client
 from super_agents.app_server_client import CodexAppServerClient
-from super_agents.mcp_server import build_tools
+from super_agents.mcp_server import (
+    build_tools,
+    clean_queue_turn_input,
+    clean_start_turn_by_name_input,
+    clean_thread_input,
+    clean_turn_input,
+    default_super_agent_instructions_path,
+)
 
 
 class ReadyClient(CodexAppServerClient):
     async def check_ready(self) -> bool:
         return True
+
+
+def test_announcer_turn_input_forces_network_capable_sandbox() -> None:
+    cleaned = clean_turn_input(
+        {
+            "threadId": "thread-1",
+            "prompt": 'Wait, then run /Users/gabemontague/.local/bin/openbase-coder user say "Done".',
+            "sandboxType": "workspaceWrite",
+        }
+    )
+
+    assert cleaned["sandboxType"] == "dangerFullAccess"
+    assert cleaned["reasoningEffort"] == "high"
+    assert cleaned["serviceTier"] == "fast"
+
+
+def test_turn_input_accepts_hidden_reasoning_and_service_tier_overrides() -> None:
+    cleaned = clean_turn_input(
+        {
+            "threadId": "thread-1",
+            "prompt": "work",
+            "reasoningEffort": "low",
+            "serviceTier": "standard",
+        }
+    )
+
+    assert cleaned["reasoningEffort"] == "low"
+    assert cleaned["serviceTier"] == "standard"
+
+
+def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"super_agents_reasoning_effort": "low"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["reasoningEffort"] == "low"
+
+
+def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"reasoning_effort": "low"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["reasoningEffort"] == "high"
+
+
+def test_super_agent_instructions_default_to_configured_path(monkeypatch, tmp_path: Path) -> None:
+    instructions_path = tmp_path / "super-agent-instructions.md"
+    instructions_path.write_text("The random animal is raccoon.\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
+
+    thread_input = clean_thread_input({"name": "new-agent"})
+    turn_input = clean_start_turn_by_name_input({"name": "new-agent", "prompt": "work"})
+    queue_input = clean_queue_turn_input({"name": "new-agent", "prompt": "later"})
+
+    assert default_super_agent_instructions_path() == instructions_path
+    assert thread_input["developerInstructions"] == "The random animal is raccoon.\n"
+    assert turn_input["developerInstructions"] == "The random animal is raccoon.\n"
+    assert queue_input["developerInstructions"] == "The random animal is raccoon.\n"
+
+
+def test_super_agent_instructions_default_to_codex_home(monkeypatch, tmp_path: Path) -> None:
+    codex_home = tmp_path / "codex_home"
+    codex_home.mkdir()
+    instructions_path = codex_home / "super-agent-instructions.md"
+    instructions_path.write_text("Use the Super Agent instructions.\n", encoding="utf-8")
+    monkeypatch.delenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    cleaned = clean_thread_input({"name": "new-agent"})
+
+    assert default_super_agent_instructions_path() == instructions_path
+    assert cleaned["developerInstructions"] == "Use the Super Agent instructions.\n"
+
+
+def test_explicit_developer_instructions_override_super_agent_default(monkeypatch, tmp_path: Path) -> None:
+    instructions_path = tmp_path / "super-agent-instructions.md"
+    instructions_path.write_text("Default instructions.\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
+
+    thread_input = clean_thread_input({"name": "new-agent", "developerInstructions": "Explicit instructions."})
+    turn_input = clean_start_turn_by_name_input(
+        {"name": "new-agent", "prompt": "work", "developerInstructions": "Explicit turn instructions."}
+    )
+
+    assert thread_input["developerInstructions"] == "Explicit instructions."
+    assert turn_input["developerInstructions"] == "Explicit turn instructions."
+
+
+def test_explicit_null_suppresses_super_agent_default_for_turns(monkeypatch, tmp_path: Path) -> None:
+    instructions_path = tmp_path / "super-agent-instructions.md"
+    instructions_path.write_text("Default instructions.\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
+
+    turn_input = clean_start_turn_by_name_input({"name": "new-agent", "prompt": "work", "developerInstructions": None})
+    queue_input = clean_queue_turn_input({"name": "new-agent", "prompt": "later", "developerInstructions": None})
+
+    assert "developerInstructions" not in turn_input
+    assert "developerInstructions" not in queue_input
 
 
 @pytest.mark.asyncio
@@ -76,6 +188,218 @@ async def test_label_tools_resolve_latest_active_session_and_list_active_agents(
 
 
 @pytest.mark.asyncio
+async def test_start_turn_sets_super_agent_identity_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def fake_login_shell_environment() -> dict[str, str]:
+        return {
+            "PATH": "/usr/bin",
+            "SHELL": "/bin/zsh",
+            "HOME": "/Users/example",
+            "USER": "example",
+            "LOGNAME": "example",
+        }
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-1"}
+        return {"ok": True}
+
+    monkeypatch.setattr(app_server_client, "login_shell_environment", fake_login_shell_environment)
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_turn({"threadId": "thread-1", "label": "Build", "prompt": "work"})
+
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        set_env = start_request["params"]["config"]["shell_environment_policy"]["set"]
+        assert set_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-1"
+        assert set_env["OPENBASE_SUPER_AGENT_LABEL"] == "Build"
+        assert set_env["PATH"] == "/usr/bin"
+        assert (
+            start_request["params"]["collaborationMode"]["settings"]["developer_instructions"]
+            == "Super Agent name: Build"
+        )
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_super_agent_identity_environment_is_scoped_per_config_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_login_shell_environment() -> dict[str, str]:
+        return {
+            "PATH": "/usr/bin",
+            "OPENBASE_SUPER_AGENT_THREAD_ID": "stale-thread",
+            "OPENBASE_SUPER_AGENT_LABEL": "Stale",
+        }
+
+    monkeypatch.setenv("OPENBASE_SUPER_AGENT_THREAD_ID", "parent-thread")
+    monkeypatch.setenv("OPENBASE_SUPER_AGENT_LABEL", "Parent")
+    monkeypatch.setattr(app_server_client, "login_shell_environment", fake_login_shell_environment)
+
+    first = await app_server_client.login_shell_config_override(
+        thread_id="thread-a",
+        label="Agent A",
+    )
+    second = await app_server_client.login_shell_config_override(
+        thread_id="thread-b",
+        label="Agent B",
+    )
+    cleared = await app_server_client.login_shell_config_override()
+
+    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-a"
+    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == "Agent A"
+    assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-b"
+    assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == "Agent B"
+    assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == ""
+    assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == ""
+    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] != "stale-thread"
+    assert os.environ["OPENBASE_SUPER_AGENT_THREAD_ID"] == "parent-thread"
+
+
+@pytest.mark.asyncio
+async def test_start_thread_appends_super_agent_identity_to_explicit_instructions(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"thread": {"id": "thread-identity", "cwd": message["params"]["cwd"], "model": "gpt-test"}}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread(
+            {
+                "name": "Identity Agent",
+                "cwd": "/tmp/identity",
+                "developerInstructions": "Explicit instructions.",
+            }
+        )
+
+        start_request = next(message for message in captured if message.get("method") == "thread/start")
+        assert start_request["params"]["developerInstructions"] == (
+            "Explicit instructions.\n\nSuper Agent name: Identity Agent"
+        )
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_thread_sets_native_app_server_thread_name(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"thread": {"id": "thread-native", "cwd": message["params"]["cwd"], "model": "gpt-test"}}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"name": "native-name", "cwd": "/tmp/native"})
+
+        rename_request = next(message for message in captured if message.get("method") == "thread/name/set")
+        assert rename_request["params"] == {"threadId": "thread-native", "name": "native-name"}
+
+        state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+        assert state["sessions"]["thread-native"]["label"] == "native-name"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_by_name_resolves_native_app_server_thread_name(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            return {
+                "data": [
+                    {
+                        "id": "thread-native",
+                        "name": "native-name",
+                        "cwd": "/tmp/native",
+                        "updatedAt": 100,
+                        "status": "completed",
+                    }
+                ],
+                "nextCursor": None,
+                "backwardsCursor": None,
+            }
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-native"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        caplog.set_level("INFO", logger="super_agents.app_server_client")
+        result = await client.start_turn_by_label(
+            type_query(label="native-name"),
+            {"label": "native-name", "prompt": "continue", "_mcpCallId": "mcp-test"},
+        )
+
+        assert result["threadId"] == "thread-native"
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["threadId"] == "thread-native"
+        assert start_request["params"]["cwd"] == "/tmp/native"
+        assert start_request["params"]["serviceTier"] == "fast"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("stage=super_agents_resolve_start" in message for message in messages)
+        assert any("stage=super_agents_resolve_end" in message for message in messages)
+        assert any("stage=app_server_turn_start_request" in message for message in messages)
+        assert any("stage=app_server_turn_start_response" in message for message in messages)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_by_name_uses_native_app_server_thread_name(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            return {
+                "data": [
+                    {
+                        "id": "thread-native",
+                        "name": "old-name",
+                        "cwd": "/tmp/native",
+                        "updatedAt": 100,
+                        "status": "completed",
+                    }
+                ],
+                "nextCursor": None,
+                "backwardsCursor": None,
+            }
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        result = await client.rename_by_label(type_query(label="old-name"), "new-name")
+
+        assert result["renamed"] is True
+        rename_request = next(message for message in captured if message.get("method") == "thread/name/set")
+        assert rename_request["params"] == {"threadId": "thread-native", "name": "new-name"}
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_progress_by_label_reuses_resolved_thread_and_turn_ids(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
@@ -101,6 +425,9 @@ async def test_progress_by_label_reuses_resolved_thread_and_turn_ids(tmp_path: P
         assert progress["threadId"] == "thread-progress"
         assert progress["turnId"] == "turn-progress"
         assert progress["status"] == "running"
+        assert "turn" not in progress
+        assert "events" not in progress.get("trackedTurn", {})
+        assert progress["summary"]["lastUsefulMessage"] == "still working"
         assert any(
             message.get("method") == "thread/read" and message["params"]["threadId"] == "thread-progress"
             for message in captured
@@ -160,12 +487,115 @@ async def test_start_turn_by_label_can_start_follow_up_on_latest_inactive_label(
     client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
     try:
         await client.start_thread({"label": "follow-up", "cwd": "/tmp/project"})
-        result = await client.start_turn_by_label(type_query(label="follow-up"), {"label": "follow-up", "prompt": "continue"})
+        result = await client.start_turn_by_label(
+            type_query(label="follow-up"), {"label": "follow-up", "prompt": "continue"}
+        )
         assert result["threadId"] == "thread-follow-up"
         assert result["turnId"] == "turn-follow-up"
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         assert start_request["params"]["threadId"] == "thread-follow-up"
         assert start_request["params"]["cwd"] == "/tmp/project"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_by_name_on_running_thread_queues_prompt(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-active", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-active"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "active", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-active", "label": "active", "prompt": "work"})
+
+        result = await client.start_turn_by_label(type_query(label="active"), {"label": "active", "prompt": "queued"})
+
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+        assert result["queued"] is True
+        assert result["drain"] == "waiting_for_active_turn"
+        assert result["queueDepth"] == 1
+        assert result["item"]["promptPreview"] == "queued"
+        assert len(start_requests) == 1
+        assert client.queued_turn_summary()[0]["queueDepth"] == 1
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_turn_waits_for_active_turn_completion_then_starts_next_turn(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-queue", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "queue", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-queue", "label": "queue", "prompt": "first"})
+
+        queued = await client.queue_turn_by_label(type_query(label="queue"), {"label": "queue", "prompt": "second"})
+
+        assert queued["queued"] is True
+        assert queued["drain"] == "waiting_for_active_turn"
+        assert [message.get("method") for message in captured].count("turn/start") == 1
+        assert client.queued_turn_summary()[0]["queueDepth"] == 1
+
+        client.handle_notification("turn/completed", {"threadId": "thread-queue", "turnId": "turn-1"})
+        await asyncio.sleep(0.05)
+
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+        assert len(start_requests) == 2
+        assert start_requests[-1]["params"]["input"] == [{"type": "text", "text": "second"}]
+        assert start_requests[-1]["params"]["threadId"] == "thread-queue"
+        assert client.queued_turn_summary() == []
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_turn_on_idle_thread_starts_without_waiting(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-idle", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-idle"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "idle", "cwd": "/tmp/project"})
+
+        queued = await client.queue_turn_by_label(type_query(label="idle"), {"label": "idle", "prompt": "start now"})
+
+        assert queued["queued"] is False
+        assert queued["startedImmediately"] is True
+        assert queued["drain"] == "started_immediately"
+        assert queued["turnId"] == "turn-idle"
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["input"] == [{"type": "text", "text": "start now"}]
+        assert client.queued_turn_summary() == []
     finally:
         await client.close()
         await server.close()
@@ -219,16 +649,143 @@ async def test_session_state_is_enriched_with_turn_metadata_compatibly(tmp_path:
     client = ReadyClient(server.ws_url, state_file, "gpt-test")
     try:
         await client.start_thread({"label": "state", "group": "batch", "cwd": "/tmp/state"})
-        await client.start_turn({"threadId": "thread-state", "label": "state", "group": "batch", "prompt": "state prompt"})
+        await client.start_turn(
+            {"threadId": "thread-state", "label": "state", "group": "batch", "prompt": "state prompt"}
+        )
 
         state = json.loads(state_file.read_text(encoding="utf-8"))
         assert state["sessions"]["thread-state"]["label"] == "state"
         assert state["sessions"]["thread-state"]["group"] == "batch"
         assert state["sessions"]["thread-state"]["activeTurnId"] == "turn-state"
         assert state["sessions"]["thread-state"]["turns"]["turn-state"]["promptPreview"] == "state prompt"
+        assert state["sessions"]["thread-state"]["turns"]["turn-state"]["reasoningEffort"] == "high"
     finally:
         await client.close()
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_reasoning_effort_is_sent_persisted_and_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"super_agents_reasoning_effort": "low"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-reasoning", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-reasoning"}
+        if message.get("method") == "thread/read":
+            return {
+                "threadId": message["params"]["threadId"],
+                "turns": [{"id": "turn-reasoning", "status": "inProgress", "message": "still working"}],
+            }
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    state_file = tmp_path / "state.json"
+    client = ReadyClient(server.ws_url, state_file, "gpt-test")
+    try:
+        await client.start_thread({"label": "reasoning", "cwd": "/tmp/reasoning"})
+        result = await client.start_turn(
+            clean_turn_input({"threadId": "thread-reasoning", "label": "reasoning", "prompt": "work"})
+        )
+
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["collaborationMode"]["settings"]["reasoning_effort"] == "low"
+        assert result["reasoningEffort"] == "low"
+
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        turn = state["sessions"]["thread-reasoning"]["turns"]["turn-reasoning"]
+        assert turn["reasoningEffort"] == "low"
+
+        status = await client.compact_status(type_query(label="reasoning"))
+        assert status["agents"][0]["reasoningEffort"] == "low"
+
+        progress = await client.progress_by_label(type_query(label="reasoning"))
+        assert progress["summary"]["reasoningEffort"] == "low"
+        assert progress["trackedTurn"]["reasoningEffort"] == "low"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_progress_full_opt_in_returns_raw_turn_and_tracked_events(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/read":
+            return {
+                "threadId": message["params"]["threadId"],
+                "turns": [{"id": "turn-full", "status": "inProgress", "diff": "x" * 5000}],
+            }
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        client.ensure_turn("thread-full", "turn-full").events.append(
+            {"method": "turn/item", "params": {"text": "event"}, "receivedAt": "2026-01-01T00:00:00.000Z"}
+        )
+        progress = await client.progress_by_label(type_query(thread_id="thread-full", turn_id="turn-full", full=True))
+
+        assert progress["turn"]["diff"] == "x" * 5000
+        assert progress["trackedTurn"]["events"][0]["method"] == "turn/item"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_active_preview_defaults_to_short_and_can_be_omitted(tmp_path: Path) -> None:
+    client = ReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    long_message = " ".join(["word"] * 80)
+    await client.remember_session(
+        "thread-preview",
+        {
+            "label": "preview",
+            "threadId": "thread-preview",
+            "lastStatus": "running",
+            "activeTurnId": "turn-preview",
+            "lastUsefulMessage": long_message,
+        },
+    )
+
+    active = await client.active(type_query(label="preview", include_preview=True))
+    assert len(active["agents"][0]["lastUsefulMessage"]) <= 160
+
+    without_preview = await client.active(type_query(label="preview", include_preview=False))
+    assert "lastUsefulMessage" not in without_preview["agents"][0]
+
+
+@pytest.mark.asyncio
+async def test_compact_status_has_no_preview_or_transcript_fields(tmp_path: Path) -> None:
+    client = ReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    await client.remember_session(
+        "thread-status",
+        {
+            "label": "status",
+            "threadId": "thread-status",
+            "cwd": "/tmp/status",
+            "lastStatus": "running",
+            "activeTurnId": "turn-status",
+            "lastUsefulMessage": "verbose output should not appear",
+        },
+    )
+
+    status = await client.compact_status(type_query(label="status"))
+    item = status["agents"][0]
+    assert item["name"] == "status"
+    assert item["threadId"] == "thread-status"
+    assert item["turnId"] == "turn-status"
+    assert "lastUsefulMessage" not in item
+    assert "preview" not in item
+    assert "turn" not in item
 
 
 @pytest.mark.asyncio
@@ -264,6 +821,7 @@ async def test_callback_requests_are_recorded_and_answered(tmp_path: Path) -> No
 
         status = await client.status()
         assert status["pendingRequests"][0]["id"] == server_request_id
+        assert status["pendingPermissionRequests"] == []
         assert status["activeTurns"][0]["status"] == "waiting"
 
         answered = await client.answer_request(server_request_id, {"decision": "accept"})
@@ -275,31 +833,256 @@ async def test_callback_requests_are_recorded_and_answered(tmp_path: Path) -> No
         await server.close()
 
 
+@pytest.mark.asyncio
+async def test_permission_callback_can_answer_approval_request(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    received: list[dict[str, Any]] = []
+    server_request_id = "approval-1"
+
+    async def after_message(message: dict[str, Any], websocket: Any) -> None:
+        if message.get("method") == "turn/start":
+            await websocket.send(
+                json.dumps(
+                    {
+                        "id": server_request_id,
+                        "method": "exec/requestApproval",
+                        "params": {
+                            "threadId": "thread-approval",
+                            "turnId": "turn-approval",
+                            "command": "make test",
+                        },
+                    }
+                )
+            )
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-approval", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-approval"}
+        return {"ok": True}
+
+    async def permission_callback(request: app_server_client.PendingServerRequest) -> dict[str, str]:
+        received.append(request.to_json())
+        return {"decision": "accept"}
+
+    server = await start_fake_app_server(captured, handler, after_message)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    client.register_permission_callback(permission_callback)
+    try:
+        await client.start_thread({"label": "approval"})
+        await client.start_turn({"threadId": "thread-approval", "label": "approval", "prompt": "work"})
+
+        for _ in range(20):
+            if any(message == {"id": server_request_id, "result": {"decision": "accept"}} for message in captured):
+                break
+            await asyncio.sleep(0.01)
+
+        assert received[0]["id"] == server_request_id
+        assert received[0]["method"] == "exec/requestApproval"
+        assert {"id": server_request_id, "result": {"decision": "accept"}} in captured
+        status = await client.status()
+        assert status["pendingRequests"] == []
+        assert status["pendingPermissionRequests"] == []
+        assert status["activeTurns"][0]["status"] == "running"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_status_lists_pending_permission_requests_across_threads(tmp_path: Path) -> None:
+    client = ReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    client.handle_server_request(
+        "approval-1",
+        "exec/requestApproval",
+        {"threadId": "thread-one", "turnId": "turn-one", "command": "make test"},
+    )
+    client.handle_server_request(
+        "question-1",
+        "plan/question",
+        {"threadId": "thread-two", "turnId": "turn-two", "text": "Choose"},
+    )
+
+    status = await client.status()
+
+    assert [item["id"] for item in status["pendingRequests"]] == ["approval-1", "question-1"]
+    assert [item["id"] for item in status["pendingPermissionRequests"]] == ["approval-1"]
+    assert [item.id for item in client.pending_permission_requests()] == ["approval-1"]
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_ignores_non_approval_requests(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    received: list[dict[str, Any]] = []
+    server_request_id = "question-1"
+
+    async def after_message(message: dict[str, Any], websocket: Any) -> None:
+        if message.get("method") == "turn/start":
+            await websocket.send(
+                json.dumps(
+                    {
+                        "id": server_request_id,
+                        "method": "plan/question",
+                        "params": {"threadId": "thread-question", "turnId": "turn-question", "text": "Choose"},
+                    }
+                )
+            )
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-question", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-question"}
+        return {"ok": True}
+
+    def permission_callback(request: app_server_client.PendingServerRequest) -> None:
+        received.append(request.to_json())
+        return None
+
+    server = await start_fake_app_server(captured, handler, after_message)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test", permission_callback)
+    try:
+        await client.start_thread({"label": "question"})
+        await client.start_turn({"threadId": "thread-question", "label": "question", "prompt": "work"})
+        await asyncio.sleep(0.05)
+
+        assert received == []
+        status = await client.status()
+        assert status["pendingRequests"][0]["id"] == server_request_id
+        assert status["pendingPermissionRequests"] == []
+        assert not any(message == {"id": server_request_id, "result": None} for message in captured)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-routine"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        saved = await client.save_routine(
+            {
+                "name": "daily-check",
+                "prompt": "Inspect project health.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+                "cwd": "/tmp/routine",
+                "mode": "plan",
+                "model": "gpt-test",
+                "reasoningEffort": "low",
+                "sandboxType": "workspaceWrite",
+                "approvalPolicy": "never",
+            }
+        )
+        assert saved["nativeSupport"] is False
+        assert saved["routine"]["name"] == "daily-check"
+
+        result = await client.run_due_routines()
+        assert result["count"] == 1
+        assert result["results"][0]["threadId"] == "thread-routine"
+        assert result["results"][0]["turnId"] == "turn-routine"
+
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        params = start_request["params"]
+        assert params["threadId"] == "thread-routine"
+        assert params["cwd"] == "/tmp/routine"
+        assert params["sandboxPolicy"] == {"type": "workspaceWrite"}
+        assert params["collaborationMode"]["mode"] == "plan"
+        assert params["collaborationMode"]["settings"]["model"] == "gpt-test"
+        assert params["collaborationMode"]["settings"]["reasoning_effort"] == "low"
+        assert params["input"] == [{"type": "text", "text": "Inspect project health."}]
+
+        second = await client.run_due_routines()
+        assert second["count"] == 0
+
+        stored = await client.read_routine("daily-check")
+        assert stored["routine"]["lastRunDate"]
+        assert stored["routine"]["lastThreadId"] == "thread-routine"
+        assert stored["routine"]["lastTurnId"] == "turn-routine"
+        assert stored["routine"]["lastStatus"] == "started"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_routine_reservation_prevents_duplicate_due_runs(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    first_client = ReadyClient("ws://127.0.0.1:1", state_file, "gpt-test")
+    second_client = ReadyClient("ws://127.0.0.1:1", state_file, "gpt-test")
+    try:
+        await first_client.save_routine(
+            {
+                "name": "daily-check",
+                "prompt": "Inspect project health.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+                "cwd": "/tmp/routine",
+            }
+        )
+
+        reserved = await first_client.reserve_due_routines()
+        assert [routine.name for routine in reserved] == ["daily-check"]
+
+        second = await second_client.run_due_routines()
+        assert second["count"] == 0
+
+        stored = await second_client.read_routine("daily-check")
+        assert stored["routine"]["lastRunDate"]
+        assert stored["routine"]["lastStatus"] == "starting"
+        assert state_file.with_suffix(".json.lock").exists()
+    finally:
+        await first_client.close()
+        await second_client.close()
+
+
 def test_tool_surface_preserves_current_names_and_schemas() -> None:
     tools = build_tools(CodexAppServerClient("ws://127.0.0.1:1"))
     names = [tool.name for tool in tools]
     assert names == [
         "codex_app_server_status",
-        "codex_thread_start",
-        "codex_thread_resume",
-        "codex_thread_list",
-        "codex_thread_read",
-        "codex_turn_start",
-        "codex_turn_progress",
-        "codex_turn_steer",
-        "codex_turn_cancel",
+        "super_agents_start",
+        "super_agents_resume",
+        "super_agents_read",
+        "super_agents_rename",
         "codex_answer_request",
         "super_agents_sessions",
         "super_agents_active",
+        "super_agents_status",
         "super_agents_resolve",
         "super_agents_progress",
         "super_agents_steer",
         "super_agents_cancel",
         "super_agents_start_turn",
+        "super_agents_queue_turn",
         "super_agents_recent",
     ]
     by_name = {tool.name: tool for tool in tools}
-    assert by_name["codex_turn_start"].input_schema["required"] == ["threadId", "prompt"]
+    assert by_name["super_agents_start"].input_schema["required"] == ["name"]
+    assert by_name["super_agents_start_turn"].input_schema["required"] == ["name", "prompt"]
+    assert by_name["super_agents_queue_turn"].input_schema["required"] == ["prompt"]
+    assert "client-side queueing" in by_name["super_agents_queue_turn"].description
+    assert "no separate queued-next-turn API" in by_name["super_agents_start_turn"].description
+    assert "threadId" not in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "reasoningEffort" not in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "reasoningEffort" not in by_name["super_agents_queue_turn"].input_schema["properties"]
+    assert "serviceTier" not in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "serviceTier" not in by_name["super_agents_queue_turn"].input_schema["properties"]
+    assert by_name["super_agents_read"].input_schema["properties"]["includeTurns"]["default"] is False
+    assert "required" not in by_name["super_agents_progress"].input_schema
+    assert "threadId" in by_name["super_agents_progress"].input_schema["properties"]
+    assert by_name["super_agents_active"].input_schema["properties"]["previewLength"]["default"] == 160
     assert by_name["super_agents_active"].annotations == {"readOnlyHint": True, "idempotentHint": True}
     assert by_name["codex_answer_request"].input_schema["required"] == ["requestId", "result"]
 
