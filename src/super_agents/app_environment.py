@@ -8,9 +8,6 @@ import urllib.request
 from .state import JsonObject
 
 LOGIN_ENV_TIMEOUT_SECONDS = 5
-OPENBASE_SUPER_AGENT_THREAD_ID_ENV = "OPENBASE_SUPER_AGENT_THREAD_ID"
-OPENBASE_SUPER_AGENT_LABEL_ENV = "OPENBASE_SUPER_AGENT_LABEL"
-OPENBASE_SUPER_AGENT_AGENT_NAME_ENV = "OPENBASE_SUPER_AGENT_AGENT_NAME"
 
 
 def _check_ready_sync(url: str) -> bool:
@@ -30,10 +27,6 @@ async def login_shell_config_override(
 ) -> JsonObject:
     env = await login_shell_environment()
     set_values = {key: value for key in ["PATH", "SHELL", "HOME", "USER", "LOGNAME"] if (value := env.get(key))}
-    if include_super_agent_identity:
-        set_values[OPENBASE_SUPER_AGENT_THREAD_ID_ENV] = thread_id or ""
-        set_values[OPENBASE_SUPER_AGENT_LABEL_ENV] = label or ""
-        set_values[OPENBASE_SUPER_AGENT_AGENT_NAME_ENV] = agent_name or ""
     return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
 
 

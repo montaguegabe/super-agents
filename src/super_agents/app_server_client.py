@@ -11,9 +11,6 @@ from typing import Any
 
 from .app_environment import (
     LOGIN_ENV_TIMEOUT_SECONDS,
-    OPENBASE_SUPER_AGENT_AGENT_NAME_ENV,
-    OPENBASE_SUPER_AGENT_LABEL_ENV,
-    OPENBASE_SUPER_AGENT_THREAD_ID_ENV,
     login_shell_environment,
     parse_null_separated_env,
     read_login_shell_environment,
@@ -131,9 +128,6 @@ __all__ = [
     "LabelQueryInput",
     "LabelResolutionPrefer",
     "Mode",
-    "OPENBASE_SUPER_AGENT_AGENT_NAME_ENV",
-    "OPENBASE_SUPER_AGENT_LABEL_ENV",
-    "OPENBASE_SUPER_AGENT_THREAD_ID_ENV",
     "PendingServerRequest",
     "PermissionRequestCallback",
     "QueuedTurn",
@@ -220,10 +214,6 @@ async def login_shell_config_override(
 ) -> JsonObject:
     env = await login_shell_environment()
     set_values = {key: value for key in ["PATH", "SHELL", "HOME", "USER", "LOGNAME"] if (value := env.get(key))}
-    if include_super_agent_identity:
-        set_values[OPENBASE_SUPER_AGENT_THREAD_ID_ENV] = thread_id or ""
-        set_values[OPENBASE_SUPER_AGENT_LABEL_ENV] = label or ""
-        set_values[OPENBASE_SUPER_AGENT_AGENT_NAME_ENV] = agent_name or ""
     return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
 
 
@@ -333,9 +323,11 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         dispatch_id = str(input_data.get("_mcpCallId") or "")
         started = time.monotonic()
         logger.info(
-            "dispatch_timing stage=super_agents_thread_start_request dispatch_id=%s name=%s cwd_basename=%s",
+            "dispatch_timing stage=super_agents_thread_start_request dispatch_id=%s "
+            "name=%s agent_name=%s cwd_basename=%s",
             dispatch_id,
             input_data.get("name") or input_data.get("label") or "",
+            input_data.get("agentName") or "",
             path_basename(str(input_data.get("cwd") or Path.home())),
         )
         await self.ensure_connected()
@@ -355,9 +347,12 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         result = await self.request("thread/start", params)
         thread_id = extract_thread_id(result)
         logger.info(
-            "dispatch_timing stage=super_agents_thread_start_response dispatch_id=%s thread_id=%s elapsed_ms=%d",
+            "dispatch_timing stage=super_agents_thread_start_response dispatch_id=%s "
+            "thread_id=%s name=%s agent_name=%s elapsed_ms=%d",
             dispatch_id,
             thread_id or "",
+            name or "",
+            agent_name or "",
             int((time.monotonic() - started) * 1000),
         )
         if thread_id:
@@ -469,10 +464,11 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         started = time.monotonic()
         logger.info(
             "dispatch_timing stage=super_agents_turn_start_request dispatch_id=%s "
-            "thread_id=%s name=%s cwd_basename=%s mode=%s",
+            "thread_id=%s name=%s agent_name=%s cwd_basename=%s mode=%s",
             dispatch_id,
             input_data.get("threadId"),
             input_data.get("name") or input_data.get("label") or "",
+            input_data.get("agentName") or "",
             path_basename(str(input_data.get("cwd") or Path.home())),
             input_data.get("mode") or "default",
         )
@@ -496,6 +492,15 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             else session.agent_name
             if session
             else None
+        )
+        logger.info(
+            "dispatch_timing stage=super_agents_turn_identity_resolved dispatch_id=%s "
+            "thread_id=%s label=%s agent_name=%s session_agent_name=%s",
+            dispatch_id,
+            input_data.get("threadId"),
+            label or "",
+            agent_name or "",
+            session.agent_name if session and session.agent_name else "",
         )
         developer_instructions = with_super_agent_identity_instructions(
             input_data.get("developerInstructions") if "developerInstructions" in input_data else None,

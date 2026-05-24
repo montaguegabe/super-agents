@@ -6,7 +6,8 @@ from .app_formatting import as_object
 from .app_time import age_ms, turn_recency
 from .state import JsonObject, StoredStatus, TrackedStatus, get_string
 
-SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent name:"
+SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent thread name:"
+LEGACY_SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent name:"
 SUPER_AGENT_THREAD_ID_INSTRUCTION_PREFIX = "Super Agent thread id:"
 SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX = "Your name is "
 
@@ -73,6 +74,7 @@ def _is_super_agent_identity_line(line: str) -> bool:
     stripped = line.strip()
     return (
         stripped.startswith(SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX)
+        or stripped.startswith(LEGACY_SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX)
         or stripped.startswith(SUPER_AGENT_THREAD_ID_INSTRUCTION_PREFIX)
         or (
             stripped.startswith(SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX)
