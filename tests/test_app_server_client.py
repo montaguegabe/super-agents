@@ -10,6 +10,7 @@ import pytest
 import websockets
 
 import super_agents.app_server_client as app_server_client
+from super_agents.app_client_transport import websocket_max_size
 from super_agents.app_server_client import CodexAppServerClient
 from super_agents.mcp_server import (
     build_tools,
@@ -24,6 +25,18 @@ from super_agents.mcp_server import (
 class ReadyClient(CodexAppServerClient):
     async def check_ready(self) -> bool:
         return True
+
+
+def test_websocket_max_size_defaults_above_codex_default(monkeypatch) -> None:
+    monkeypatch.delenv("SUPER_AGENTS_WEBSOCKET_MAX_SIZE", raising=False)
+
+    assert websocket_max_size() == 16 * 1024 * 1024
+
+
+def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_WEBSOCKET_MAX_SIZE", "unlimited")
+
+    assert websocket_max_size() is None
 
 
 def test_turn_input_does_not_default_approval_or_sandbox() -> None:
