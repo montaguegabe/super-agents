@@ -401,15 +401,25 @@ def text_tool_result(value: Any, is_error: bool = False) -> types.CallToolResult
 
 
 def clean_thread_input(input_data: JsonObject) -> JsonObject:
+    cwd = optional_string(input_data, "cwd")
+    validate_thread_cwd(cwd)
     return without_none(
         {
-            "cwd": optional_string(input_data, "cwd"),
+            "cwd": cwd,
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
             "agentName": optional_string(input_data, "agentName"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
+
+
+def validate_thread_cwd(cwd: str | None) -> None:
+    if cwd is None:
+        return
+    path = Path(cwd).expanduser()
+    if not path.is_dir():
+        raise ValueError(f"cwd must be an existing directory: {cwd}")
 
 
 def clean_turn_input(input_data: JsonObject) -> JsonObject:
