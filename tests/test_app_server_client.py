@@ -43,7 +43,7 @@ def test_turn_input_does_not_default_approval_or_sandbox() -> None:
     cleaned = clean_turn_input(
         {
             "threadId": "thread-1",
-            "prompt": 'Wait, then run /Users/gabemontague/.local/bin/openbase-coder user say "Done".',
+            "prompt": 'Wait, then run /Users/gabemontague/.local/bin/openbase-coder user say Dottie "Done".',
             "approvalPolicy": "never",
             "sandboxType": "dangerFullAccess",
         }
@@ -145,6 +145,12 @@ def test_explicit_developer_instructions_override_super_agent_default(monkeypatc
 
     assert thread_input["developerInstructions"] == "Explicit instructions."
     assert turn_input["developerInstructions"] == "Explicit turn instructions."
+
+
+def test_start_turn_by_name_input_ignores_agent_name() -> None:
+    cleaned = clean_start_turn_by_name_input({"name": "new-agent", "prompt": "work", "agentName": "Dottie"})
+
+    assert "agentName" not in cleaned
 
 
 def test_explicit_null_suppresses_super_agent_default_for_turns(monkeypatch, tmp_path: Path) -> None:
@@ -254,19 +260,19 @@ async def test_start_turn_sets_super_agent_identity_environment(
         resume_request = next(message for message in captured if message.get("method") == "thread/resume")
         resume_env = resume_request["params"]["config"]["shell_environment_policy"]["set"]
         assert resume_request["params"]["threadId"] == "thread-1"
-        assert resume_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-1"
-        assert resume_env["OPENBASE_SUPER_AGENT_LABEL"] == "Build"
-        assert resume_env["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
+        assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in resume_env
+        assert "OPENBASE_SUPER_AGENT_LABEL" not in resume_env
+        assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in resume_env
 
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         set_env = start_request["params"]["config"]["shell_environment_policy"]["set"]
-        assert set_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-1"
-        assert set_env["OPENBASE_SUPER_AGENT_LABEL"] == "Build"
-        assert set_env["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
+        assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
+        assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
+        assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
         assert set_env["PATH"] == "/usr/bin"
         assert (
             start_request["params"]["collaborationMode"]["settings"]["developer_instructions"]
-            == "Super Agent name: Build\nSuper Agent thread id: thread-1\nYour name is Dottie."
+            == "Super Agent thread name: Build\nSuper Agent thread id: thread-1\nYour name is Dottie."
         )
     finally:
         await client.close()
@@ -301,7 +307,7 @@ async def test_start_turn_continues_when_new_thread_has_no_rollout_to_resume(
         assert result["turnId"] == "turn-1"
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         assert start_request["params"]["collaborationMode"]["settings"]["developer_instructions"] == (
-            "Super Agent name: Build\nSuper Agent thread id: thread-new\nYour name is Dottie."
+            "Super Agent thread name: Build\nSuper Agent thread id: thread-new\nYour name is Dottie."
         )
     finally:
         await client.close()
@@ -309,7 +315,7 @@ async def test_start_turn_continues_when_new_thread_has_no_rollout_to_resume(
 
 
 @pytest.mark.asyncio
-async def test_super_agent_identity_environment_is_scoped_per_config_call(
+async def test_login_shell_config_excludes_legacy_super_agent_identity_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_login_shell_environment() -> dict[str, str]:
@@ -336,27 +342,22 @@ async def test_super_agent_identity_environment_is_scoped_per_config_call(
     )
     cleared = await app_server_client.login_shell_config_override()
 
-    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-a"
-    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == "Agent A"
-    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
-    assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-b"
-    assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == "Agent B"
-    assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_AGENT_NAME"] == ""
-    assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == ""
-    assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == ""
-    assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_AGENT_NAME"] == ""
-    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] != "stale-thread"
+    for config in (first, second, cleared):
+        set_env = config["shell_environment_policy"]["set"]
+        assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
+        assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
+        assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
     assert os.environ["OPENBASE_SUPER_AGENT_THREAD_ID"] == "parent-thread"
     assert os.environ["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Parent Name"
 
 
 def test_super_agent_identity_instructions_replace_stale_identity_lines() -> None:
     assert app_server_client.with_super_agent_identity_instructions(
-        "Base instructions.\n\nSuper Agent name: Old\nSuper Agent thread id: old-thread\nYour name is Old.",
+        "Base instructions.\n\nSuper Agent thread name: Old\nSuper Agent thread id: old-thread\nYour name is Old.",
         "New Agent",
         "new-thread",
         "Dottie",
-    ) == "Base instructions.\n\nSuper Agent name: New Agent\nSuper Agent thread id: new-thread\nYour name is Dottie."
+    ) == "Base instructions.\n\nSuper Agent thread name: New Agent\nSuper Agent thread id: new-thread\nYour name is Dottie."
 
 
 @pytest.mark.asyncio
@@ -418,7 +419,7 @@ async def test_start_thread_appends_super_agent_identity_to_explicit_instruction
 
         start_request = next(message for message in captured if message.get("method") == "thread/start")
         assert start_request["params"]["developerInstructions"] == (
-            "Explicit instructions.\n\nSuper Agent name: Identity Agent\nYour name is Dottie."
+            "Explicit instructions.\n\nSuper Agent thread name: Identity Agent\nYour name is Dottie."
         )
         state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
         assert state["sessions"]["thread-identity"]["agentName"] == "Dottie"
@@ -526,11 +527,11 @@ async def test_resume_thread_does_not_override_codex_approval_or_sandbox_default
         assert "approvalPolicy" not in resume_request["params"]
         assert "sandbox" not in resume_request["params"]
         set_env = resume_request["params"]["config"]["shell_environment_policy"]["set"]
-        assert set_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-resume"
-        assert set_env["OPENBASE_SUPER_AGENT_LABEL"] == "Resume Agent"
-        assert set_env["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
+        assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
+        assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
+        assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
         assert resume_request["params"]["developerInstructions"] == (
-            "Super Agent name: Resume Agent\nSuper Agent thread id: thread-resume\nYour name is Dottie."
+            "Super Agent thread name: Resume Agent\nSuper Agent thread id: thread-resume\nYour name is Dottie."
         )
     finally:
         await client.close()
@@ -1323,6 +1324,7 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert "per-thread filesystem queue" in by_name["super_agents_queue_turn"].description
     assert "no separate queued-next-turn API" in by_name["super_agents_start_turn"].description
     assert "threadId" not in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "agentName" not in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "reasoningEffort" not in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "reasoningEffort" not in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "serviceTier" not in by_name["super_agents_start_turn"].input_schema["properties"]

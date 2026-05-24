@@ -273,10 +273,6 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "agentName": {
-                        "type": "string",
-                        "description": "Optional agent name/persona to store for this thread.",
-                    },
                 },
                 ["name", "prompt"],
             ),
@@ -502,6 +498,7 @@ def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:
 def clean_start_turn_by_name_input(input_data: JsonObject) -> JsonObject:
     cleaned = clean_turn_input({"threadId": "__placeholder__", **input_data})
     cleaned.pop("threadId", None)
+    cleaned.pop("agentName", None)
     cleaned["name"] = required_string(input_data, "name")
     cleaned["label"] = required_string(input_data, "name")
     return cleaned
