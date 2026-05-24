@@ -27,12 +27,6 @@ INSTRUCTIONS = (
     "codex_answer_request when a callback is pending."
 )
 
-ANNOUNCER_PROMPT_MARKERS = (
-    "openbase-coder user say",
-    "openbase_coder_cli user say",
-    "announcer",
-    "announce completion",
-)
 OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "super-agent-instructions.md"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
@@ -127,12 +121,6 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                     "cwd": {
                         "type": "string",
                         "description": "Project working directory. Defaults to the user's home directory.",
-                    },
-                    "approvalPolicy": {"type": "string", "default": "never"},
-                    "sandbox": {
-                        "type": "string",
-                        "enum": ["read-only", "workspace-write", "danger-full-access"],
-                        "default": "danger-full-access",
                     },
                     "developerInstructions": {"type": "string"},
                 },
@@ -278,12 +266,6 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                     **name_query_properties(include_ids=False, include_output_options=False),
                     "prompt": {"type": "string"},
                     "cwd": {"type": "string"},
-                    "approvalPolicy": {"type": "string", "default": "never"},
-                    "sandboxType": {
-                        "type": "string",
-                        "enum": ["readOnly", "workspaceWrite", "dangerFullAccess"],
-                        "default": "dangerFullAccess",
-                    },
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -307,12 +289,6 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                 {
                     **name_query_properties(include_ids=True, include_output_options=False),
                     "prompt": {"type": "string"},
-                    "approvalPolicy": {"type": "string", "default": "never"},
-                    "sandboxType": {
-                        "type": "string",
-                        "enum": ["readOnly", "workspaceWrite", "dangerFullAccess"],
-                        "default": "dangerFullAccess",
-                    },
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -351,12 +327,6 @@ def turn_start_properties() -> JsonObject:
         "threadId": {"type": "string"},
         "prompt": {"type": "string"},
         "cwd": {"type": "string"},
-        "approvalPolicy": {"type": "string", "default": "never"},
-        "sandboxType": {
-            "type": "string",
-            "enum": ["readOnly", "workspaceWrite", "dangerFullAccess"],
-            "default": "dangerFullAccess",
-        },
         "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
         "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
         "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -422,8 +392,6 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
     return without_none(
         {
             "cwd": optional_string(input_data, "cwd"),
-            "approvalPolicy": optional_string(input_data, "approvalPolicy") or "never",
-            "sandbox": optional_string(input_data, "sandbox") or "danger-full-access",
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
@@ -438,8 +406,6 @@ def clean_turn_input(input_data: JsonObject) -> JsonObject:
             "threadId": required_string(input_data, "threadId"),
             "prompt": prompt,
             "cwd": optional_string(input_data, "cwd"),
-            "approvalPolicy": optional_string(input_data, "approvalPolicy") or "never",
-            "sandboxType": turn_sandbox_type(input_data, prompt),
             "mode": optional_mode(input_data, "mode") or "default",
             "model": optional_string(input_data, "model"),
             "reasoningEffort": optional_string(input_data, "reasoningEffort") or default_reasoning_effort(),
@@ -534,21 +500,6 @@ def clean_queue_turn_input(input_data: JsonObject) -> JsonObject:
     return cleaned
 
 
-def turn_sandbox_type(input_data: JsonObject, prompt: str) -> str:
-    requested = optional_string(input_data, "sandboxType") or "dangerFullAccess"
-    searchable = " ".join(
-        value
-        for value in (
-            prompt,
-            optional_nullable_string(input_data, "developerInstructions"),
-        )
-        if value
-    ).lower()
-    if any(marker in searchable for marker in ANNOUNCER_PROMPT_MARKERS):
-        return "dangerFullAccess"
-    return requested
-
-
 def required_string(value: JsonObject, key: str) -> str:
     result = value.get(key)
     if not isinstance(result, str) or not result:
@@ -573,12 +524,6 @@ def required_request_id(value: JsonObject) -> str | int:
 def optional_string(value: JsonObject, key: str) -> str | None:
     result = value.get(key)
     return result if isinstance(result, str) and result else None
-
-
-def optional_nullable_string(value: JsonObject, key: str) -> str | None:
-    if key in value and value[key] is None:
-        return None
-    return optional_string(value, key)
 
 
 def optional_boolean_or_none(value: JsonObject, key: str) -> bool | None:

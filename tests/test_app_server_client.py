@@ -26,16 +26,18 @@ class ReadyClient(CodexAppServerClient):
         return True
 
 
-def test_announcer_turn_input_forces_network_capable_sandbox() -> None:
+def test_turn_input_does_not_default_approval_or_sandbox() -> None:
     cleaned = clean_turn_input(
         {
             "threadId": "thread-1",
             "prompt": 'Wait, then run /Users/gabemontague/.local/bin/openbase-coder user say "Done".',
-            "sandboxType": "workspaceWrite",
+            "approvalPolicy": "never",
+            "sandboxType": "dangerFullAccess",
         }
     )
 
-    assert cleaned["sandboxType"] == "dangerFullAccess"
+    assert "approvalPolicy" not in cleaned
+    assert "sandboxType" not in cleaned
     assert cleaned["reasoningEffort"] == "high"
     assert cleaned["serviceTier"] == "fast"
 
@@ -52,6 +54,19 @@ def test_turn_input_accepts_hidden_reasoning_and_service_tier_overrides() -> Non
 
     assert cleaned["reasoningEffort"] == "low"
     assert cleaned["serviceTier"] == "standard"
+
+
+def test_thread_input_does_not_default_approval_or_sandbox() -> None:
+    cleaned = clean_thread_input(
+        {
+            "name": "new-agent",
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+        }
+    )
+
+    assert "approvalPolicy" not in cleaned
+    assert "sandbox" not in cleaned
 
 
 def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tmp_path: Path) -> None:
@@ -306,6 +321,10 @@ async def test_start_thread_sets_native_app_server_thread_name(tmp_path: Path) -
     try:
         await client.start_thread({"name": "native-name", "cwd": "/tmp/native"})
 
+        start_request = next(message for message in captured if message.get("method") == "thread/start")
+        assert "approvalPolicy" not in start_request["params"]
+        assert "sandbox" not in start_request["params"]
+
         rename_request = next(message for message in captured if message.get("method") == "thread/name/set")
         assert rename_request["params"] == {"threadId": "thread-native", "name": "native-name"}
 
@@ -355,11 +374,35 @@ async def test_start_turn_by_name_resolves_native_app_server_thread_name(
         assert start_request["params"]["threadId"] == "thread-native"
         assert start_request["params"]["cwd"] == "/tmp/native"
         assert start_request["params"]["serviceTier"] == "fast"
+        assert "approvalPolicy" not in start_request["params"]
+        assert "sandboxPolicy" not in start_request["params"]
         messages = [record.getMessage() for record in caplog.records]
         assert any("stage=super_agents_resolve_start" in message for message in messages)
         assert any("stage=super_agents_resolve_end" in message for message in messages)
         assert any("stage=app_server_turn_start_request" in message for message in messages)
         assert any("stage=app_server_turn_start_response" in message for message in messages)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_thread_does_not_override_codex_approval_or_sandbox_defaults(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/resume":
+            return {"thread": {"id": "thread-resume", "model": "gpt-test"}}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.resume_thread("thread-resume")
+
+        resume_request = next(message for message in captured if message.get("method") == "thread/resume")
+        assert "approvalPolicy" not in resume_request["params"]
+        assert "sandbox" not in resume_request["params"]
     finally:
         await client.close()
         await server.close()
@@ -980,8 +1023,6 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
                 "mode": "plan",
                 "model": "gpt-test",
                 "reasoningEffort": "low",
-                "sandboxType": "workspaceWrite",
-                "approvalPolicy": "never",
             }
         )
         assert saved["nativeSupport"] is False
@@ -996,7 +1037,8 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
         params = start_request["params"]
         assert params["threadId"] == "thread-routine"
         assert params["cwd"] == "/tmp/routine"
-        assert params["sandboxPolicy"] == {"type": "workspaceWrite"}
+        assert "approvalPolicy" not in params
+        assert "sandboxPolicy" not in params
         assert params["collaborationMode"]["mode"] == "plan"
         assert params["collaborationMode"]["settings"]["model"] == "gpt-test"
         assert params["collaborationMode"]["settings"]["reasoning_effort"] == "low"
@@ -1072,6 +1114,12 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert by_name["super_agents_start"].input_schema["required"] == ["name"]
     assert by_name["super_agents_start_turn"].input_schema["required"] == ["name", "prompt"]
     assert by_name["super_agents_queue_turn"].input_schema["required"] == ["prompt"]
+    assert "approvalPolicy" not in by_name["super_agents_start"].input_schema["properties"]
+    assert "sandbox" not in by_name["super_agents_start"].input_schema["properties"]
+    assert "approvalPolicy" not in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "sandboxType" not in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "approvalPolicy" not in by_name["super_agents_queue_turn"].input_schema["properties"]
+    assert "sandboxType" not in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "client-side queueing" in by_name["super_agents_queue_turn"].description
     assert "no separate queued-next-turn API" in by_name["super_agents_start_turn"].description
     assert "threadId" not in by_name["super_agents_start_turn"].input_schema["properties"]
