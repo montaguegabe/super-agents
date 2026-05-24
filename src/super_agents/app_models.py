@@ -58,11 +58,16 @@ class TurnState:
 
 @dataclass(slots=True)
 class QueuedTurn:
-    id: int
+    id: str
     thread_id: str
     label: str | None
+    agent_name: str | None
     input_data: JsonObject
     queued_at: str
+    status: str = "queued"
+    started_at: str | None = None
+    attempts: int = 0
+    last_error: str | None = None
 
     def to_json(self) -> JsonObject:
         return without_none(
@@ -70,7 +75,13 @@ class QueuedTurn:
                 "id": self.id,
                 "threadId": self.thread_id,
                 "label": self.label,
+                "agentName": self.agent_name,
+                "inputData": self.input_data,
                 "queuedAt": self.queued_at,
+                "status": self.status,
+                "startedAt": self.started_at,
+                "attempts": self.attempts,
+                "lastError": self.last_error,
                 "promptPreview": preview_text(str(self.input_data.get("prompt") or "")),
             }
         )

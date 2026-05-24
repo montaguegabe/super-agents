@@ -10,7 +10,7 @@ from typing import Any
 
 import websockets
 
-from .app_environment import _check_ready_sync, login_shell_environment, websocket_is_open
+from .app_environment import _check_ready_sync, websocket_is_open
 from .app_formatting import as_object, text_preview
 from .app_models import PendingServerRequest, TurnState
 from .app_permissions import (
@@ -66,17 +66,13 @@ class TransportClientMixin:
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
-        if self._child and self._child.returncode is None:
-            self._child.terminate()
-            try:
-                await asyncio.wait_for(self._child.wait(), timeout=2)
-            except TimeoutError:
-                self._child.kill()
-        self._child = None
 
     async def _connect(self) -> None:
         if not await self.check_ready():
-            await self.start_managed_server()
+            raise RuntimeError(
+                "Codex app-server is not running or not reachable at "
+                f"{self.ws_url}. Start the Openbase-managed codex-app-server service."
+            )
         self._ws = await asyncio.wait_for(
             websockets.connect(self.ws_url, max_size=websocket_max_size()),
             timeout=5,
@@ -90,26 +86,6 @@ class TransportClientMixin:
             },
         )
         await self.send({"method": "initialized", "params": {}})
-
-    async def start_managed_server(self) -> None:
-        env = await login_shell_environment()
-        self._child = await asyncio.create_subprocess_exec(
-            "codex",
-            "app-server",
-            "--listen",
-            self.ws_url,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        asyncio.create_task(self._drain_child_stderr(self._child))
-        started = time.monotonic()
-        while time.monotonic() - started < 10:
-            if await self.check_ready():
-                return
-            await asyncio.sleep(0.25)
-        raise RuntimeError("Codex app-server did not become ready.")
 
     async def check_ready(self) -> bool:
         ready_url = self.ws_url.replace("ws:", "http:", 1).replace("wss:", "https:", 1).rstrip("/") + "/readyz"

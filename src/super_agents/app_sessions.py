@@ -67,6 +67,7 @@ def session_from_patch(value: JsonObject) -> SessionRecord:
             turns = None
     return SessionRecord(
         label=get_string(value, "label"),
+        agent_name=get_string(value, "agentName"),
         thread_id=get_string(value, "threadId") or "",
         cwd=get_string(value, "cwd"),
         group=get_string(value, "group"),
@@ -88,6 +89,7 @@ def session_from_thread(thread: JsonObject, name: str) -> SessionRecord:
     thread_id = extract_thread_id(thread) or ""
     return SessionRecord(
         label=name,
+        agent_name=get_string(thread, "agentName"),
         thread_id=thread_id,
         cwd=extract_thread_cwd(thread),
         last_status=normalize_thread_status(thread) or "unknown",
