@@ -268,38 +268,58 @@ def as_routine_record_map(value: Any) -> dict[str, RoutineRecord]:
         return {}
     routines: dict[str, RoutineRecord] = {}
     for name, raw_routine in value.items():
-        if not isinstance(raw_routine, dict):
-            continue
-        normalized_name = get_string(raw_routine, "name") or str(name)
-        prompt = get_string(raw_routine, "prompt")
-        time_value = get_string(raw_routine, "time")
-        if not prompt or not time_value:
-            continue
-        routine = RoutineRecord(
-            name=normalized_name,
-            prompt=prompt,
-            time=time_value,
-            timezone=get_string(raw_routine, "timezone"),
-            enabled=raw_routine.get("enabled") if isinstance(raw_routine.get("enabled"), bool) else True,
-            target_name=get_string(raw_routine, "targetName"),
-            thread_id=get_string(raw_routine, "threadId"),
-            cwd=get_string(raw_routine, "cwd"),
-            mode=as_mode(get_string(raw_routine, "mode")),
-            model=get_string(raw_routine, "model"),
-            reasoning_effort=get_string(raw_routine, "reasoningEffort"),
-            service_tier=get_string(raw_routine, "serviceTier"),
-            developer_instructions=get_string(raw_routine, "developerInstructions"),
-            created_at=get_string(raw_routine, "createdAt"),
-            updated_at=get_string(raw_routine, "updatedAt") or "1970-01-01T00:00:00.000Z",
-            last_run_date=get_string(raw_routine, "lastRunDate"),
-            last_started_at=get_string(raw_routine, "lastStartedAt"),
-            last_thread_id=get_string(raw_routine, "lastThreadId"),
-            last_turn_id=get_string(raw_routine, "lastTurnId"),
-            last_status=get_string(raw_routine, "lastStatus"),
-            last_error=get_string(raw_routine, "lastError"),
+        routine = routine_record_from_json(
+            raw_routine,
+            name_fallback=str(name),
+            require_prompt_time=True,
         )
-        routines[normalized_name] = routine
+        if routine is None:
+            continue
+        routines[routine.name] = routine
     return routines
+
+
+def routine_record_from_json(
+    value: Any,
+    *,
+    name_fallback: str = "",
+    default_time: str = "09:00",
+    default_timezone: str | None = None,
+    default_updated_at: str = "1970-01-01T00:00:00.000Z",
+    require_prompt_time: bool = False,
+) -> RoutineRecord | None:
+    if not isinstance(value, dict):
+        return None
+
+    name = get_string(value, "name") or name_fallback
+    prompt = get_string(value, "prompt") or ""
+    time_value = get_string(value, "time") or default_time
+    if require_prompt_time and (not prompt or not get_string(value, "time")):
+        return None
+
+    return RoutineRecord(
+        name=name,
+        prompt=prompt,
+        time=time_value,
+        timezone=get_string(value, "timezone") or default_timezone,
+        enabled=value.get("enabled") if isinstance(value.get("enabled"), bool) else True,
+        target_name=get_string(value, "targetName"),
+        thread_id=get_string(value, "threadId"),
+        cwd=get_string(value, "cwd"),
+        mode=as_mode(get_string(value, "mode")),
+        model=get_string(value, "model"),
+        reasoning_effort=get_string(value, "reasoningEffort"),
+        service_tier=get_string(value, "serviceTier"),
+        developer_instructions=get_string(value, "developerInstructions"),
+        created_at=get_string(value, "createdAt"),
+        updated_at=get_string(value, "updatedAt") or default_updated_at,
+        last_run_date=get_string(value, "lastRunDate"),
+        last_started_at=get_string(value, "lastStartedAt"),
+        last_thread_id=get_string(value, "lastThreadId"),
+        last_turn_id=get_string(value, "lastTurnId"),
+        last_status=get_string(value, "lastStatus"),
+        last_error=get_string(value, "lastError"),
+    )
 
 
 def get_string(value: JsonObject, key: str) -> str | None:
