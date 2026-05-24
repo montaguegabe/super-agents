@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
+import time
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import mcp.server.stdio
@@ -14,12 +19,23 @@ from .app_server_client import CodexAppServerClient, LabelQueryInput
 
 JsonObject = dict[str, Any]
 Handler = Callable[[JsonObject], Awaitable[Any]]
+logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
     "Control local Codex app-server threads asynchronously. Tools start, inspect, steer, cancel, and answer "
     "callbacks; they do not wait for turns to finish. Do not silently approve app-server callbacks; use "
     "codex_answer_request when a callback is pending."
 )
+
+ANNOUNCER_PROMPT_MARKERS = (
+    "openbase-coder user say",
+    "openbase_coder_cli user say",
+    "announcer",
+    "announce completion",
+)
+OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
+SUPER_AGENT_INSTRUCTIONS_FILENAME = "super-agent-instructions.md"
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 
 @dataclass(slots=True)
@@ -54,13 +70,38 @@ def create_server(client: CodexAppServerClient | None = None) -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
+        started = time.monotonic()
+        mcp_call_id = f"mcp-{uuid.uuid4().hex[:12]}"
+        safe_arguments = dict(arguments or {})
+        safe_arguments["_mcpCallId"] = mcp_call_id
+        logger.info(
+            "dispatch_timing stage=mcp_tool_request mcp_call_id=%s tool=%s name=%s cwd_basename=%s",
+            mcp_call_id,
+            name,
+            safe_arguments.get("name") or safe_arguments.get("label") or "",
+            _cwd_basename(safe_arguments.get("cwd")),
+        )
         try:
             tool = tool_by_name.get(name)
             if not tool:
                 raise ValueError(f"Unknown tool: {name}")
-            output = await tool.handler(arguments or {})
+            output = await tool.handler(safe_arguments)
+            logger.info(
+                "dispatch_timing stage=mcp_tool_response mcp_call_id=%s tool=%s elapsed_ms=%d status=ok",
+                mcp_call_id,
+                name,
+                int((time.monotonic() - started) * 1000),
+            )
             return text_tool_result(output)
         except Exception as exc:
+            logger.info(
+                "dispatch_timing stage=mcp_tool_response mcp_call_id=%s tool=%s "
+                "elapsed_ms=%d status=error error_type=%s",
+                mcp_call_id,
+                name,
+                int((time.monotonic() - started) * 1000),
+                type(exc).__name__,
+            )
             return text_tool_result({"error": str(exc)}, is_error=True)
 
     return server
@@ -77,12 +118,16 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
             handler=lambda _input: client.status(),
         ),
         ToolDefinition(
-            name="codex_thread_start",
-            title="Start Codex Thread",
-            description="Create a Codex app-server thread and optionally remember a human label for it.",
+            name="super_agents_start",
+            title="Start Super Agents Thread",
+            description="Create a named Codex app-server thread using Codex's native thread-name store.",
             input_schema=object_schema(
                 {
-                    "cwd": {"type": "string", "description": "Project working directory. Defaults to the user's home directory."},
+                    "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
+                    "cwd": {
+                        "type": "string",
+                        "description": "Project working directory. Defaults to the user's home directory.",
+                    },
                     "approvalPolicy": {"type": "string", "default": "never"},
                     "sandbox": {
                         "type": "string",
@@ -90,82 +135,46 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                         "default": "danger-full-access",
                     },
                     "developerInstructions": {"type": "string"},
-                    "label": {"type": "string", "description": "Friendly label stored by Super Agents for later lookup."},
-                    "group": {"type": "string", "description": "Optional group name for related Super Agents sessions."},
-                }
+                },
+                ["name"],
             ),
             handler=lambda input_data: client.start_thread(clean_thread_input(input_data)),
         ),
         ToolDefinition(
-            name="codex_thread_resume",
-            title="Resume Codex Thread",
-            description="Resume an existing Codex thread and refresh the local session record.",
-            input_schema=object_schema({"threadId": {"type": "string"}}, ["threadId"]),
+            name="super_agents_resume",
+            title="Resume Super Agents Thread",
+            description="Resume a named Codex app-server thread.",
+            input_schema=name_query_schema(["name"]),
             annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.resume_thread(required_string(input_data, "threadId")),
+            handler=lambda input_data: client.resume_by_label(clean_name_query_input(input_data)),
         ),
         ToolDefinition(
-            name="codex_thread_list",
-            title="List Codex Threads",
-            description="List known Codex threads from the app server.",
-            input_schema=object_schema({"useStateDbOnly": {"type": "boolean", "default": True}}),
-            annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.list_threads(optional_boolean(input_data, "useStateDbOnly", True)),
-        ),
-        ToolDefinition(
-            name="codex_thread_read",
-            title="Read Codex Thread",
-            description="Read a Codex thread, optionally including turns.",
+            name="super_agents_read",
+            title="Read Super Agents Thread",
+            description="Read a named or id-addressed Codex app-server thread. Compact by default; pass includeTurns=true to include full turns.",
             input_schema=object_schema(
-                {"threadId": {"type": "string"}, "includeTurns": {"type": "boolean", "default": True}},
-                ["threadId"],
+                {**name_query_properties(), "includeTurns": {"type": "boolean", "default": False}},
             ),
             annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.read_thread(
-                required_string(input_data, "threadId"),
-                optional_boolean(input_data, "includeTurns", True),
+            handler=lambda input_data: client.read_by_label(
+                clean_name_query_input(input_data),
+                optional_boolean(input_data, "includeTurns", False),
             ),
         ),
         ToolDefinition(
-            name="codex_turn_start",
-            title="Start Codex Turn",
-            description="Start a normal or plan-mode turn on an existing Codex thread and return immediately with the turn id.",
-            input_schema=object_schema(turn_start_properties(), ["threadId", "prompt"]),
-            handler=lambda input_data: client.start_turn(clean_turn_input(input_data)),
-        ),
-        ToolDefinition(
-            name="codex_turn_progress",
-            title="Check Codex Turn Progress",
-            description="Check the current state of a turn without waiting for it to finish.",
-            input_schema=object_schema({"threadId": {"type": "string"}, "turnId": {"type": "string"}}, ["threadId", "turnId"]),
-            annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.turn_progress(
-                required_string(input_data, "threadId"),
-                required_string(input_data, "turnId"),
-            ),
-        ),
-        ToolDefinition(
-            name="codex_turn_steer",
-            title="Steer Codex Turn",
-            description="Send steering input to an active running Codex turn.",
+            name="super_agents_rename",
+            title="Rename Super Agents Thread",
+            description="Rename a Codex app-server thread using its current name.",
             input_schema=object_schema(
-                {"threadId": {"type": "string"}, "turnId": {"type": "string"}, "prompt": {"type": "string"}},
-                ["threadId", "turnId", "prompt"],
+                {
+                    **name_query_properties(include_ids=False, include_output_options=False),
+                    "newName": {"type": "string"},
+                },
+                ["name", "newName"],
             ),
-            handler=lambda input_data: client.steer_turn(
-                required_string(input_data, "threadId"),
-                required_string(input_data, "turnId"),
-                required_string(input_data, "prompt"),
-            ),
-        ),
-        ToolDefinition(
-            name="codex_turn_cancel",
-            title="Cancel Codex Turn",
-            description="Interrupt a running Codex turn.",
-            input_schema=object_schema({"threadId": {"type": "string"}, "turnId": {"type": "string"}}, ["threadId", "turnId"]),
-            handler=lambda input_data: client.cancel_turn(
-                required_string(input_data, "threadId"),
-                required_string(input_data, "turnId"),
+            handler=lambda input_data: client.rename_by_label(
+                clean_name_query_input(input_data),
+                required_string(input_data, "newName"),
             ),
         ),
         ToolDefinition(
@@ -182,12 +191,14 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                 },
                 ["requestId", "result"],
             ),
-            handler=lambda input_data: client.answer_request(required_request_id(input_data), required_object(input_data, "result")),
+            handler=lambda input_data: client.answer_request(
+                required_request_id(input_data), required_object(input_data, "result")
+            ),
         ),
         ToolDefinition(
             name="super_agents_sessions",
             title="Super Agents Sessions",
-            description="List thread labels remembered by this MCP wrapper.",
+            description="List named Codex app-server threads.",
             input_schema=object_schema({}),
             annotations={"readOnlyHint": True, "idempotentHint": True},
             handler=lambda _input: client.sessions(),
@@ -195,51 +206,76 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_active",
             title="Active Super Agents",
-            description="List active tracked Super Agents with labels, cwd, thread ids, running turn ids, status, age, and previews.",
-            input_schema=label_query_schema(),
+            description=(
+                "List active tracked Super Agents with names, cwd, status, age, and short previews. "
+                "Previews default to 160 chars; pass previewLength or includePreview=false to control them."
+            ),
+            input_schema=name_query_schema(),
             annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.active(clean_label_query_input(input_data)),
+            handler=lambda input_data: client.active(clean_name_query_input(input_data)),
+        ),
+        ToolDefinition(
+            name="super_agents_status",
+            title="Super Agents Compact Status",
+            description=(
+                "Compact status list for voice/status checks. Returns active threads by default with name, thread id, "
+                "turn id, status, update times, pending request count, cwd, and stale indicators. No transcripts, diffs, or previews."
+            ),
+            input_schema=name_query_schema(),
+            annotations={"readOnlyHint": True, "idempotentHint": True},
+            handler=lambda input_data: client.compact_status(clean_name_query_input(input_data)),
         ),
         ToolDefinition(
             name="super_agents_resolve",
-            title="Resolve Super Agents Label",
-            description="Resolve a label to the latest active matching Super Agents thread and turn by default.",
-            input_schema=label_query_schema(["label"]),
+            title="Resolve Super Agents Name",
+            description="Resolve a thread name to the latest active matching Super Agents session by default.",
+            input_schema=name_query_schema(["name"]),
             annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.resolve_label(clean_label_query_input(input_data)),
+            handler=lambda input_data: client.resolve_label(clean_name_query_input(input_data)),
         ),
         ToolDefinition(
             name="super_agents_progress",
-            title="Super Agents Progress By Label",
-            description="Check progress for the latest active Super Agents turn matching a label.",
-            input_schema=label_query_schema(["label"]),
+            title="Super Agents Progress By Name",
+            description=(
+                "Check progress for a Super Agents turn by name or threadId/turnId. Compact by default: status, summary, "
+                "pending requests, and stale indicators only. Pass full=true for raw turn/tracked-turn output; includeTurn=true "
+                "or includeItems=true for bounded extra details."
+            ),
+            input_schema=name_query_schema(),
             annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.progress_by_label(clean_label_query_input(input_data)),
+            handler=lambda input_data: client.progress_by_label(clean_name_query_input(input_data)),
         ),
         ToolDefinition(
             name="super_agents_steer",
-            title="Steer Super Agents By Label",
-            description="Send steering input to the latest active Super Agents turn matching a label.",
-            input_schema=object_schema({**label_query_properties(), "prompt": {"type": "string"}}, ["label", "prompt"]),
+            title="Steer Super Agents By Name",
+            description="Send steering input to the latest active Super Agents turn matching a thread name.",
+            input_schema=object_schema(
+                {**name_query_properties(include_output_options=False), "prompt": {"type": "string"}},
+                ["name", "prompt"],
+            ),
             handler=lambda input_data: client.steer_by_label(
-                clean_label_query_input(input_data),
+                clean_name_query_input(input_data),
                 required_string(input_data, "prompt"),
             ),
         ),
         ToolDefinition(
             name="super_agents_cancel",
-            title="Cancel Super Agents By Label",
-            description="Cancel the latest active Super Agents turn matching a label.",
-            input_schema=label_query_schema(["label"]),
-            handler=lambda input_data: client.cancel_by_label(clean_label_query_input(input_data)),
+            title="Cancel Super Agents By Name",
+            description="Cancel the latest active Super Agents turn matching a thread name.",
+            input_schema=name_query_schema(["name"]),
+            handler=lambda input_data: client.cancel_by_label(clean_name_query_input(input_data)),
         ),
         ToolDefinition(
             name="super_agents_start_turn",
-            title="Start Super Agents Turn By Label",
-            description="Start a follow-up turn on the latest matching Super Agents thread for a label.",
+            title="Start Super Agents Turn By Name",
+            description=(
+                "Submit follow-up input to the latest matching named thread using Codex app-server turn/start. "
+                "There is no separate queued-next-turn API; app-server decides whether this starts a new turn "
+                "or is accepted as pending input for the current active turn."
+            ),
             input_schema=object_schema(
                 {
-                    **label_query_properties(),
+                    **name_query_properties(include_ids=False, include_output_options=False),
                     "prompt": {"type": "string"},
                     "cwd": {"type": "string"},
                     "approvalPolicy": {"type": "string", "default": "never"},
@@ -250,29 +286,61 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                     },
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
-                    "reasoningEffort": {"type": "string", "default": "medium"},
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
-                ["label", "prompt"],
+                ["name", "prompt"],
             ),
             handler=lambda input_data: client.start_turn_by_label(
-                clean_label_query_input({**input_data, "label": required_string(input_data, "label")}),
-                clean_start_turn_by_label_input(input_data),
+                clean_name_query_input(input_data),
+                clean_start_turn_by_name_input(input_data),
+            ),
+        ),
+        ToolDefinition(
+            name="super_agents_queue_turn",
+            title="Queue Super Agents Turn",
+            description=(
+                "Queue a follow-up prompt in Super Agents memory so it starts as a separate turn after the target "
+                "thread's active turn finishes. This is client-side queueing, matching Codex CLI behavior; Codex "
+                "app-server does not expose native queued-next-turn semantics for normal user prompts."
+            ),
+            input_schema=object_schema(
+                {
+                    **name_query_properties(include_ids=True, include_output_options=False),
+                    "prompt": {"type": "string"},
+                    "approvalPolicy": {"type": "string", "default": "never"},
+                    "sandboxType": {
+                        "type": "string",
+                        "enum": ["readOnly", "workspaceWrite", "dangerFullAccess"],
+                        "default": "dangerFullAccess",
+                    },
+                    "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
+                    "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
+                    "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                },
+                ["prompt"],
+            ),
+            handler=lambda input_data: client.queue_turn_by_label(
+                clean_name_query_input(input_data),
+                clean_queue_turn_input(input_data),
             ),
         ),
         ToolDefinition(
             name="super_agents_recent",
             title="Recent Super Agents",
-            description="List recent tracked Super Agents by label, cwd, group, and status.",
-            input_schema=label_query_schema(),
+            description="List recent named Codex app-server threads.",
+            input_schema=name_query_schema(),
             annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.recent(clean_label_query_input(input_data)),
+            handler=lambda input_data: client.recent(clean_name_query_input(input_data)),
         ),
     ]
 
 
 def object_schema(properties: JsonObject, required: list[str] | None = None) -> JsonObject:
-    schema: JsonObject = {"$schema": "http://json-schema.org/draft-07/schema#", "type": "object", "properties": properties}
+    schema: JsonObject = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": properties,
+    }
     if required:
         schema["required"] = required
     return schema
@@ -291,28 +359,56 @@ def turn_start_properties() -> JsonObject:
         },
         "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
         "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
-        "reasoningEffort": {"type": "string", "default": "medium"},
         "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        "label": {"type": "string"},
-        "group": {"type": "string"},
+        "name": {"type": "string"},
     }
 
 
-def label_query_properties() -> JsonObject:
-    return {
-        "label": {"type": "string"},
+def name_query_properties(include_ids: bool = True, include_output_options: bool = True) -> JsonObject:
+    properties: JsonObject = {
+        "name": {"type": "string"},
         "cwd": {"type": "string"},
-        "group": {"type": "string"},
         "status": {"type": "string", "enum": ["running", "waiting", "completed", "failed", "cancelled", "unknown"]},
         "limit": {"type": "number"},
         "includeInactive": {"type": "boolean", "default": False},
         "prefer": {"type": "string", "enum": ["latest_active", "latest_any"], "default": "latest_active"},
-        "turnId": {"type": "string"},
     }
+    if include_ids:
+        properties.update(
+            {
+                "threadId": {
+                    "type": "string",
+                    "description": "Inspect a specific app-server thread without resolving a name.",
+                },
+                "turnId": {
+                    "type": "string",
+                    "description": "Inspect a specific app-server turn when used with name or threadId.",
+                },
+            }
+        )
+    if include_output_options:
+        properties.update(
+            {
+                "includePreview": {"type": "boolean", "default": True},
+                "previewLength": {"type": "number", "default": 160},
+                "includeTurn": {"type": "boolean", "default": False},
+                "includeItems": {"type": "boolean", "default": False},
+                "full": {"type": "boolean", "default": False},
+                "finalOnly": {"type": "boolean", "default": False},
+                "maxItems": {"type": "number", "default": 10},
+                "maxOutputChars": {"type": "number", "default": 1200},
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional top-level field allowlist for concise output.",
+                },
+            }
+        )
+    return properties
 
 
-def label_query_schema(required: list[str] | None = None) -> JsonObject:
-    return object_schema(label_query_properties(), required)
+def name_query_schema(required: list[str] | None = None) -> JsonObject:
+    return object_schema(name_query_properties(), required)
 
 
 def text_tool_result(value: Any, is_error: bool = False) -> types.CallToolResult:
@@ -328,49 +424,129 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
             "cwd": optional_string(input_data, "cwd"),
             "approvalPolicy": optional_string(input_data, "approvalPolicy") or "never",
             "sandbox": optional_string(input_data, "sandbox") or "danger-full-access",
-            "developerInstructions": optional_string(input_data, "developerInstructions"),
-            "label": optional_string(input_data, "label"),
-            "group": optional_string(input_data, "group"),
+            "developerInstructions": developer_instructions_or_default(input_data),
+            "name": optional_string(input_data, "name"),
+            "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
 
 
 def clean_turn_input(input_data: JsonObject) -> JsonObject:
+    prompt = required_string(input_data, "prompt")
     return without_none(
         {
             "threadId": required_string(input_data, "threadId"),
-            "prompt": required_string(input_data, "prompt"),
+            "prompt": prompt,
             "cwd": optional_string(input_data, "cwd"),
             "approvalPolicy": optional_string(input_data, "approvalPolicy") or "never",
-            "sandboxType": optional_string(input_data, "sandboxType") or "dangerFullAccess",
+            "sandboxType": turn_sandbox_type(input_data, prompt),
             "mode": optional_mode(input_data, "mode") or "default",
             "model": optional_string(input_data, "model"),
-            "reasoningEffort": optional_string(input_data, "reasoningEffort") or "medium",
-            "developerInstructions": optional_nullable_string(input_data, "developerInstructions"),
-            "label": optional_string(input_data, "label"),
-            "group": optional_string(input_data, "group"),
+            "reasoningEffort": optional_string(input_data, "reasoningEffort") or default_reasoning_effort(),
+            "serviceTier": optional_string(input_data, "serviceTier") or "fast",
+            "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
+            "name": optional_string(input_data, "name"),
+            "label": optional_string(input_data, "name") or optional_string(input_data, "label"),
+            "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
 
 
-def clean_label_query_input(input_data: JsonObject) -> LabelQueryInput:
+def developer_instructions_or_default(input_data: JsonObject, allow_explicit_null: bool = False) -> str | None:
+    if "developerInstructions" in input_data:
+        if input_data["developerInstructions"] is None and allow_explicit_null:
+            return None
+        return optional_string(input_data, "developerInstructions")
+    return default_super_agent_instructions()
+
+
+def default_super_agent_instructions() -> str | None:
+    path = default_super_agent_instructions_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+    return text if text.strip() else None
+
+
+def default_super_agent_instructions_path() -> Path:
+    if configured := os.environ.get("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH"):
+        return Path(configured).expanduser()
+    if codex_home := os.environ.get("CODEX_HOME"):
+        return Path(codex_home).expanduser() / SUPER_AGENT_INSTRUCTIONS_FILENAME
+    return Path.home() / ".openbase" / "codex_home" / SUPER_AGENT_INSTRUCTIONS_FILENAME
+
+
+def default_reasoning_effort() -> str:
+    config_path = Path(
+        os.environ.get("SUPER_AGENTS_DEFAULT_CONFIG_PATH")
+        or os.environ.get("LIVEKIT_DISPATCHER_CONFIG_PATH")
+        or OPENBASE_DISPATCHER_CONFIG_PATH
+    )
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return "high"
+    if not isinstance(payload, dict):
+        return "high"
+    value = payload.get("super_agents_reasoning_effort") or payload.get("superAgentsReasoningEffort")
+    return value if isinstance(value, str) and value in REASONING_EFFORTS else "high"
+
+
+def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:
     return LabelQueryInput(
-        label=optional_string(input_data, "label"),
+        label=optional_string(input_data, "name") or optional_string(input_data, "label"),
         cwd=optional_string(input_data, "cwd"),
-        group=optional_string(input_data, "group"),
         status=optional_string(input_data, "status"),
         limit=optional_number(input_data, "limit"),
         include_inactive=optional_boolean_or_none(input_data, "includeInactive"),
         prefer=optional_prefer(input_data, "prefer"),
+        thread_id=optional_string(input_data, "threadId"),
         turn_id=optional_string(input_data, "turnId"),
+        include_turn=optional_boolean_or_none(input_data, "includeTurn"),
+        include_items=optional_boolean_or_none(input_data, "includeItems"),
+        full=optional_boolean_or_none(input_data, "full"),
+        final_only=optional_boolean_or_none(input_data, "finalOnly"),
+        max_items=optional_number(input_data, "maxItems"),
+        max_output_chars=optional_number(input_data, "maxOutputChars"),
+        include_preview=optional_boolean_or_none(input_data, "includePreview"),
+        preview_length=optional_number(input_data, "previewLength"),
+        fields=optional_string_array(input_data, "fields"),
     )
 
 
-def clean_start_turn_by_label_input(input_data: JsonObject) -> JsonObject:
+def clean_start_turn_by_name_input(input_data: JsonObject) -> JsonObject:
     cleaned = clean_turn_input({"threadId": "__placeholder__", **input_data})
     cleaned.pop("threadId", None)
-    cleaned["label"] = required_string(input_data, "label")
+    cleaned["name"] = required_string(input_data, "name")
+    cleaned["label"] = required_string(input_data, "name")
     return cleaned
+
+
+def clean_queue_turn_input(input_data: JsonObject) -> JsonObject:
+    if not optional_string(input_data, "name") and not optional_string(input_data, "threadId"):
+        raise ValueError("name or threadId must be provided.")
+    cleaned = clean_turn_input({"threadId": optional_string(input_data, "threadId") or "__placeholder__", **input_data})
+    cleaned.pop("threadId", None)
+    if name := optional_string(input_data, "name"):
+        cleaned["name"] = name
+        cleaned["label"] = name
+    return cleaned
+
+
+def turn_sandbox_type(input_data: JsonObject, prompt: str) -> str:
+    requested = optional_string(input_data, "sandboxType") or "dangerFullAccess"
+    searchable = " ".join(
+        value
+        for value in (
+            prompt,
+            optional_nullable_string(input_data, "developerInstructions"),
+        )
+        if value
+    ).lower()
+    if any(marker in searchable for marker in ANNOUNCER_PROMPT_MARKERS):
+        return "dangerFullAccess"
+    return requested
 
 
 def required_string(value: JsonObject, key: str) -> str:
@@ -432,6 +608,19 @@ def optional_prefer(value: JsonObject, key: str) -> str | None:
     return result if result in {"latest_active", "latest_any"} else None
 
 
+def optional_string_array(value: JsonObject, key: str) -> list[str] | None:
+    result = value.get(key)
+    if not isinstance(result, list):
+        return None
+    return [item for item in result if isinstance(item, str) and item]
+
+
+def _cwd_basename(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    return value.rstrip("/").rsplit("/", 1)[-1]
+
+
 def without_none(value: JsonObject) -> JsonObject:
     return {key: item for key, item in value.items() if item is not None}
 
@@ -455,6 +644,7 @@ async def run_stdio() -> None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     print("Super Agents MCP running on stdio.", file=__import__("sys").stderr)
     asyncio.run(run_stdio())
 
