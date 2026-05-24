@@ -84,6 +84,32 @@ def test_thread_input_does_not_default_approval_or_sandbox() -> None:
     assert cleaned["agentName"] == "Dottie"
 
 
+def test_thread_input_rejects_missing_cwd(tmp_path: Path) -> None:
+    missing_cwd = tmp_path / "missing"
+
+    with pytest.raises(ValueError, match="cwd must be an existing directory"):
+        clean_thread_input({"name": "new-agent", "cwd": str(missing_cwd)})
+
+
+@pytest.mark.asyncio
+async def test_start_tool_rejects_missing_cwd_before_client_start(tmp_path: Path) -> None:
+    class RecordingClient(CodexAppServerClient):
+        called = False
+
+        async def start_thread(self, input_data: dict[str, Any]) -> dict[str, Any]:
+            self.called = True
+            return {"threadId": "unexpected"}
+
+    missing_cwd = tmp_path / "missing"
+    client = RecordingClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    tool = next(tool for tool in build_tools(client) if tool.name == "super_agents_start")
+
+    with pytest.raises(ValueError, match="cwd must be an existing directory"):
+        await tool.handler({"name": "new-agent", "cwd": str(missing_cwd)})
+
+    assert client.called is False
+
+
 def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({"super_agents_reasoning_effort": "low"}), encoding="utf-8")
