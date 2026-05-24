@@ -30,6 +30,7 @@ from .state import (
     as_stored_status,
     get_string,
     read_state_file_locked,
+    routine_record_from_json,
     update_state_file,
 )
 
@@ -2155,29 +2156,14 @@ def session_from_thread(thread: JsonObject, name: str) -> SessionRecord:
 
 
 def routine_from_patch(value: JsonObject) -> RoutineRecord:
-    return RoutineRecord(
-        name=get_string(value, "name") or "",
-        prompt=get_string(value, "prompt") or "",
-        time=get_string(value, "time") or "09:00",
-        timezone=get_string(value, "timezone") or DEFAULT_ROUTINE_TIMEZONE,
-        enabled=value.get("enabled") if isinstance(value.get("enabled"), bool) else True,
-        target_name=get_string(value, "targetName"),
-        thread_id=get_string(value, "threadId"),
-        cwd=get_string(value, "cwd"),
-        mode=as_mode(get_string(value, "mode")),
-        model=get_string(value, "model"),
-        reasoning_effort=get_string(value, "reasoningEffort"),
-        service_tier=get_string(value, "serviceTier"),
-        developer_instructions=get_string(value, "developerInstructions"),
-        created_at=get_string(value, "createdAt"),
-        updated_at=get_string(value, "updatedAt") or iso_now(),
-        last_run_date=get_string(value, "lastRunDate"),
-        last_started_at=get_string(value, "lastStartedAt"),
-        last_thread_id=get_string(value, "lastThreadId"),
-        last_turn_id=get_string(value, "lastTurnId"),
-        last_status=get_string(value, "lastStatus"),
-        last_error=get_string(value, "lastError"),
+    routine = routine_record_from_json(
+        value,
+        default_timezone=DEFAULT_ROUTINE_TIMEZONE,
+        default_updated_at=iso_now(),
     )
+    if routine is None:
+        raise ValueError("Invalid routine payload.")
+    return routine
 
 
 def routine_turn_input(routine: RoutineRecord) -> JsonObject:
