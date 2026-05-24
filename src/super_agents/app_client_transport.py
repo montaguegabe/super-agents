@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -25,6 +26,24 @@ from .app_time import iso_now, turn_key
 from .state import JsonObject
 
 logger = logging.getLogger(__name__)
+DEFAULT_WEBSOCKET_MAX_SIZE = 16 * 1024 * 1024
+
+
+def websocket_max_size() -> int | None:
+    raw = os.environ.get("SUPER_AGENTS_WEBSOCKET_MAX_SIZE")
+    if raw is None or raw.strip() == "":
+        return DEFAULT_WEBSOCKET_MAX_SIZE
+    if raw.lower() in {"none", "unlimited", "0"}:
+        return None
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid SUPER_AGENTS_WEBSOCKET_MAX_SIZE=%r; using default %s",
+            raw,
+            DEFAULT_WEBSOCKET_MAX_SIZE,
+        )
+        return DEFAULT_WEBSOCKET_MAX_SIZE
 
 
 class TransportClientMixin:
@@ -58,7 +77,10 @@ class TransportClientMixin:
     async def _connect(self) -> None:
         if not await self.check_ready():
             await self.start_managed_server()
-        self._ws = await asyncio.wait_for(websockets.connect(self.ws_url), timeout=5)
+        self._ws = await asyncio.wait_for(
+            websockets.connect(self.ws_url, max_size=websocket_max_size()),
+            timeout=5,
+        )
         self._reader_task = asyncio.create_task(self._reader_loop())
         await self.request(
             "initialize",
