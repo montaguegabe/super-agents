@@ -39,6 +39,8 @@ The server starts `codex app-server` automatically when it cannot reach the conf
 - `SUPER_AGENTS_MODEL`: fallback model for plan/default collaboration settings. Defaults to `gpt-5.4`.
 - `SUPER_AGENTS_STATE_FILE`: optional JSON state file for local turn metadata.
 
+Super Agents MCP tools do not accept or set approval or sandbox options on app-server thread/turn requests. Codex uses the defaults from the configured Codex home.
+
 ## Tools
 
 - `codex_app_server_status`: check local app-server readiness and websocket connection with compact active-turn summaries.
@@ -62,7 +64,7 @@ Codex app-server 0.133.0 does not expose a separate queued-next-turn method. Its
 
 Codex app-server also does not expose native routine storage, cron-like scheduled prompts, or persisted scheduled task execution. Super Agents routines are stored in the local Super Agents state file and managed through the Openbase Coder CLI and console, not the MCP tool surface. Routine execution ultimately calls the same app-server `turn/start` path as other Super Agents turns.
 
-Routine fields include `name`, `prompt`, daily `time` in `HH:MM` format, `timezone` (default `America/New_York`), `enabled`, `targetName` or `threadId`, `cwd`, `mode`, `model`, `reasoningEffort`, `approvalPolicy`, `sandboxType`, `serviceTier`, and optional `developerInstructions`. If a routine has no existing target thread, Super Agents starts a thread named after the routine and then starts the turn.
+Routine fields include `name`, `prompt`, daily `time` in `HH:MM` format, `timezone` (default `America/New_York`), `enabled`, `targetName` or `threadId`, `cwd`, `mode`, `model`, `reasoningEffort`, `serviceTier`, and optional `developerInstructions`. If a routine has no existing target thread, Super Agents starts a thread named after the routine and then starts the turn.
 
 Openbase Coder exposes routines through commands such as:
 

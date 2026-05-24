@@ -106,8 +106,6 @@ class RoutineRecord:
     mode: Mode | None = None
     model: str | None = None
     reasoning_effort: str | None = None
-    approval_policy: str | None = None
-    sandbox_type: str | None = None
     service_tier: str | None = None
     developer_instructions: str | None = None
     created_at: str | None = None
@@ -132,8 +130,6 @@ class RoutineRecord:
                 "mode": self.mode,
                 "model": self.model,
                 "reasoningEffort": self.reasoning_effort,
-                "approvalPolicy": self.approval_policy,
-                "sandboxType": self.sandbox_type,
                 "serviceTier": self.service_tier,
                 "developerInstructions": self.developer_instructions,
                 "createdAt": self.created_at,
@@ -291,8 +287,6 @@ def as_routine_record_map(value: Any) -> dict[str, RoutineRecord]:
             mode=as_mode(get_string(raw_routine, "mode")),
             model=get_string(raw_routine, "model"),
             reasoning_effort=get_string(raw_routine, "reasoningEffort"),
-            approval_policy=get_string(raw_routine, "approvalPolicy"),
-            sandbox_type=get_string(raw_routine, "sandboxType"),
             service_tier=get_string(raw_routine, "serviceTier"),
             developer_instructions=get_string(raw_routine, "developerInstructions"),
             created_at=get_string(raw_routine, "createdAt"),

@@ -257,8 +257,6 @@ class CodexAppServerClient:
         name = super_agent_label(input_data.get("name") or input_data.get("label"))
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
-            "approvalPolicy": input_data.get("approvalPolicy") or "never",
-            "sandbox": input_data.get("sandbox") or "danger-full-access",
             "config": await login_shell_config_override(),
         }
         if developer_instructions := with_super_agent_identity_instructions(
@@ -312,8 +310,6 @@ class CodexAppServerClient:
         await self.ensure_connected()
         params: JsonObject = {
             "threadId": thread_id,
-            "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
             "config": await login_shell_config_override(),
         }
         if identity_instructions := with_super_agent_identity_instructions(developer_instructions, label):
@@ -402,8 +398,6 @@ class CodexAppServerClient:
         params: JsonObject = {
             "threadId": input_data["threadId"],
             "cwd": input_data.get("cwd") or (session.cwd if session else None) or str(Path.home()),
-            "approvalPolicy": input_data.get("approvalPolicy") or "never",
-            "sandboxPolicy": {"type": input_data.get("sandboxType") or "dangerFullAccess"},
             "serviceTier": input_data.get("serviceTier") or "fast",
             "config": await login_shell_config_override(
                 thread_id=str(input_data["threadId"]),
@@ -892,8 +886,6 @@ class CodexAppServerClient:
                         {
                             "name": routine.name,
                             "cwd": routine.cwd,
-                            "approvalPolicy": routine.approval_policy or "never",
-                            "sandbox": routine_start_sandbox(routine.sandbox_type),
                             "developerInstructions": routine.developer_instructions,
                         }
                     )
@@ -2175,8 +2167,6 @@ def routine_from_patch(value: JsonObject) -> RoutineRecord:
         mode=as_mode(get_string(value, "mode")),
         model=get_string(value, "model"),
         reasoning_effort=get_string(value, "reasoningEffort"),
-        approval_policy=get_string(value, "approvalPolicy"),
-        sandbox_type=get_string(value, "sandboxType"),
         service_tier=get_string(value, "serviceTier"),
         developer_instructions=get_string(value, "developerInstructions"),
         created_at=get_string(value, "createdAt"),
@@ -2195,8 +2185,6 @@ def routine_turn_input(routine: RoutineRecord) -> JsonObject:
         {
             "prompt": routine.prompt,
             "cwd": routine.cwd,
-            "approvalPolicy": routine.approval_policy or "never",
-            "sandboxType": routine.sandbox_type or "dangerFullAccess",
             "mode": routine.mode or "default",
             "model": routine.model,
             "reasoningEffort": routine.reasoning_effort,
@@ -2206,15 +2194,6 @@ def routine_turn_input(routine: RoutineRecord) -> JsonObject:
             "label": routine.target_name or routine.name,
         }
     )
-
-
-def routine_start_sandbox(sandbox_type: str | None) -> str:
-    mapping = {
-        "readOnly": "read-only",
-        "workspaceWrite": "workspace-write",
-        "dangerFullAccess": "danger-full-access",
-    }
-    return mapping.get(sandbox_type or "", "danger-full-access")
 
 
 def routine_with_next_run(routine: RoutineRecord) -> JsonObject:
