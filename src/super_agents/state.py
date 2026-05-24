@@ -57,6 +57,7 @@ class SessionRecord:
     thread_id: str
     updated_at: str
     label: str | None = None
+    agent_name: str | None = None
     cwd: str | None = None
     group: str | None = None
     model: str | None = None
@@ -74,6 +75,7 @@ class SessionRecord:
         return without_none(
             {
                 "label": self.label,
+                "agentName": self.agent_name,
                 "threadId": self.thread_id,
                 "cwd": self.cwd,
                 "group": self.group,
@@ -214,6 +216,7 @@ def as_session_record_map(value: Any) -> dict[str, SessionRecord]:
         updated_at = get_string(raw_session, "updatedAt") or "1970-01-01T00:00:00.000Z"
         session = SessionRecord(
             label=get_string(raw_session, "label"),
+            agent_name=get_string(raw_session, "agentName"),
             thread_id=normalized_thread_id,
             cwd=get_string(raw_session, "cwd"),
             group=get_string(raw_session, "group"),

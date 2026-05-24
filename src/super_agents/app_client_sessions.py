@@ -3,9 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
-from collections import deque
 from dataclasses import replace
 
 from .app_formatting import (
@@ -15,6 +13,12 @@ from .app_formatting import (
     without_none,
 )
 from .app_models import LabelQueryInput, PendingServerRequest, ResolvedSession, TurnState
+from .app_queue import (
+    complete_queued_turn,
+    queued_turn_summaries,
+    release_queued_turn,
+    reserve_next_queued_turn,
+)
 from .app_protocol import (
     extract_thread_cwd,
     extract_thread_id,
@@ -113,15 +117,7 @@ class SessionClientMixin:
         )
 
     def queued_turn_summary(self) -> list[JsonObject]:
-        return [
-            {
-                "threadId": thread_id,
-                "queueDepth": len(queue),
-                "items": [item.to_json() for item in list(queue)[:5]],
-            }
-            for thread_id, queue in self._queued_turns.items()
-            if queue
-        ]
+        return queued_turn_summaries(self.queue_dir)
 
     def schedule_queue_drain(self, thread_id: str) -> None:
         existing = self._queue_tasks.get(thread_id)
@@ -132,20 +128,25 @@ class SessionClientMixin:
     async def _drain_queue(self, thread_id: str) -> None:
         await asyncio.sleep(0)
         while True:
-            if self.thread_has_active_turn(thread_id):
-                return
-            async with self._queue_lock:
-                queue = self._queued_turns.get(thread_id)
-                queued = queue.popleft() if queue else None
-                if queue is not None and not queue:
-                    self._queued_turns.pop(thread_id, None)
+            queued = reserve_next_queued_turn(
+                self.queue_dir,
+                thread_id,
+                lambda: self.thread_has_active_turn(thread_id),
+            )
             if queued is None:
                 return
             try:
-                await self.start_turn({**queued.input_data, "threadId": thread_id, "label": queued.label})
-            except Exception:
-                async with self._queue_lock:
-                    self._queued_turns.setdefault(thread_id, deque()).appendleft(queued)
+                await self.start_turn(
+                    {
+                        **queued.input_data,
+                        "threadId": thread_id,
+                        "label": queued.label,
+                        "agentName": queued.agent_name,
+                    }
+                )
+                complete_queued_turn(self.queue_dir, queued)
+            except Exception as exc:
+                release_queued_turn(self.queue_dir, queued, error=exc)
                 logger.exception("Failed to start queued Super Agents turn for thread_id=%s", thread_id)
                 return
 
@@ -208,6 +209,7 @@ class SessionClientMixin:
         return without_none(
             {
                 "name": extract_thread_name(thread),
+                "agentName": session.agent_name if session else None,
                 "cwd": extract_thread_cwd(thread),
                 "threadId": thread_id,
                 "runningTurnId": running_turn_id,
@@ -235,6 +237,7 @@ class SessionClientMixin:
         return without_none(
             {
                 "label": session.label,
+                "agentName": session.agent_name,
                 "group": session.group,
                 "cwd": session.cwd,
                 "threadId": session.thread_id,
@@ -428,12 +431,3 @@ class SessionClientMixin:
         thread = await self.read_thread(thread_id, True)
         turn = find_latest_turn(thread, active_only=True) or find_latest_turn(thread, active_only=False)
         return get_string(turn, "id") if turn else None
-
-    async def _drain_child_stderr(self, child: asyncio.subprocess.Process) -> None:
-        if child.stderr is None:
-            return
-        while True:
-            line = await child.stderr.readline()
-            if not line:
-                return
-            print(f"[codex app-server] {line.decode('utf-8', errors='replace').strip()}", file=os.sys.stderr)

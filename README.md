@@ -31,13 +31,15 @@ Then add an MCP server entry that runs:
 node /path/to/super-agents/legacy/dist/index.js
 ```
 
-The server starts `codex app-server` automatically when it cannot reach the configured websocket endpoint.
+The server requires an already-running `codex app-server` at the configured websocket endpoint. In Openbase Coder,
+the `codex-app-server` launchd service owns that process.
 
 ## Configuration
 
 - `SUPER_AGENTS_WS_URL`: Codex app-server websocket URL. Defaults to `ws://127.0.0.1:4500`.
 - `SUPER_AGENTS_MODEL`: fallback model for plan/default collaboration settings. Defaults to `gpt-5.4`.
 - `SUPER_AGENTS_STATE_FILE`: optional JSON state file for local turn metadata.
+- `SUPER_AGENTS_QUEUE_DIR`: optional directory for per-thread queued turn files. Defaults to a `queues` directory next to the state file.
 
 Super Agents MCP tools do not accept or set approval or sandbox options on app-server thread/turn requests. Codex uses the defaults from the configured Codex home.
 
@@ -57,10 +59,10 @@ Super Agents MCP tools do not accept or set approval or sandbox options on app-s
 - `super_agents_steer`: send steering input to the latest active turn matching a name.
 - `super_agents_cancel`: cancel the latest active turn matching a name.
 - `super_agents_start_turn`: submit follow-up input to the latest matching named thread with app-server `turn/start`.
-- `super_agents_queue_turn`: queue a follow-up prompt in Super Agents memory so it starts as a separate turn after the target thread's active turn finishes.
+- `super_agents_queue_turn`: queue a follow-up prompt in Super Agents' per-thread filesystem queue so it starts as a separate turn after the target thread's active turn finishes.
 - `super_agents_recent`: list recent named Codex app-server threads.
 
-Codex app-server 0.133.0 does not expose a separate queued-next-turn method. Its protocol includes `turn/start`, `turn/steer`, and `turn/interrupt`; `turn/start` is still the native submission path and the app-server decides whether it starts a new turn or is accepted as pending input for the current active turn. `super_agents_queue_turn` implements CLI-style client-side queueing in memory and drains queued prompts from app-server completion notifications.
+Codex app-server 0.133.0 does not expose a separate queued-next-turn method. Its protocol includes `turn/start`, `turn/steer`, and `turn/interrupt`; `turn/start` is still the native submission path and the app-server decides whether it starts a new turn or is accepted as pending input for the current active turn. `super_agents_queue_turn` implements client-side queueing with one queue file per target thread and drains queued prompts from app-server completion notifications.
 
 Codex app-server also does not expose native routine storage, cron-like scheduled prompts, or persisted scheduled task execution. Super Agents routines are stored in the local Super Agents state file and managed through the Openbase Coder CLI and console, not the MCP tool surface. Routine execution ultimately calls the same app-server `turn/start` path as other Super Agents turns.
 

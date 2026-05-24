@@ -28,7 +28,7 @@ INSTRUCTIONS = (
 )
 
 OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
-SUPER_AGENT_INSTRUCTIONS_FILENAME = "super-agent-instructions.md"
+SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 
@@ -123,6 +123,10 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                         "description": "Project working directory. Defaults to the user's home directory.",
                     },
                     "developerInstructions": {"type": "string"},
+                    "agentName": {
+                        "type": "string",
+                        "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
+                    },
                 },
                 ["name"],
             ),
@@ -269,6 +273,10 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "agentName": {
+                        "type": "string",
+                        "description": "Optional agent name/persona to store for this thread.",
+                    },
                 },
                 ["name", "prompt"],
             ),
@@ -281,9 +289,9 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
             name="super_agents_queue_turn",
             title="Queue Super Agents Turn",
             description=(
-                "Queue a follow-up prompt in Super Agents memory so it starts as a separate turn after the target "
-                "thread's active turn finishes. This is client-side queueing, matching Codex CLI behavior; Codex "
-                "app-server does not expose native queued-next-turn semantics for normal user prompts."
+                "Queue a follow-up prompt in Super Agents' per-thread filesystem queue so it starts as a separate "
+                "turn after the target thread's active turn finishes. Codex app-server does not expose native "
+                "queued-next-turn semantics for normal user prompts."
             ),
             input_schema=object_schema(
                 {
@@ -292,6 +300,10 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "agentName": {
+                        "type": "string",
+                        "description": "Optional agent name/persona to store for this thread.",
+                    },
                 },
                 ["prompt"],
             ),
@@ -331,6 +343,10 @@ def turn_start_properties() -> JsonObject:
         "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
         "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "name": {"type": "string"},
+        "agentName": {
+            "type": "string",
+            "description": "Optional agent name/persona to store for this thread.",
+        },
     }
 
 
@@ -394,6 +410,7 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
             "cwd": optional_string(input_data, "cwd"),
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
+            "agentName": optional_string(input_data, "agentName"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
@@ -413,6 +430,7 @@ def clean_turn_input(input_data: JsonObject) -> JsonObject:
             "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
             "name": optional_string(input_data, "name"),
             "label": optional_string(input_data, "name") or optional_string(input_data, "label"),
+            "agentName": optional_string(input_data, "agentName"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )

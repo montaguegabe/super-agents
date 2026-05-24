@@ -7,6 +7,8 @@ from .app_time import age_ms, turn_recency
 from .state import JsonObject, StoredStatus, TrackedStatus, get_string
 
 SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent name:"
+SUPER_AGENT_THREAD_ID_INSTRUCTION_PREFIX = "Super Agent thread id:"
+SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX = "Your name is "
 
 
 def collaboration_mode(
@@ -20,23 +22,63 @@ def collaboration_mode(
 def with_super_agent_identity_instructions(
     developer_instructions: str | None,
     label: str | None,
+    thread_id: str | None = None,
+    agent_name: str | None = None,
 ) -> str | None:
     normalized_label = super_agent_label(label)
-    if not normalized_label:
+    normalized_thread_id = super_agent_thread_id(thread_id)
+    normalized_agent_name = super_agent_label(agent_name)
+    if not normalized_label and not normalized_thread_id and not normalized_agent_name:
         return developer_instructions
-    identity_line = f"{SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX} {normalized_label}"
-    base = developer_instructions.strip() if developer_instructions else ""
+
+    identity_lines: list[str] = []
+    if normalized_label:
+        identity_lines.append(f"{SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX} {normalized_label}")
+    if normalized_thread_id:
+        identity_lines.append(f"{SUPER_AGENT_THREAD_ID_INSTRUCTION_PREFIX} {normalized_thread_id}")
+    if normalized_agent_name:
+        identity_lines.append(f"{SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX}{normalized_agent_name}.")
+
+    base = _without_super_agent_identity_lines(developer_instructions)
+    identity_block = "\n".join(identity_lines)
     if not base:
-        return identity_line
-    if identity_line in base.splitlines():
-        return base
-    return f"{base}\n\n{identity_line}"
+        return identity_block
+    return f"{base}\n\n{identity_block}"
 
 
 def super_agent_label(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     return " ".join(value.split()) or None
+
+
+def super_agent_thread_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def _without_super_agent_identity_lines(value: str | None) -> str:
+    if not value:
+        return ""
+    lines = [
+        line
+        for line in value.strip().splitlines()
+        if not _is_super_agent_identity_line(line)
+    ]
+    return "\n".join(lines).strip()
+
+
+def _is_super_agent_identity_line(line: str) -> bool:
+    stripped = line.strip()
+    return (
+        stripped.startswith(SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX)
+        or stripped.startswith(SUPER_AGENT_THREAD_ID_INSTRUCTION_PREFIX)
+        or (
+            stripped.startswith(SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX)
+            and stripped.endswith(".")
+        )
+    )
 
 
 def effective_reasoning_effort(input_data: JsonObject) -> str:

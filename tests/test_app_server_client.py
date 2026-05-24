@@ -73,6 +73,7 @@ def test_thread_input_does_not_default_approval_or_sandbox() -> None:
     cleaned = clean_thread_input(
         {
             "name": "new-agent",
+            "agentName": "Dottie",
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
@@ -80,6 +81,7 @@ def test_thread_input_does_not_default_approval_or_sandbox() -> None:
 
     assert "approvalPolicy" not in cleaned
     assert "sandbox" not in cleaned
+    assert cleaned["agentName"] == "Dottie"
 
 
 def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tmp_path: Path) -> None:
@@ -103,7 +105,7 @@ def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: P
 
 
 def test_super_agent_instructions_default_to_configured_path(monkeypatch, tmp_path: Path) -> None:
-    instructions_path = tmp_path / "super-agent-instructions.md"
+    instructions_path = tmp_path / "SUPER_AGENT_INSTRUCTIONS.md"
     instructions_path.write_text("The random animal is raccoon.\n", encoding="utf-8")
     monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
 
@@ -120,7 +122,7 @@ def test_super_agent_instructions_default_to_configured_path(monkeypatch, tmp_pa
 def test_super_agent_instructions_default_to_codex_home(monkeypatch, tmp_path: Path) -> None:
     codex_home = tmp_path / "codex_home"
     codex_home.mkdir()
-    instructions_path = codex_home / "super-agent-instructions.md"
+    instructions_path = codex_home / "SUPER_AGENT_INSTRUCTIONS.md"
     instructions_path.write_text("Use the Super Agent instructions.\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
@@ -132,7 +134,7 @@ def test_super_agent_instructions_default_to_codex_home(monkeypatch, tmp_path: P
 
 
 def test_explicit_developer_instructions_override_super_agent_default(monkeypatch, tmp_path: Path) -> None:
-    instructions_path = tmp_path / "super-agent-instructions.md"
+    instructions_path = tmp_path / "SUPER_AGENT_INSTRUCTIONS.md"
     instructions_path.write_text("Default instructions.\n", encoding="utf-8")
     monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
 
@@ -146,7 +148,7 @@ def test_explicit_developer_instructions_override_super_agent_default(monkeypatc
 
 
 def test_explicit_null_suppresses_super_agent_default_for_turns(monkeypatch, tmp_path: Path) -> None:
-    instructions_path = tmp_path / "super-agent-instructions.md"
+    instructions_path = tmp_path / "SUPER_AGENT_INSTRUCTIONS.md"
     instructions_path.write_text("Default instructions.\n", encoding="utf-8")
     monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
 
@@ -240,16 +242,66 @@ async def test_start_turn_sets_super_agent_identity_environment(
     server = await start_fake_app_server(captured, handler)
     client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
     try:
-        await client.start_turn({"threadId": "thread-1", "label": "Build", "prompt": "work"})
+        await client.start_turn(
+            {
+                "threadId": "thread-1",
+                "label": "Build",
+                "agentName": "Dottie",
+                "prompt": "work",
+            }
+        )
+
+        resume_request = next(message for message in captured if message.get("method") == "thread/resume")
+        resume_env = resume_request["params"]["config"]["shell_environment_policy"]["set"]
+        assert resume_request["params"]["threadId"] == "thread-1"
+        assert resume_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-1"
+        assert resume_env["OPENBASE_SUPER_AGENT_LABEL"] == "Build"
+        assert resume_env["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
 
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         set_env = start_request["params"]["config"]["shell_environment_policy"]["set"]
         assert set_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-1"
         assert set_env["OPENBASE_SUPER_AGENT_LABEL"] == "Build"
+        assert set_env["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
         assert set_env["PATH"] == "/usr/bin"
         assert (
             start_request["params"]["collaborationMode"]["settings"]["developer_instructions"]
-            == "Super Agent name: Build"
+            == "Super Agent name: Build\nSuper Agent thread id: thread-1\nYour name is Dottie."
+        )
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_continues_when_new_thread_has_no_rollout_to_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def fake_login_shell_environment() -> dict[str, str]:
+        return {"PATH": "/usr/bin"}
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/resume":
+            return {"__error__": {"code": -32600, "message": "no rollout found for thread id thread-new"}}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-1"}
+        return {"ok": True}
+
+    monkeypatch.setattr(app_server_client, "login_shell_environment", fake_login_shell_environment)
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        result = await client.start_turn(
+            {"threadId": "thread-new", "label": "Build", "agentName": "Dottie", "prompt": "work"}
+        )
+
+        assert result["turnId"] == "turn-1"
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["collaborationMode"]["settings"]["developer_instructions"] == (
+            "Super Agent name: Build\nSuper Agent thread id: thread-new\nYour name is Dottie."
         )
     finally:
         await client.close()
@@ -265,15 +317,18 @@ async def test_super_agent_identity_environment_is_scoped_per_config_call(
             "PATH": "/usr/bin",
             "OPENBASE_SUPER_AGENT_THREAD_ID": "stale-thread",
             "OPENBASE_SUPER_AGENT_LABEL": "Stale",
+            "OPENBASE_SUPER_AGENT_AGENT_NAME": "Stale Name",
         }
 
     monkeypatch.setenv("OPENBASE_SUPER_AGENT_THREAD_ID", "parent-thread")
     monkeypatch.setenv("OPENBASE_SUPER_AGENT_LABEL", "Parent")
+    monkeypatch.setenv("OPENBASE_SUPER_AGENT_AGENT_NAME", "Parent Name")
     monkeypatch.setattr(app_server_client, "login_shell_environment", fake_login_shell_environment)
 
     first = await app_server_client.login_shell_config_override(
         thread_id="thread-a",
         label="Agent A",
+        agent_name="Dottie",
     )
     second = await app_server_client.login_shell_config_override(
         thread_id="thread-b",
@@ -283,12 +338,61 @@ async def test_super_agent_identity_environment_is_scoped_per_config_call(
 
     assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-a"
     assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == "Agent A"
+    assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
     assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-b"
     assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == "Agent B"
+    assert second["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_AGENT_NAME"] == ""
     assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] == ""
     assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_LABEL"] == ""
+    assert cleared["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_AGENT_NAME"] == ""
     assert first["shell_environment_policy"]["set"]["OPENBASE_SUPER_AGENT_THREAD_ID"] != "stale-thread"
     assert os.environ["OPENBASE_SUPER_AGENT_THREAD_ID"] == "parent-thread"
+    assert os.environ["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Parent Name"
+
+
+def test_super_agent_identity_instructions_replace_stale_identity_lines() -> None:
+    assert app_server_client.with_super_agent_identity_instructions(
+        "Base instructions.\n\nSuper Agent name: Old\nSuper Agent thread id: old-thread\nYour name is Old.",
+        "New Agent",
+        "new-thread",
+        "Dottie",
+    ) == "Base instructions.\n\nSuper Agent name: New Agent\nSuper Agent thread id: new-thread\nYour name is Dottie."
+
+
+@pytest.mark.asyncio
+async def test_thread_start_does_not_clear_super_agent_identity_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def fake_login_shell_environment() -> dict[str, str]:
+        return {
+            "PATH": "/usr/bin",
+            "OPENBASE_SUPER_AGENT_THREAD_ID": "parent-thread",
+            "OPENBASE_SUPER_AGENT_LABEL": "Parent",
+            "OPENBASE_SUPER_AGENT_AGENT_NAME": "Parent Name",
+        }
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"thread": {"id": "thread-new", "cwd": message["params"]["cwd"], "model": "gpt-test"}}
+        return {"ok": True}
+
+    monkeypatch.setattr(app_server_client, "login_shell_environment", fake_login_shell_environment)
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"name": "New Agent", "cwd": "/tmp/new"})
+
+        start_request = next(message for message in captured if message.get("method") == "thread/start")
+        set_env = start_request["params"]["config"]["shell_environment_policy"]["set"]
+        assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
+        assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
+        assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
+    finally:
+        await client.close()
+        await server.close()
 
 
 @pytest.mark.asyncio
@@ -306,6 +410,7 @@ async def test_start_thread_appends_super_agent_identity_to_explicit_instruction
         await client.start_thread(
             {
                 "name": "Identity Agent",
+                "agentName": "Dottie",
                 "cwd": "/tmp/identity",
                 "developerInstructions": "Explicit instructions.",
             }
@@ -313,8 +418,11 @@ async def test_start_thread_appends_super_agent_identity_to_explicit_instruction
 
         start_request = next(message for message in captured if message.get("method") == "thread/start")
         assert start_request["params"]["developerInstructions"] == (
-            "Explicit instructions.\n\nSuper Agent name: Identity Agent"
+            "Explicit instructions.\n\nSuper Agent name: Identity Agent\nYour name is Dottie."
         )
+        state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+        assert state["sessions"]["thread-identity"]["agentName"] == "Dottie"
+        assert not [message for message in captured if message.get("method") == "thread/resume"]
     finally:
         await client.close()
         await server.close()
@@ -332,7 +440,7 @@ async def test_start_thread_sets_native_app_server_thread_name(tmp_path: Path) -
     server = await start_fake_app_server(captured, handler)
     client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
     try:
-        await client.start_thread({"name": "native-name", "cwd": "/tmp/native"})
+        await client.start_thread({"name": "native-name", "agentName": "Carl", "cwd": "/tmp/native"})
 
         start_request = next(message for message in captured if message.get("method") == "thread/start")
         assert "approvalPolicy" not in start_request["params"]
@@ -343,6 +451,7 @@ async def test_start_thread_sets_native_app_server_thread_name(tmp_path: Path) -
 
         state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
         assert state["sessions"]["thread-native"]["label"] == "native-name"
+        assert state["sessions"]["thread-native"]["agentName"] == "Carl"
     finally:
         await client.close()
         await server.close()
@@ -411,11 +520,18 @@ async def test_resume_thread_does_not_override_codex_approval_or_sandbox_default
     server = await start_fake_app_server(captured, handler)
     client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
     try:
-        await client.resume_thread("thread-resume")
+        await client.resume_thread("thread-resume", label="Resume Agent", agent_name="Dottie")
 
         resume_request = next(message for message in captured if message.get("method") == "thread/resume")
         assert "approvalPolicy" not in resume_request["params"]
         assert "sandbox" not in resume_request["params"]
+        set_env = resume_request["params"]["config"]["shell_environment_policy"]["set"]
+        assert set_env["OPENBASE_SUPER_AGENT_THREAD_ID"] == "thread-resume"
+        assert set_env["OPENBASE_SUPER_AGENT_LABEL"] == "Resume Agent"
+        assert set_env["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Dottie"
+        assert resume_request["params"]["developerInstructions"] == (
+            "Super Agent name: Resume Agent\nSuper Agent thread id: thread-resume\nYour name is Dottie."
+        )
     finally:
         await client.close()
         await server.close()
@@ -624,6 +740,61 @@ async def test_queue_turn_waits_for_active_turn_completion_then_starts_next_turn
         assert client.queued_turn_summary() == []
     finally:
         await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_thread_queue_is_persisted_across_mcp_clients(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+    state_file = tmp_path / "state.json"
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-persisted-queue", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    owner = ReadyClient(server.ws_url, state_file, "gpt-test")
+    enqueuer = ReadyClient(server.ws_url, state_file, "gpt-test")
+    try:
+        await owner.start_thread({"label": "persisted-queue", "cwd": "/tmp/project"})
+        await owner.start_turn(
+            {
+                "threadId": "thread-persisted-queue",
+                "label": "persisted-queue",
+                "prompt": "first",
+            }
+        )
+
+        queued = await enqueuer.queue_turn_by_label(
+            type_query(thread_id="thread-persisted-queue"),
+            {"prompt": "second"},
+        )
+
+        assert queued["queued"] is True
+        assert enqueuer.queued_turn_summary()[0]["threadId"] == "thread-persisted-queue"
+        assert enqueuer.queued_turn_summary()[0]["queueDepth"] == 1
+        assert (tmp_path / "queues").is_dir()
+        assert len([message for message in captured if message.get("method") == "turn/start"]) == 1
+
+        owner.handle_notification(
+            "turn/completed",
+            {"threadId": "thread-persisted-queue", "turnId": "turn-1"},
+        )
+        await asyncio.sleep(0.05)
+
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+        assert len(start_requests) == 2
+        assert start_requests[-1]["params"]["input"] == [{"type": "text", "text": "second"}]
+        assert owner.queued_turn_summary() == []
+    finally:
+        await owner.close()
+        await enqueuer.close()
         await server.close()
 
 
@@ -1102,6 +1273,22 @@ async def test_routine_reservation_prevents_duplicate_due_runs(tmp_path: Path) -
         await second_client.close()
 
 
+@pytest.mark.asyncio
+async def test_client_does_not_spawn_managed_app_server_when_unavailable(tmp_path: Path) -> None:
+    class NotReadyClient(CodexAppServerClient):
+        async def check_ready(self) -> bool:
+            return False
+
+    client = NotReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    try:
+        with pytest.raises(RuntimeError, match="Codex app-server is not running"):
+            await client.ensure_connected()
+        status = await client.status()
+        assert status["managedProcess"] is False
+    finally:
+        await client.close()
+
+
 def test_tool_surface_preserves_current_names_and_schemas() -> None:
     tools = build_tools(CodexAppServerClient("ws://127.0.0.1:1"))
     names = [tool.name for tool in tools]
@@ -1133,7 +1320,7 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert "sandboxType" not in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "approvalPolicy" not in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "sandboxType" not in by_name["super_agents_queue_turn"].input_schema["properties"]
-    assert "client-side queueing" in by_name["super_agents_queue_turn"].description
+    assert "per-thread filesystem queue" in by_name["super_agents_queue_turn"].description
     assert "no separate queued-next-turn API" in by_name["super_agents_start_turn"].description
     assert "threadId" not in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "reasoningEffort" not in by_name["super_agents_start_turn"].input_schema["properties"]
@@ -1174,7 +1361,11 @@ async def start_fake_app_server(
             captured.append(message)
             if "id" not in message:
                 continue
-            await websocket.send(json.dumps({"id": message["id"], "result": response_handler(message)}))
+            response = response_handler(message)
+            if "__error__" in response:
+                await websocket.send(json.dumps({"id": message["id"], "error": response["__error__"]}))
+            else:
+                await websocket.send(json.dumps({"id": message["id"], "result": response}))
             if after_message:
                 result = after_message(message, websocket)
                 if hasattr(result, "__await__"):

@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import time
-from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -12,6 +11,7 @@ from typing import Any
 
 from .app_environment import (
     LOGIN_ENV_TIMEOUT_SECONDS,
+    OPENBASE_SUPER_AGENT_AGENT_NAME_ENV,
     OPENBASE_SUPER_AGENT_LABEL_ENV,
     OPENBASE_SUPER_AGENT_THREAD_ID_ENV,
     login_shell_environment,
@@ -52,6 +52,7 @@ from .app_permissions import (
     write_permission_store,
     write_shared_permission_decision,
 )
+from .app_queue import append_queued_turn, new_queued_turn
 from .app_protocol import (
     SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX,
     collaboration_mode,
@@ -114,12 +115,14 @@ from .state import (
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_STATE_FILE = Path.home() / ".super-agents" / "state.json"
+DEFAULT_QUEUE_DIR = Path.home() / ".super-agents" / "queues"
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "CodexAppServerClient",
     "DEFAULT_APPROVAL_REQUESTS_FILE",
     "DEFAULT_MODEL",
+    "DEFAULT_QUEUE_DIR",
     "DEFAULT_ROUTINE_POLL_SECONDS",
     "DEFAULT_ROUTINE_TIMEZONE",
     "DEFAULT_STATE_FILE",
@@ -128,6 +131,7 @@ __all__ = [
     "LabelQueryInput",
     "LabelResolutionPrefer",
     "Mode",
+    "OPENBASE_SUPER_AGENT_AGENT_NAME_ENV",
     "OPENBASE_SUPER_AGENT_LABEL_ENV",
     "OPENBASE_SUPER_AGENT_THREAD_ID_ENV",
     "PendingServerRequest",
@@ -211,12 +215,20 @@ async def login_shell_config_override(
     *,
     thread_id: str | None = None,
     label: str | None = None,
+    agent_name: str | None = None,
+    include_super_agent_identity: bool = True,
 ) -> JsonObject:
     env = await login_shell_environment()
     set_values = {key: value for key in ["PATH", "SHELL", "HOME", "USER", "LOGNAME"] if (value := env.get(key))}
-    set_values[OPENBASE_SUPER_AGENT_THREAD_ID_ENV] = thread_id or ""
-    set_values[OPENBASE_SUPER_AGENT_LABEL_ENV] = label or ""
+    if include_super_agent_identity:
+        set_values[OPENBASE_SUPER_AGENT_THREAD_ID_ENV] = thread_id or ""
+        set_values[OPENBASE_SUPER_AGENT_LABEL_ENV] = label or ""
+        set_values[OPENBASE_SUPER_AGENT_AGENT_NAME_ENV] = agent_name or ""
     return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
+
+
+def _is_missing_rollout_error(exc: RuntimeError) -> bool:
+    return "no rollout found for thread id" in str(exc)
 
 
 class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClientMixin):
@@ -227,9 +239,11 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         default_model: str | None = None,
         permission_callback: PermissionRequestCallback | None = None,
         approval_requests_file: str | Path | None = None,
+        queue_dir: str | Path | None = None,
     ) -> None:
         self.ws_url = ws_url or os.environ.get("SUPER_AGENTS_WS_URL") or DEFAULT_WS_URL
         self.state_file = Path(state_file or os.environ.get("SUPER_AGENTS_STATE_FILE") or DEFAULT_STATE_FILE)
+        self.queue_dir = Path(queue_dir or os.environ.get("SUPER_AGENTS_QUEUE_DIR") or self.state_file.parent / "queues")
         self.approval_requests_file = Path(
             approval_requests_file
             or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE")
@@ -241,14 +255,10 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         self._pending: dict[str | int, asyncio.Future[Any]] = {}
         self._pending_server_requests: dict[str | int, PendingServerRequest] = {}
         self._turns: dict[str, TurnState] = {}
-        self._child: asyncio.subprocess.Process | None = None
         self._connect_lock = asyncio.Lock()
         self._reader_task: asyncio.Task[None] | None = None
         self._state_lock = asyncio.Lock()
-        self._queue_lock = asyncio.Lock()
-        self._queued_turns: dict[str, deque[QueuedTurn]] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
-        self._queue_sequence = 0
         self._routine_scheduler_task: asyncio.Task[None] | None = None
         self._permission_callback = permission_callback
         self._permission_callback_tasks: set[asyncio.Task[None]] = set()
@@ -260,7 +270,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "ready": ready,
             "websocketUrl": self.ws_url,
             "websocketConnected": websocket_is_open(self._ws),
-            "managedProcess": bool(self._child and self._child.returncode is None),
+            "managedProcess": False,
             "pendingRequests": [request.to_json() for request in self._pending_server_requests.values()],
             "pendingPermissionRequests": [
                 request.to_json() for request in self.pending_permission_requests()
@@ -330,13 +340,15 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         )
         await self.ensure_connected()
         name = super_agent_label(input_data.get("name") or input_data.get("label"))
+        agent_name = super_agent_label(input_data.get("agentName"))
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
-            "config": await login_shell_config_override(),
+            "config": await login_shell_config_override(include_super_agent_identity=False),
         }
         if developer_instructions := with_super_agent_identity_instructions(
             get_string(input_data, "developerInstructions"),
             name,
+            agent_name=agent_name,
         ):
             params["developerInstructions"] = developer_instructions
 
@@ -356,6 +368,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 thread_id,
                 {
                     "label": name,
+                    "agentName": agent_name,
                     "threadId": thread_id,
                     "cwd": extract_thread_cwd(result) or str(params["cwd"]),
                     "group": input_data.get("group"),
@@ -375,6 +388,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         thread_id: str,
         *,
         label: str | None = None,
+        agent_name: str | None = None,
         developer_instructions: str | None = None,
     ) -> JsonObject:
         started = time.monotonic()
@@ -385,9 +399,18 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         await self.ensure_connected()
         params: JsonObject = {
             "threadId": thread_id,
-            "config": await login_shell_config_override(),
+            "config": await login_shell_config_override(
+                thread_id=thread_id,
+                label=label,
+                agent_name=agent_name,
+            ),
         }
-        if identity_instructions := with_super_agent_identity_instructions(developer_instructions, label):
+        if identity_instructions := with_super_agent_identity_instructions(
+            developer_instructions,
+            label,
+            thread_id,
+            agent_name,
+        ):
             params["developerInstructions"] = identity_instructions
         result = await self.request(
             "thread/resume",
@@ -397,6 +420,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             thread_id,
             {
                 "threadId": thread_id,
+                "agentName": agent_name,
                 "model": extract_model(result) or self.default_model,
                 "lastUsefulMessage": text_preview(result),
             },
@@ -466,17 +490,28 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             if session
             else None
         )
+        agent_name = super_agent_label(
+            input_data.get("agentName")
+            if isinstance(input_data.get("agentName"), str)
+            else session.agent_name
+            if session
+            else None
+        )
         developer_instructions = with_super_agent_identity_instructions(
             input_data.get("developerInstructions") if "developerInstructions" in input_data else None,
             label,
+            str(input_data["threadId"]),
+            agent_name,
         )
+        thread_id = str(input_data["threadId"])
         params: JsonObject = {
-            "threadId": input_data["threadId"],
+            "threadId": thread_id,
             "cwd": input_data.get("cwd") or (session.cwd if session else None) or str(Path.home()),
             "serviceTier": input_data.get("serviceTier") or "fast",
             "config": await login_shell_config_override(
-                thread_id=str(input_data["threadId"]),
+                thread_id=thread_id,
                 label=label,
+                agent_name=agent_name,
             ),
             "collaborationMode": collaboration_mode(
                 mode,
@@ -486,6 +521,22 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             ),
             "input": [{"type": "text", "text": input_data["prompt"]}],
         }
+        try:
+            await self.request(
+                "thread/resume",
+                {
+                    "threadId": thread_id,
+                    "cwd": params["cwd"],
+                    "config": params["config"],
+                },
+            )
+        except RuntimeError as exc:
+            if not _is_missing_rollout_error(exc):
+                raise
+            logger.info(
+                "Skipping pre-turn thread environment refresh because no rollout exists yet for thread_id=%s.",
+                thread_id,
+            )
         logger.info(
             "dispatch_timing stage=app_server_turn_start_request dispatch_id=%s "
             "thread_id=%s cwd_basename=%s mode=%s reasoning_effort=%s",
@@ -496,7 +547,6 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             reasoning_effort,
         )
         result = await self.request("turn/start", params)
-        thread_id = str(input_data["threadId"])
         turn_id = extract_turn_id(result) or f"{thread_id}:unknown:{int(time.time() * 1000)}"
         logger.info(
             "dispatch_timing stage=app_server_turn_start_response dispatch_id=%s thread_id=%s turn_id=%s elapsed_ms=%d",
@@ -525,6 +575,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             thread_id,
             {
                 "label": input_data.get("label"),
+                "agentName": agent_name,
                 "threadId": thread_id,
                 "cwd": str(params["cwd"]),
                 "group": input_data.get("group"),
@@ -716,6 +767,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         resolved = await self.resolve_session(required_label(input_data), input_data)
         return {
             "label": resolved.session.label,
+            "agentName": resolved.session.agent_name,
             "group": resolved.session.group,
             "cwd": resolved.session.cwd,
             "threadId": resolved.session.thread_id,
@@ -738,7 +790,11 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
 
     async def resume_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         resolved = await self.resolve_session(required_label(input_data), replace(input_data, prefer="latest_any"))
-        result = await self.resume_thread(resolved.session.thread_id, label=resolved.session.label)
+        result = await self.resume_thread(
+            resolved.session.thread_id,
+            label=resolved.session.label,
+            agent_name=resolved.session.agent_name,
+        )
         return {"name": resolved.session.label, **result}
 
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject:
@@ -808,18 +864,15 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         return {**result, "queued": False, "startedImmediately": True, "drain": "started_immediately"}
 
     async def enqueue_turn(self, target: ResolvedSession, turn_input: JsonObject) -> JsonObject:
-        async with self._queue_lock:
-            self._queue_sequence += 1
-            queued = QueuedTurn(
-                id=self._queue_sequence,
+        queued, position = append_queued_turn(
+            self.queue_dir,
+            new_queued_turn(
                 thread_id=target.session.thread_id,
                 label=target.session.label,
+                agent_name=target.session.agent_name,
                 input_data={"cwd": target.session.cwd, **turn_input},
-                queued_at=iso_now(),
-            )
-            queue = self._queued_turns.setdefault(target.session.thread_id, deque())
-            queue.append(queued)
-            position = len(queue)
+            ),
+        )
         self.schedule_queue_drain(target.session.thread_id)
         return {
             "queued": True,
