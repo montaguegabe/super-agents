@@ -1,7 +1,8 @@
 # Super Agents
 
-Super Agents is a Python MCP server and library for controlling local Codex
-app-server sessions asynchronously.
+Super Agents is a Python MCP server and library for controlling local
+[Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
+sessions asynchronously.
 
 It gives AI agents a compact tool surface for creating named Codex threads,
 starting turns, checking progress, steering active work, cancelling turns,
@@ -34,7 +35,8 @@ python -m pip install super-agents
 ## Requirements
 
 - Python 3.11+
-- A running local `codex app-server`
+- A running local
+  [`codex app-server`](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
 - An MCP-compatible client such as Codex, Claude Desktop, or Openbase Coder
 
 By default, Super Agents connects to Codex at `ws://127.0.0.1:4500`.
@@ -65,6 +67,72 @@ If you are running from a source checkout instead of an installed package:
 ```bash
 uv --directory /path/to/super-agents run super-agents-mcp
 ```
+
+## Start Codex App Server
+
+Super Agents talks to the
+[Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
+over a websocket. Start Codex with a local websocket listener before using the
+MCP tools:
+
+```bash
+codex app-server --listen ws://127.0.0.1:4500
+```
+
+Openbase Coder users usually do not need to run this by hand; the
+`codex-app-server` background service owns that process.
+
+## Add To Codex
+
+Install the package, then register the MCP server:
+
+```bash
+uv tool install super-agents
+codex mcp add super-agents -- super-agents-mcp
+```
+
+If your Codex app-server is listening somewhere other than the default
+`ws://127.0.0.1:4500`, pass `SUPER_AGENTS_WS_URL` when registering the server:
+
+```bash
+codex mcp add \
+  --env SUPER_AGENTS_WS_URL=ws://127.0.0.1:4500 \
+  super-agents -- super-agents-mcp
+```
+
+Check that Codex can see the server:
+
+```bash
+codex mcp list
+codex mcp get super-agents
+```
+
+## Add To Claude Code
+
+Install the package, then register the MCP server:
+
+```bash
+uv tool install super-agents
+claude mcp add --scope user super-agents -- super-agents-mcp
+```
+
+For a non-default Codex app-server websocket URL:
+
+```bash
+claude mcp add \
+  --scope user \
+  -e SUPER_AGENTS_WS_URL=ws://127.0.0.1:4500 \
+  super-agents -- super-agents-mcp
+```
+
+Check that Claude Code can see the server:
+
+```bash
+claude mcp list
+claude mcp get super-agents
+```
+
+For project-local installs, use `--scope project` instead of `--scope user`.
 
 ## Configuration
 
