@@ -269,7 +269,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "activeTurns": [
                 self.compact_tracked_turn(turn)
                 for turn in self._turns.values()
-                if turn.status in {"running", "waiting"}
+                if self.tracked_turn_is_active(turn)
             ],
             "routines": await self.routine_status_summary(),
         }
