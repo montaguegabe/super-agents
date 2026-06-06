@@ -14,19 +14,22 @@ long-running turns.
 
 ## Install
 
-With `uv`:
+The recommended install path is `uv tool install`, which installs the
+`super-agents-mcp` command in an isolated tool environment:
 
 ```bash
 uv tool install super-agents
 ```
 
-With `pipx`:
+Then register `super-agents-mcp` with your MCP client.
+
+`pipx` also works:
 
 ```bash
 pipx install super-agents
 ```
 
-With `pip`:
+For library-only use inside an existing Python environment:
 
 ```bash
 python -m pip install super-agents
