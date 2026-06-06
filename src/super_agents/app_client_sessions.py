@@ -152,10 +152,13 @@ class SessionClientMixin:
 
     def thread_has_active_turn(self, thread_id: str) -> bool:
         for turn in self._turns.values():
-            if turn.thread_id == thread_id and turn.status in {"running", "waiting"}:
+            if turn.thread_id == thread_id and self.tracked_turn_is_active(turn):
                 return True
         session = self.session_from_memory(thread_id)
         return bool(session and is_active_status(self.session_status(session)))
+
+    def tracked_turn_is_active(self, turn: TurnState) -> bool:
+        return is_active_status(turn.status) and not turn.finished_at
 
     async def resolve_thread_name(self, name: str, input_data: LabelQueryInput) -> JsonObject:
         try:
@@ -321,7 +324,13 @@ class SessionClientMixin:
     def session_status(self, session: SessionRecord) -> StoredStatus:
         turn_id = session.active_turn_id or session.last_turn_id
         runtime_turn = self._turns.get(turn_key(session.thread_id, turn_id)) if turn_id else None
-        return runtime_turn.status if runtime_turn else session.last_status or "unknown"
+        if runtime_turn:
+            if is_active_status(runtime_turn.status) and runtime_turn.finished_at:
+                if session.last_status and not is_active_status(session.last_status):
+                    return session.last_status
+                return "unknown"
+            return runtime_turn.status
+        return session.last_status or "unknown"
 
     def session_from_memory(self, thread_id: str | None) -> SessionRecord | None:
         if not thread_id:

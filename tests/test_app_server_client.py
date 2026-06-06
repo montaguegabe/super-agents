@@ -771,6 +771,62 @@ async def test_queue_turn_waits_for_active_turn_completion_then_starts_next_turn
 
 
 @pytest.mark.asyncio
+async def test_queue_drain_ignores_running_turn_with_finished_at(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-stale-queue", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "stale-queue", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-stale-queue", "label": "stale-queue", "prompt": "first"})
+
+        queued = await client.queue_turn_by_label(
+            type_query(label="stale-queue"),
+            {"label": "stale-queue", "prompt": "second"},
+        )
+        await asyncio.sleep(0.05)
+
+        assert queued["queued"] is True
+        assert [message.get("method") for message in captured].count("turn/start") == 1
+        assert client.queued_turn_summary()[0]["queueDepth"] == 1
+
+        stale_turn = client.ensure_turn("thread-stale-queue", "turn-1")
+        stale_turn.status = "running"
+        stale_turn.started_at = "2020-01-01T00:00:00.000Z"
+        stale_turn.finished_at = "2026-01-01T00:00:00.000Z"
+        client.schedule_queue_drain("thread-stale-queue")
+
+        for _ in range(20):
+            if [message.get("method") for message in captured].count("turn/start") == 2:
+                break
+            await asyncio.sleep(0.01)
+
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+        assert len(start_requests) == 2
+        assert start_requests[-1]["params"]["input"] == [{"type": "text", "text": "second"}]
+        assert start_requests[-1]["params"]["threadId"] == "thread-stale-queue"
+        assert client.queued_turn_summary() == []
+
+        status = await client.status()
+        active_turn_ids = {turn["turnId"] for turn in status["activeTurns"]}
+        assert "turn-1" not in active_turn_ids
+        assert "turn-2" in active_turn_ids
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_thread_queue_is_persisted_across_mcp_clients(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
     turn_index = 0
