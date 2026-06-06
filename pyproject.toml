@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "super-agents"
 version = "0.1.0"
 description = "MCP wrapper for controlling Codex app-server threads, turns, plan mode, and steering."
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
