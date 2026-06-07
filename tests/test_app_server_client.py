@@ -39,6 +39,39 @@ def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
     assert websocket_max_size() is None
 
 
+@pytest.mark.asyncio
+async def test_shared_tags_apply_to_threads_and_reports(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENBASE_CODER_CLI_DATA_DIR", str(tmp_path))
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+
+    thread = await client.thread_tags("thread-1", ["Needs Review"])
+    report = await client.report_tags("/tmp/project", "summary.md", ["needs review"])
+    options = await client.tags()
+
+    assert thread["tags"] == ["Needs Review"]
+    assert report["tags"] == ["Needs Review"]
+    assert options["tags"] == [
+        {
+            "slug": "needs-review",
+            "label": "Needs Review",
+            "created_at": thread["tagOptions"][0]["created_at"],
+            "updated_at": report["tagOptions"][0]["updated_at"],
+            "usageCount": 2,
+        }
+    ]
+
+
+def test_tag_tools_are_registered(tmp_path: Path) -> None:
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+    tool_names = {tool.name for tool in build_tools(client)}
+
+    assert {
+        "super_agents_tags",
+        "super_agents_thread_tags",
+        "super_agents_report_tags",
+    }.issubset(tool_names)
+
+
 def test_turn_input_does_not_default_approval_or_sandbox() -> None:
     cleaned = clean_turn_input(
         {
@@ -1469,6 +1502,9 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
         "codex_answer_request",
         "super_agents_sessions",
         "super_agents_thread_favorite",
+        "super_agents_tags",
+        "super_agents_thread_tags",
+        "super_agents_report_tags",
         "super_agents_active",
         "super_agents_status",
         "super_agents_resolve",
@@ -1484,6 +1520,11 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert by_name["super_agents_start_turn"].input_schema["required"] == ["name", "prompt"]
     assert by_name["super_agents_queue_turn"].input_schema["required"] == ["prompt"]
     assert by_name["super_agents_thread_favorite"].input_schema["required"] == ["threadId"]
+    assert by_name["super_agents_thread_tags"].input_schema["required"] == ["threadId"]
+    assert by_name["super_agents_report_tags"].input_schema["required"] == [
+        "projectPath",
+        "path",
+    ]
     assert "favorite" in by_name["super_agents_recent"].input_schema["properties"]
     assert "approvalPolicy" not in by_name["super_agents_start"].input_schema["properties"]
     assert "sandbox" not in by_name["super_agents_start"].input_schema["properties"]

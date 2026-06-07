@@ -214,6 +214,71 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
             ),
         ),
         ToolDefinition(
+            name="super_agents_tags",
+            title="Super Agents Tags",
+            description="List local Openbase Coder tag options shared by threads and reports.",
+            input_schema=object_schema({}),
+            annotations={"readOnlyHint": True, "idempotentHint": True},
+            handler=lambda _input: client.tags(),
+        ),
+        ToolDefinition(
+            name="super_agents_thread_tags",
+            title="Super Agents Thread Tags",
+            description=(
+                "Read or replace local Openbase Coder tags for one thread. Omit tags to read; "
+                "pass tags to apply shared tag options."
+            ),
+            input_schema=object_schema(
+                {
+                    "threadId": {
+                        "type": "string",
+                        "description": "App-server thread id to inspect or tag.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Complete tag label list to apply. Omit to read current tags.",
+                    },
+                },
+                ["threadId"],
+            ),
+            handler=lambda input_data: client.thread_tags(
+                required_string(input_data, "threadId"),
+                optional_string_array(input_data, "tags"),
+            ),
+        ),
+        ToolDefinition(
+            name="super_agents_report_tags",
+            title="Super Agents Report Tags",
+            description=(
+                "Read or replace local Openbase Coder tags for one report file. Omit tags to read; "
+                "pass tags to apply shared tag options."
+            ),
+            input_schema=object_schema(
+                {
+                    "projectPath": {
+                        "type": "string",
+                        "description": "Project directory containing the .reports folder.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Report path relative to the project's .reports folder.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Complete tag label list to apply. Omit to read current tags.",
+                    },
+                },
+                ["projectPath", "path"],
+            ),
+            handler=lambda input_data: client.report_tags(
+                required_string(input_data, "projectPath"),
+                required_string(input_data, "path"),
+                optional_string_array(input_data, "tags"),
+            ),
+        ),
+        ToolDefinition(
             name="super_agents_active",
             title="Active Super Agents",
             description=(

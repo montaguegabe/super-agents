@@ -109,6 +109,13 @@ from .state import (
     get_string,
 )
 from .thread_favorites import favorite_status
+from .item_tags import (
+    report_tags,
+    set_report_tags,
+    set_thread_tags,
+    tag_options,
+    thread_tags,
+)
 
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
 DEFAULT_MODEL = "gpt-5.4"
@@ -744,6 +751,24 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
 
     async def thread_favorite(self, thread_id: str) -> JsonObject:
         return favorite_status(thread_id)
+
+    async def tags(self) -> JsonObject:
+        return tag_options()
+
+    async def thread_tags(self, thread_id: str, tags: list[Any] | None = None) -> JsonObject:
+        if tags is None:
+            return thread_tags(thread_id)
+        return set_thread_tags(thread_id, tags)
+
+    async def report_tags(
+        self,
+        project_path: str,
+        path: str,
+        tags: list[Any] | None = None,
+    ) -> JsonObject:
+        if tags is None:
+            return report_tags(project_path, path)
+        return set_report_tags(project_path, path, tags)
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         query = input_data or LabelQueryInput()

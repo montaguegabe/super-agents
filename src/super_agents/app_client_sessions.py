@@ -42,6 +42,7 @@ from .state import (
     update_state_file,
 )
 from .thread_favorites import favorite_status, is_favorite
+from .item_tags import thread_tags
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,7 @@ class SessionClientMixin:
         updated_at = iso_from_thread_time(thread)
         last_event_at = session.last_event_at if session else None
         favorite = favorite_status(thread_id)
+        tags = thread_tags(thread_id)
         return without_none(
             {
                 "name": extract_thread_name(thread),
@@ -237,6 +239,7 @@ class SessionClientMixin:
                 "status": status,
                 "isFavorite": favorite["isFavorite"],
                 "favoritedAt": favorite["favoritedAt"],
+                "tags": tags["tags"],
                 "ageMs": int(time.time() * 1000) - thread_recency(thread),
                 "updatedAt": updated_at,
                 "lastEventAt": last_event_at,
@@ -254,6 +257,7 @@ class SessionClientMixin:
         running_turn_id = session.active_turn_id or session.last_turn_id if is_active_status(status) else None
         started_at = session.last_started_at or session.updated_at
         favorite = favorite_status(session.thread_id)
+        tags = thread_tags(session.thread_id)
         return without_none(
             {
                 "label": session.label,
@@ -267,6 +271,7 @@ class SessionClientMixin:
                 "status": status,
                 "isFavorite": favorite["isFavorite"],
                 "favoritedAt": favorite["favoritedAt"],
+                "tags": tags["tags"],
                 "ageMs": int(time.time() * 1000) - parse_iso_ms(started_at),
                 "updatedAt": session.updated_at,
                 "lastEventAt": session.last_event_at,
@@ -302,6 +307,7 @@ class SessionClientMixin:
                 "status": item.get("status"),
                 "isFavorite": item.get("isFavorite"),
                 "favoritedAt": item.get("favoritedAt"),
+                "tags": item.get("tags"),
                 "lastEventAt": item.get("lastEventAt"),
                 "updatedAt": item.get("updatedAt"),
                 "lastEventAgeMs": item.get("lastEventAgeMs"),
