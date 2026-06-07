@@ -196,6 +196,24 @@ def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
             handler=lambda _input: client.sessions(),
         ),
         ToolDefinition(
+            name="super_agents_thread_favorite",
+            title="Super Agents Thread Favorite",
+            description="Query whether one local Openbase Coder thread is favorited.",
+            input_schema=object_schema(
+                {
+                    "threadId": {
+                        "type": "string",
+                        "description": "App-server thread id to inspect.",
+                    },
+                },
+                ["threadId"],
+            ),
+            annotations={"readOnlyHint": True, "idempotentHint": True},
+            handler=lambda input_data: client.thread_favorite(
+                required_string(input_data, "threadId")
+            ),
+        ),
+        ToolDefinition(
             name="super_agents_active",
             title="Active Super Agents",
             description=(
@@ -351,6 +369,10 @@ def name_query_properties(include_ids: bool = True, include_output_options: bool
         "name": {"type": "string"},
         "cwd": {"type": "string"},
         "status": {"type": "string", "enum": ["running", "waiting", "completed", "failed", "cancelled", "unknown"]},
+        "favorite": {
+            "type": "boolean",
+            "description": "Filter listed threads by local Openbase Coder favorite state.",
+        },
         "limit": {"type": "number"},
         "includeInactive": {"type": "boolean", "default": False},
         "prefer": {"type": "string", "enum": ["latest_active", "latest_any"], "default": "latest_active"},
@@ -488,6 +510,7 @@ def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:
         label=optional_string(input_data, "name") or optional_string(input_data, "label"),
         cwd=optional_string(input_data, "cwd"),
         status=optional_string(input_data, "status"),
+        favorite=optional_boolean_or_none(input_data, "favorite"),
         limit=optional_number(input_data, "limit"),
         include_inactive=optional_boolean_or_none(input_data, "includeInactive"),
         prefer=optional_prefer(input_data, "prefer"),

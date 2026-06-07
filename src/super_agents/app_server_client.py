@@ -108,6 +108,7 @@ from .state import (
     TrackedStatus,
     get_string,
 )
+from .thread_favorites import favorite_status
 
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
 DEFAULT_MODEL = "gpt-5.4"
@@ -740,6 +741,9 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             self.session_view(session)
             for session in sorted(state.sessions.values(), key=lambda item: item.updated_at, reverse=True)
         ]
+
+    async def thread_favorite(self, thread_id: str) -> JsonObject:
+        return favorite_status(thread_id)
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         query = input_data or LabelQueryInput()

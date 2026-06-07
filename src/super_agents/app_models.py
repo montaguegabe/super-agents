@@ -93,6 +93,7 @@ class LabelQueryInput:
     cwd: str | None = None
     group: str | None = None
     status: str | None = None
+    favorite: bool | None = None
     limit: int | None = None
     include_inactive: bool | None = None
     prefer: LabelResolutionPrefer | None = None

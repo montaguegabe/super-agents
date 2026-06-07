@@ -944,6 +944,91 @@ async def test_old_state_files_are_tolerated_by_recent_and_label_resolution(tmp_
 
 
 @pytest.mark.asyncio
+async def test_recent_can_filter_local_openbase_favorites(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OPENBASE_CODER_CLI_DATA_DIR", str(tmp_path / "openbase"))
+    (tmp_path / "openbase").mkdir()
+    (tmp_path / "openbase" / "thread-favorites.json").write_text(
+        json.dumps(
+            {
+                "threads": {
+                    "thread-favorite": {
+                        "thread_id": "thread-favorite",
+                        "favorited_at": "2026-06-10T12:00:00Z",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "sessions": {
+                    "thread-favorite": {
+                        "label": "favorite",
+                        "threadId": "thread-favorite",
+                        "updatedAt": "2026-01-02T00:00:00.000Z",
+                        "lastStatus": "completed",
+                    },
+                    "thread-normal": {
+                        "label": "normal",
+                        "threadId": "thread-normal",
+                        "updatedAt": "2026-01-01T00:00:00.000Z",
+                        "lastStatus": "completed",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = ReadyClient("ws://127.0.0.1:1", state_file, "gpt-test")
+
+    recent = await client.recent(type_query(favorite=True, include_inactive=True))
+    normal = await client.recent(type_query(favorite=False, include_inactive=True))
+
+    assert [agent["threadId"] for agent in recent["agents"]] == ["thread-favorite"]
+    assert recent["agents"][0]["isFavorite"] is True
+    assert recent["agents"][0]["favoritedAt"] == "2026-06-10T12:00:00Z"
+    assert [agent["threadId"] for agent in normal["agents"]] == ["thread-normal"]
+
+
+def test_thread_favorite_reads_local_openbase_favorite(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OPENBASE_CODER_CLI_DATA_DIR", str(tmp_path))
+    (tmp_path / "thread-favorites.json").write_text(
+        json.dumps(
+            {
+                "threads": {
+                    "thread-1": {
+                        "thread_id": "thread-1",
+                        "favorited_at": "2026-06-10T12:00:00Z",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = ReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+
+    assert asyncio.run(client.thread_favorite("thread-1")) == {
+        "threadId": "thread-1",
+        "isFavorite": True,
+        "favoritedAt": "2026-06-10T12:00:00Z",
+    }
+    assert asyncio.run(client.thread_favorite("thread-2")) == {
+        "threadId": "thread-2",
+        "isFavorite": False,
+        "favoritedAt": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_state_is_enriched_with_turn_metadata_compatibly(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
@@ -1383,6 +1468,7 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
         "super_agents_rename",
         "codex_answer_request",
         "super_agents_sessions",
+        "super_agents_thread_favorite",
         "super_agents_active",
         "super_agents_status",
         "super_agents_resolve",
@@ -1397,6 +1483,8 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert by_name["super_agents_start"].input_schema["required"] == ["name"]
     assert by_name["super_agents_start_turn"].input_schema["required"] == ["name", "prompt"]
     assert by_name["super_agents_queue_turn"].input_schema["required"] == ["prompt"]
+    assert by_name["super_agents_thread_favorite"].input_schema["required"] == ["threadId"]
+    assert "favorite" in by_name["super_agents_recent"].input_schema["properties"]
     assert "approvalPolicy" not in by_name["super_agents_start"].input_schema["properties"]
     assert "sandbox" not in by_name["super_agents_start"].input_schema["properties"]
     assert "approvalPolicy" not in by_name["super_agents_start_turn"].input_schema["properties"]

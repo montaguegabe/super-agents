@@ -164,6 +164,8 @@ The MCP server exposes these tools:
 - `super_agents_rename`: rename a Codex app-server thread.
 - `codex_answer_request`: answer a pending app-server callback.
 - `super_agents_sessions`: list named Codex app-server threads.
+- `super_agents_thread_favorite`: check whether one local Openbase Coder thread
+  is favorited.
 - `super_agents_active`: list active tracked agents with compact previews.
 - `super_agents_status`: return a compact status list for voice/status checks.
 - `super_agents_resolve`: resolve a name to the latest matching active thread.
@@ -175,6 +177,9 @@ The MCP server exposes these tools:
 - `super_agents_queue_turn`: queue a follow-up prompt to run after the active
   turn completes.
 - `super_agents_recent`: list recent named Codex app-server threads.
+
+List-style tools accept `favorite=true` or `favorite=false` to filter by
+Openbase Coder's local per-machine favorite metadata.
 
 Default responses are intentionally compact. Full turns, tracked event
 transcripts, diffs, and large previews are opt-in through each tool's detail

@@ -41,6 +41,7 @@ from .state import (
     read_state_file_locked,
     update_state_file,
 )
+from .thread_favorites import favorite_status, is_favorite
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,12 @@ class SessionClientMixin:
             for session in sessions
             if not input_data.status or self.session_status(session) == input_data.status
         ]
+        if input_data.favorite is not None:
+            sessions = [
+                session
+                for session in sessions
+                if is_favorite(session.thread_id) is input_data.favorite
+            ]
         return sorted(sessions, key=session_recency, reverse=True)
 
     async def resolve_session(self, label: str, input_data: LabelQueryInput) -> ResolvedSession:
@@ -198,6 +205,12 @@ class SessionClientMixin:
         ]
         if input_data.status:
             items = [item for item in items if item.get("status") == input_data.status]
+        if input_data.favorite is not None:
+            items = [
+                item
+                for item in items
+                if item.get("isFavorite") is input_data.favorite
+            ]
         return sorted(items, key=lambda item: parse_iso_ms(str(item.get("updatedAt") or "")), reverse=True)
 
     def thread_view(self, thread: JsonObject) -> JsonObject:
@@ -209,6 +222,7 @@ class SessionClientMixin:
         )
         updated_at = iso_from_thread_time(thread)
         last_event_at = session.last_event_at if session else None
+        favorite = favorite_status(thread_id)
         return without_none(
             {
                 "name": extract_thread_name(thread),
@@ -221,6 +235,8 @@ class SessionClientMixin:
                     session, running_turn_id or (session.last_turn_id if session else None)
                 ),
                 "status": status,
+                "isFavorite": favorite["isFavorite"],
+                "favoritedAt": favorite["favoritedAt"],
                 "ageMs": int(time.time() * 1000) - thread_recency(thread),
                 "updatedAt": updated_at,
                 "lastEventAt": last_event_at,
@@ -237,6 +253,7 @@ class SessionClientMixin:
         status = self.session_status(session)
         running_turn_id = session.active_turn_id or session.last_turn_id if is_active_status(status) else None
         started_at = session.last_started_at or session.updated_at
+        favorite = favorite_status(session.thread_id)
         return without_none(
             {
                 "label": session.label,
@@ -248,6 +265,8 @@ class SessionClientMixin:
                 "lastTurnId": session.last_turn_id,
                 "reasoningEffort": self.session_turn_reasoning_effort(session, running_turn_id or session.last_turn_id),
                 "status": status,
+                "isFavorite": favorite["isFavorite"],
+                "favoritedAt": favorite["favoritedAt"],
                 "ageMs": int(time.time() * 1000) - parse_iso_ms(started_at),
                 "updatedAt": session.updated_at,
                 "lastEventAt": session.last_event_at,
@@ -281,6 +300,8 @@ class SessionClientMixin:
                 "turnId": item.get("runningTurnId") or item.get("lastTurnId"),
                 "reasoningEffort": item.get("reasoningEffort"),
                 "status": item.get("status"),
+                "isFavorite": item.get("isFavorite"),
+                "favoritedAt": item.get("favoritedAt"),
                 "lastEventAt": item.get("lastEventAt"),
                 "updatedAt": item.get("updatedAt"),
                 "lastEventAgeMs": item.get("lastEventAgeMs"),
