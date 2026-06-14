@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from super_agents.app_models import LabelQueryInput
+from super_agents import backend_clients
 from super_agents.backend_clients import (
     CLAUDE_AGENT_SDK_BACKEND,
     CLAUDE_TUI_BACKEND,
@@ -59,6 +60,18 @@ def test_client_factory_reads_legacy_backend_env(monkeypatch: pytest.MonkeyPatch
 
     assert backend_from_environment() == "claude-agent-sdk"
     assert isinstance(client_from_environment(), ClaudeAgentSdkClient)
+
+
+def test_client_factory_reads_backend_from_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENBASE_CODING_BACKEND=claude-tui\n", encoding="utf-8")
+    monkeypatch.delenv("OPENBASE_CODING_BACKEND", raising=False)
+    monkeypatch.delenv("OPENBASE_CODEX_BACKEND", raising=False)
+    monkeypatch.setattr(backend_clients, "DEFAULT_ENV_FILE", env_file)
+
+    assert backend_from_environment() == "claude-tui"
 
 
 @pytest.mark.asyncio

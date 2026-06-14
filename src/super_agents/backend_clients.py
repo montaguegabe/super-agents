@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Protocol
 
 from .app_models import LabelQueryInput
@@ -13,6 +14,7 @@ CLAUDE_AGENT_SDK_BACKEND = "claude-agent-sdk"
 CLAUDE_TUI_BACKEND = "claude-tui"
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
 LEGACY_CODEX_BACKEND_ENV_KEY = "OPENBASE_CODEX_BACKEND"
+DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
 BACKEND_ALIASES = {
     "": CODEX_BACKEND,
     "openai": CODEX_BACKEND,
@@ -60,7 +62,26 @@ def normalize_backend(value: str | None) -> str:
 
 
 def backend_from_environment() -> str:
-    return normalize_backend(os.environ.get(CODING_BACKEND_ENV_KEY) or os.environ.get(LEGACY_CODEX_BACKEND_ENV_KEY))
+    env_values = _env_file_values(DEFAULT_ENV_FILE)
+    return normalize_backend(
+        os.environ.get(CODING_BACKEND_ENV_KEY)
+        or os.environ.get(LEGACY_CODEX_BACKEND_ENV_KEY)
+        or env_values.get(CODING_BACKEND_ENV_KEY)
+        or env_values.get(LEGACY_CODEX_BACKEND_ENV_KEY)
+    )
+
+
+def _env_file_values(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
 def client_from_environment() -> SuperAgentsClient:

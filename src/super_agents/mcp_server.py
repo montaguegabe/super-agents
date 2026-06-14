@@ -579,7 +579,7 @@ def default_super_agent_instructions_path() -> Path:
         return Path(configured).expanduser()
     if codex_home := os.environ.get("CODEX_HOME"):
         return Path(codex_home).expanduser() / SUPER_AGENT_INSTRUCTIONS_FILENAME
-    return Path.home() / ".openbase" / "codex_home" / SUPER_AGENT_INSTRUCTIONS_FILENAME
+    return Path.home() / ".openbase" / "instructions" / SUPER_AGENT_INSTRUCTIONS_FILENAME
 
 
 def default_reasoning_effort() -> str:
@@ -590,10 +590,41 @@ def default_reasoning_effort() -> str:
 
 def default_super_agents_model(*, backend: str | None = None) -> str | None:
     payload = default_dispatcher_config()
+    backend_value = _backend_model(
+        payload,
+        "super_agents",
+        backend=backend or backend_from_environment(),
+    )
+    if backend_value:
+        return _model_for_backend(backend_value, backend=backend)
     value = payload.get("super_agents_model") or payload.get("superAgentsModel")
     if isinstance(value, str) and value.strip():
         return _model_for_backend(value.strip(), backend=backend)
     return _model_for_backend(os.environ.get("SUPER_AGENTS_MODEL", "").strip(), backend=backend)
+
+
+def _backend_model(payload: JsonObject, role: str, *, backend: str) -> str | None:
+    backend_models = payload.get("backend_models") or payload.get("backendModels")
+    if not isinstance(backend_models, dict):
+        return None
+    for backend_key in (backend, _legacy_backend_key(backend)):
+        if not backend_key:
+            continue
+        model_config = backend_models.get(backend_key)
+        if not isinstance(model_config, dict):
+            continue
+        value = model_config.get(role)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _legacy_backend_key(backend: str) -> str | None:
+    if backend == "claude-agent-sdk":
+        return "claude-code"
+    if backend == "claude-tui":
+        return "claude-code-tui"
+    return None
 
 
 def _model_for_backend(model: str | None, *, backend: str | None = None) -> str | None:

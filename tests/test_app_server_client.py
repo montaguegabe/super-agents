@@ -188,6 +188,31 @@ def test_turn_input_uses_openbase_super_agents_model_default(monkeypatch, tmp_pa
     assert default_super_agents_model() == "opus"
 
 
+def test_turn_input_uses_backend_specific_super_agents_model(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "backend_models": {
+                    "codex": {"super_agents": "gpt-5.5"},
+                    "claude-agent-sdk": {"super_agents": "sonnet"},
+                },
+                "super_agents_model": "legacy-model",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-agent-sdk")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["model"] == "sonnet"
+    assert default_super_agents_model() == "sonnet"
+
+
 def test_turn_input_ignores_claude_model_default_for_codex(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
