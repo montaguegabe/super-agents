@@ -28,7 +28,8 @@ INSTRUCTIONS = (
     "codex_answer_request when a callback is pending."
 )
 
-OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
+OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "dispatcher-config.json"
+LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
@@ -210,9 +211,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                 ["threadId"],
             ),
             annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.thread_favorite(
-                required_string(input_data, "threadId")
-            ),
+            handler=lambda input_data: client.thread_favorite(required_string(input_data, "threadId")),
         ),
         ToolDefinition(
             name="super_agents_tags",
@@ -355,7 +354,10 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                     "prompt": {"type": "string"},
                     "cwd": {"type": "string"},
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
-                    "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
+                    "model": {
+                        "type": "string",
+                        "description": "Defaults to thread model, dispatcher config super_agents_model, or SUPER_AGENTS_MODEL.",
+                    },
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
                 ["name", "prompt"],
@@ -378,7 +380,10 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                     **name_query_properties(include_ids=True, include_output_options=False),
                     "prompt": {"type": "string"},
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
-                    "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
+                    "model": {
+                        "type": "string",
+                        "description": "Defaults to thread model, dispatcher config super_agents_model, or SUPER_AGENTS_MODEL.",
+                    },
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                     "agentName": {
                         "type": "string",
@@ -420,7 +425,10 @@ def turn_start_properties() -> JsonObject:
         "prompt": {"type": "string"},
         "cwd": {"type": "string"},
         "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
-        "model": {"type": "string", "description": "Defaults to thread model or SUPER_AGENTS_MODEL."},
+        "model": {
+            "type": "string",
+            "description": "Defaults to thread model, dispatcher config super_agents_model, or SUPER_AGENTS_MODEL.",
+        },
         "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "name": {"type": "string"},
         "agentName": {
@@ -518,7 +526,7 @@ def clean_turn_input(input_data: JsonObject) -> JsonObject:
             "prompt": prompt,
             "cwd": optional_string(input_data, "cwd"),
             "mode": optional_mode(input_data, "mode") or "default",
-            "model": optional_string(input_data, "model"),
+            "model": optional_string(input_data, "model") or default_super_agents_model(),
             "reasoningEffort": optional_string(input_data, "reasoningEffort") or default_reasoning_effort(),
             "serviceTier": optional_string(input_data, "serviceTier") or "fast",
             "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
@@ -531,11 +539,20 @@ def clean_turn_input(input_data: JsonObject) -> JsonObject:
 
 
 def developer_instructions_or_default(input_data: JsonObject, allow_explicit_null: bool = False) -> str | None:
+    default_instructions = default_super_agent_instructions()
     if "developerInstructions" in input_data:
         if input_data["developerInstructions"] is None and allow_explicit_null:
             return None
-        return optional_string(input_data, "developerInstructions")
-    return default_super_agent_instructions()
+        return combine_developer_instructions(
+            default_instructions, optional_string(input_data, "developerInstructions")
+        )
+    return default_instructions
+
+
+def combine_developer_instructions(default_instructions: str | None, explicit_instructions: str | None) -> str | None:
+    if default_instructions and explicit_instructions:
+        return f"{default_instructions.rstrip()}\n\n{explicit_instructions}"
+    return explicit_instructions or default_instructions
 
 
 def default_super_agent_instructions() -> str | None:
@@ -556,19 +573,31 @@ def default_super_agent_instructions_path() -> Path:
 
 
 def default_reasoning_effort() -> str:
-    config_path = Path(
-        os.environ.get("SUPER_AGENTS_DEFAULT_CONFIG_PATH")
-        or os.environ.get("LIVEKIT_DISPATCHER_CONFIG_PATH")
-        or OPENBASE_DISPATCHER_CONFIG_PATH
-    )
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return "high"
-    if not isinstance(payload, dict):
-        return "high"
+    payload = default_dispatcher_config()
     value = payload.get("super_agents_reasoning_effort") or payload.get("superAgentsReasoningEffort")
     return value if isinstance(value, str) and value in REASONING_EFFORTS else "high"
+
+
+def default_super_agents_model() -> str | None:
+    payload = default_dispatcher_config()
+    value = payload.get("super_agents_model") or payload.get("superAgentsModel")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return os.environ.get("SUPER_AGENTS_MODEL", "").strip() or None
+
+
+def default_dispatcher_config() -> JsonObject:
+    configured = os.environ.get("SUPER_AGENTS_DEFAULT_CONFIG_PATH") or os.environ.get("LIVEKIT_DISPATCHER_CONFIG_PATH")
+    paths = [Path(configured).expanduser()] if configured else []
+    paths.extend([OPENBASE_DISPATCHER_CONFIG_PATH, LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH])
+    for config_path in paths:
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:

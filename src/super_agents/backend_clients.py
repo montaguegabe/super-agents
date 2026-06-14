@@ -9,16 +9,19 @@ from .app_server_client import CodexAppServerClient
 JsonObject = dict[str, Any]
 
 CODEX_BACKEND = "codex"
-CLAUDE_CODE_PROXY_BACKEND = "claude-code-proxy"
+CLAUDE_AGENT_SDK_BACKEND = "claude-agent-sdk"
 CLAUDE_TUI_BACKEND = "claude-tui"
+CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
+LEGACY_CODEX_BACKEND_ENV_KEY = "OPENBASE_CODEX_BACKEND"
 BACKEND_ALIASES = {
     "": CODEX_BACKEND,
     "openai": CODEX_BACKEND,
     "codex": CODEX_BACKEND,
-    "claude": CLAUDE_CODE_PROXY_BACKEND,
-    "claude-code": CLAUDE_CODE_PROXY_BACKEND,
-    "claude-code-proxy": CLAUDE_CODE_PROXY_BACKEND,
-    "claude-proxy": CLAUDE_CODE_PROXY_BACKEND,
+    "claude": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-code": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-agent": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-agent-sdk": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-sdk": CLAUDE_AGENT_SDK_BACKEND,
     "claude-tui": CLAUDE_TUI_BACKEND,
     "claude-code-tui": CLAUDE_TUI_BACKEND,
 }
@@ -52,12 +55,12 @@ def normalize_backend(value: str | None) -> str:
     try:
         return BACKEND_ALIASES[raw]
     except KeyError as exc:
-        supported = ", ".join(sorted({CODEX_BACKEND, CLAUDE_CODE_PROXY_BACKEND, CLAUDE_TUI_BACKEND}))
-        raise ValueError(f"Unsupported OPENBASE_CODEX_BACKEND: {value}. Supported backends: {supported}.") from exc
+        supported = ", ".join(sorted({CODEX_BACKEND, CLAUDE_AGENT_SDK_BACKEND, CLAUDE_TUI_BACKEND}))
+        raise ValueError(f"Unsupported {CODING_BACKEND_ENV_KEY}: {value}. Supported backends: {supported}.") from exc
 
 
 def backend_from_environment() -> str:
-    return normalize_backend(os.environ.get("OPENBASE_CODEX_BACKEND"))
+    return normalize_backend(os.environ.get(CODING_BACKEND_ENV_KEY) or os.environ.get(LEGACY_CODEX_BACKEND_ENV_KEY))
 
 
 def client_from_environment() -> SuperAgentsClient:
@@ -66,4 +69,8 @@ def client_from_environment() -> SuperAgentsClient:
         from super_agents.claude_tui.client import ClaudeTuiClient
 
         return ClaudeTuiClient()
+    if backend == CLAUDE_AGENT_SDK_BACKEND:
+        from super_agents.claude_sdk import ClaudeAgentSdkClient
+
+        return ClaudeAgentSdkClient()
     return CodexAppServerClient()

@@ -119,7 +119,6 @@ from .item_tags import (
 
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
 DEFAULT_MODEL = "gpt-5.4"
-CLAUDE_CODE_MODEL = "claude-code"
 DEFAULT_STATE_FILE = Path.home() / ".super-agents" / "state.json"
 DEFAULT_QUEUE_DIR = Path.home() / ".super-agents" / "queues"
 logger = logging.getLogger(__name__)
@@ -233,9 +232,6 @@ def _is_missing_rollout_error(exc: RuntimeError) -> bool:
 def default_model_from_environment() -> str:
     if model := os.environ.get("SUPER_AGENTS_MODEL", "").strip():
         return model
-    backend = os.environ.get("OPENBASE_CODEX_BACKEND", "").strip().lower()
-    if backend in {"claude", "claude-code", "claude-code-proxy", "claude-proxy"}:
-        return os.environ.get("CODEX_CLAUDE_MODEL", CLAUDE_CODE_MODEL).strip() or CLAUDE_CODE_MODEL
     return DEFAULT_MODEL
 
 

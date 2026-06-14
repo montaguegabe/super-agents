@@ -5,20 +5,21 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import model_catalog_path
-
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
 CODEX_BACKEND = "codex"
-CLAUDE_CODE_PROXY_BACKEND = "claude-code-proxy"
+CLAUDE_AGENT_SDK_BACKEND = "claude-agent-sdk"
 CLAUDE_TUI_BACKEND = "claude-tui"
-BACKENDS = {CODEX_BACKEND, CLAUDE_CODE_PROXY_BACKEND, CLAUDE_TUI_BACKEND}
+CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
+LEGACY_CODEX_BACKEND_ENV_KEY = "OPENBASE_CODEX_BACKEND"
+BACKENDS = {CODEX_BACKEND, CLAUDE_AGENT_SDK_BACKEND, CLAUDE_TUI_BACKEND}
 BACKEND_ALIASES = {
     "codex": CODEX_BACKEND,
     "openai": CODEX_BACKEND,
-    "claude": CLAUDE_CODE_PROXY_BACKEND,
-    "claude-code": CLAUDE_CODE_PROXY_BACKEND,
-    "claude-code-proxy": CLAUDE_CODE_PROXY_BACKEND,
-    "claude-proxy": CLAUDE_CODE_PROXY_BACKEND,
+    "claude": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-code": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-agent": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-agent-sdk": CLAUDE_AGENT_SDK_BACKEND,
+    "claude-sdk": CLAUDE_AGENT_SDK_BACKEND,
     "claude-tui": CLAUDE_TUI_BACKEND,
     "claude-code-tui": CLAUDE_TUI_BACKEND,
 }
@@ -46,7 +47,13 @@ def read_env_values(path: Path) -> dict[str, str]:
 
 def current_backend(path: Path = DEFAULT_ENV_FILE) -> BackendStatus:
     values = read_env_values(path)
-    backend = values.get("OPENBASE_CODEX_BACKEND") or os.environ.get("OPENBASE_CODEX_BACKEND") or "codex"
+    backend = (
+        values.get(CODING_BACKEND_ENV_KEY)
+        or values.get(LEGACY_CODEX_BACKEND_ENV_KEY)
+        or os.environ.get(CODING_BACKEND_ENV_KEY)
+        or os.environ.get(LEGACY_CODEX_BACKEND_ENV_KEY)
+        or CODEX_BACKEND
+    )
     backend = BACKEND_ALIASES.get(backend, backend)
     if backend not in BACKENDS:
         backend = f"unsupported:{backend}"
@@ -58,15 +65,7 @@ def set_backend(backend: str, path: Path = DEFAULT_ENV_FILE) -> BackendStatus:
     if normalized not in BACKENDS:
         raise ValueError(f"Unsupported backend: {backend}")
 
-    values = {"OPENBASE_CODEX_BACKEND": normalized}
-    if normalized == CLAUDE_CODE_PROXY_BACKEND:
-        values.update(
-            {
-                "CODEX_CLAUDE_PROXY_COMMAND": "super-agents-claude-proxy",
-                "CODEX_CLAUDE_MODEL_CATALOG_JSON": str(model_catalog_path()),
-            }
-        )
-    update_env_file(path, values)
+    update_env_file(path, {CODING_BACKEND_ENV_KEY: normalized})
     return current_backend(path)
 
 
@@ -115,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
     use_parser = subparsers.add_parser("use")
-    use_parser.add_argument("backend", choices=sorted(BACKENDS | {"claude-code"}))
+    use_parser.add_argument("backend", choices=sorted(BACKENDS | set(BACKEND_ALIASES)))
     args = parser.parse_args(argv)
 
     if args.command == "status":
@@ -128,10 +127,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "use":
         status = set_backend(args.backend, args.env_file)
         print(f"Backend set to {status.backend} in {status.env_file}.")
-        if status.backend == CLAUDE_CODE_PROXY_BACKEND:
-            print("Restart codex-app-server; keep codex-claude-proxy running for proxy mode.")
+        if status.backend == CLAUDE_AGENT_SDK_BACKEND:
+            print(
+                "Restart the Super Agents MCP server for Claude Agent SDK mode. codex-app-server is not used by this backend."
+            )
         elif status.backend == CLAUDE_TUI_BACKEND:
-            print("Restart the Super Agents MCP server for claude-tui mode. codex-app-server is not used by this backend.")
+            print(
+                "Restart the Super Agents MCP server for claude-tui mode. codex-app-server is not used by this backend."
+            )
         else:
             print("Restart codex-app-server for the change to apply.")
         return 0

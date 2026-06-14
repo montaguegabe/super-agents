@@ -20,11 +20,14 @@ Issues = "https://github.com/montaguegabe/super-agents/issues"
 
 [project.scripts]
 super-agents-mcp = "super_agents.mcp_server:main"
-super-agents-claude-proxy = "super_agents.claude_proxy.server:main"
 super-agents-claude-tui = "super_agents.claude_tui.cli:main"
-super-agents-backend = "super_agents.claude_proxy.backend:main"
+super-agents-backend = "super_agents.backend:main"
 
 [project.optional-dependencies]
+# Needed when OPENBASE_CODING_BACKEND=claude-agent-sdk is selected.
+claude = [
+  "claude-agent-sdk>=0.1.0",
+]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",

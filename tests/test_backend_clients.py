@@ -7,13 +7,14 @@ import pytest
 
 from super_agents.app_models import LabelQueryInput
 from super_agents.backend_clients import (
-    CLAUDE_CODE_PROXY_BACKEND,
+    CLAUDE_AGENT_SDK_BACKEND,
     CLAUDE_TUI_BACKEND,
     CODEX_BACKEND,
     backend_from_environment,
     client_from_environment,
     normalize_backend,
 )
+from super_agents.claude_sdk import ClaudeAgentSdkClient
 from super_agents.claude_tui.client import ClaudeTuiClient
 from super_agents.claude_tui.storage import Store
 
@@ -30,17 +31,34 @@ for line in sys.stdin:
 
 def test_backend_normalization_supports_three_canonical_modes() -> None:
     assert normalize_backend("codex") == CODEX_BACKEND
-    assert normalize_backend("claude-code") == CLAUDE_CODE_PROXY_BACKEND
-    assert normalize_backend("claude-code-proxy") == CLAUDE_CODE_PROXY_BACKEND
+    assert normalize_backend("claude-code") == CLAUDE_AGENT_SDK_BACKEND
+    assert normalize_backend("claude-agent-sdk") == CLAUDE_AGENT_SDK_BACKEND
     assert normalize_backend("claude-tui") == CLAUDE_TUI_BACKEND
 
 
+def test_client_factory_uses_claude_agent_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
+
+    assert backend_from_environment() == "claude-agent-sdk"
+    assert isinstance(client_from_environment(), ClaudeAgentSdkClient)
+
+
 def test_client_factory_uses_claude_tui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("OPENBASE_CODEX_BACKEND", "claude-tui")
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-tui")
     monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
 
     assert backend_from_environment() == "claude-tui"
     assert isinstance(client_from_environment(), ClaudeTuiClient)
+
+
+def test_client_factory_reads_legacy_backend_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("OPENBASE_CODING_BACKEND", raising=False)
+    monkeypatch.setenv("OPENBASE_CODEX_BACKEND", "claude-code")
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
+
+    assert backend_from_environment() == "claude-agent-sdk"
+    assert isinstance(client_from_environment(), ClaudeAgentSdkClient)
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from super_agents.mcp_server import (
     clean_thread_input,
     clean_turn_input,
     default_super_agent_instructions_path,
+    default_super_agents_model,
 )
 
 
@@ -39,18 +40,18 @@ def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
     assert websocket_max_size() is None
 
 
-def test_default_model_uses_claude_code_backend(monkeypatch, tmp_path: Path) -> None:
+def test_default_model_ignores_legacy_claude_model_env(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("SUPER_AGENTS_MODEL", raising=False)
-    monkeypatch.setenv("OPENBASE_CODEX_BACKEND", "claude-code")
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
     monkeypatch.setenv("CODEX_CLAUDE_MODEL", "claude-custom")
 
     client = CodexAppServerClient(state_file=tmp_path / "state.json")
 
-    assert client.default_model == "claude-custom"
+    assert client.default_model == app_server_client.DEFAULT_MODEL
 
 
-def test_super_agents_model_overrides_claude_backend(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("OPENBASE_CODEX_BACKEND", "claude-code")
+def test_super_agents_model_overrides_default_model(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
     monkeypatch.setenv("SUPER_AGENTS_MODEL", "gpt-custom")
 
     client = CodexAppServerClient(state_file=tmp_path / "state.json")
@@ -172,6 +173,18 @@ def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tm
     assert cleaned["reasoningEffort"] == "low"
 
 
+def test_turn_input_uses_openbase_super_agents_model_default(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SUPER_AGENTS_MODEL", "sonnet")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["model"] == "opus"
+    assert default_super_agents_model() == "opus"
+
+
 def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({"reasoning_effort": "low"}), encoding="utf-8")
@@ -211,7 +224,7 @@ def test_super_agent_instructions_default_to_codex_home(monkeypatch, tmp_path: P
     assert cleaned["developerInstructions"] == "Use the Super Agent instructions.\n"
 
 
-def test_explicit_developer_instructions_override_super_agent_default(monkeypatch, tmp_path: Path) -> None:
+def test_explicit_developer_instructions_extend_super_agent_default(monkeypatch, tmp_path: Path) -> None:
     instructions_path = tmp_path / "SUPER_AGENT_INSTRUCTIONS.md"
     instructions_path.write_text("Default instructions.\n", encoding="utf-8")
     monkeypatch.setenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", str(instructions_path))
@@ -221,8 +234,8 @@ def test_explicit_developer_instructions_override_super_agent_default(monkeypatc
         {"name": "new-agent", "prompt": "work", "developerInstructions": "Explicit turn instructions."}
     )
 
-    assert thread_input["developerInstructions"] == "Explicit instructions."
-    assert turn_input["developerInstructions"] == "Explicit turn instructions."
+    assert thread_input["developerInstructions"] == "Default instructions.\n\nExplicit instructions."
+    assert turn_input["developerInstructions"] == "Default instructions.\n\nExplicit turn instructions."
 
 
 def test_start_turn_by_name_input_ignores_agent_name() -> None:
@@ -430,12 +443,15 @@ async def test_login_shell_config_excludes_legacy_super_agent_identity_environme
 
 
 def test_super_agent_identity_instructions_replace_stale_identity_lines() -> None:
-    assert app_server_client.with_super_agent_identity_instructions(
-        "Base instructions.\n\nSuper Agent thread name: Old\nSuper Agent thread id: old-thread\nYour name is Old.",
-        "New Agent",
-        "new-thread",
-        "Dottie",
-    ) == "Base instructions.\n\nSuper Agent thread name: New Agent\nSuper Agent thread id: new-thread\nYour name is Dottie."
+    assert (
+        app_server_client.with_super_agent_identity_instructions(
+            "Base instructions.\n\nSuper Agent thread name: Old\nSuper Agent thread id: old-thread\nYour name is Old.",
+            "New Agent",
+            "new-thread",
+            "Dottie",
+        )
+        == "Base instructions.\n\nSuper Agent thread name: New Agent\nSuper Agent thread id: new-thread\nYour name is Dottie."
+    )
 
 
 @pytest.mark.asyncio
