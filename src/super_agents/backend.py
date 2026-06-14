@@ -63,6 +63,8 @@ def current_backend(path: Path = DEFAULT_ENV_FILE) -> BackendStatus:
     backend = BACKEND_ALIASES.get(backend, backend)
     if backend not in BACKENDS:
         backend = f"unsupported:{backend}"
+    elif backend == OPENBASE_CLOUD_BACKEND:
+        backend = CODEX_BACKEND
     return BackendStatus(env_file=path, backend=backend, exists=path.is_file())
 
 
@@ -136,10 +138,6 @@ def main(argv: list[str] | None = None) -> int:
         if status.backend == CLAUDE_CODE_BACKEND:
             print(
                 "Restart the Super Agents MCP server for Claude Code mode. codex-app-server is not used by this backend."
-            )
-        elif status.backend == OPENBASE_CLOUD_BACKEND:
-            print(
-                "Restart codex-app-server for Openbase Cloud model proxy mode."
             )
         else:
             print("Restart codex-app-server for the change to apply.")

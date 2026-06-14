@@ -849,7 +849,13 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             raise ValueError(f"No turn is known for label {required_label(input_data)}.")
         return await self.turn_progress(resolved.session.thread_id, turn_id, input_data)
 
-    async def steer_by_label(self, input_data: LabelQueryInput, prompt: str) -> JsonObject:
+    async def steer_by_label(
+        self,
+        input_data: LabelQueryInput,
+        prompt: str,
+        turn_input: JsonObject | None = None,
+    ) -> JsonObject:
+        extras = dict(turn_input or {})
         try:
             resolved = await self.resolve_session(required_label(input_data), input_data)
         except ValueError:
@@ -860,6 +866,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                     {
                         "label": target.session.label,
                         "agentName": target.session.agent_name,
+                        **extras,
                         "prompt": prompt,
                     }
                 ),
@@ -872,6 +879,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                     {
                         "label": resolved.session.label,
                         "agentName": resolved.session.agent_name,
+                        **extras,
                         "prompt": prompt,
                     }
                 ),

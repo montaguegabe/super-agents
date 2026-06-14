@@ -21,6 +21,7 @@ from super_agents.mcp_server import (
     clean_thread_input,
     clean_turn_input,
     default_super_agent_instructions_path,
+    default_service_tier,
     default_super_agents_model,
 )
 
@@ -167,6 +168,18 @@ def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tm
     assert cleaned["reasoningEffort"] == "low"
 
 
+def test_turn_input_uses_openbase_codex_service_tier_default(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"codex_service_tier": "standard"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("CODEX_SERVICE_TIER", "fast")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["serviceTier"] == "standard"
+    assert default_service_tier() == "standard"
+
+
 def test_turn_input_ignores_legacy_super_agents_model_default(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
@@ -225,6 +238,28 @@ def test_turn_input_uses_backend_specific_codex_model(monkeypatch, tmp_path: Pat
     )
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["model"] == "gpt-5.5"
+    assert default_super_agents_model() == "gpt-5.5"
+
+
+def test_openbase_cloud_uses_codex_model_defaults(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "backend_models": {
+                    "codex": {"super_agents": "gpt-5.5"},
+                    "openbase_cloud": {"super_agents": "openbase-codex"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 

@@ -12,6 +12,7 @@ JsonObject = dict[str, Any]
 CODEX_BACKEND = "codex"
 OPENBASE_CLOUD_BACKEND = "openbase_cloud"
 CLAUDE_CODE_BACKEND = "claude_code"
+CODEX_COMPATIBLE_BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND}
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
 LEGACY_CODEX_BACKEND_ENV_KEY = "OPENBASE_CODEX_BACKEND"
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
@@ -52,7 +53,12 @@ class SuperAgentsClient(Protocol):
     async def compact_status(self, input_data: LabelQueryInput | None = None) -> JsonObject: ...
     async def resolve_label(self, input_data: LabelQueryInput) -> JsonObject: ...
     async def progress_by_label(self, input_data: LabelQueryInput) -> JsonObject: ...
-    async def steer_by_label(self, input_data: LabelQueryInput, prompt: str) -> JsonObject: ...
+    async def steer_by_label(
+        self,
+        input_data: LabelQueryInput,
+        prompt: str,
+        turn_input: JsonObject | None = None,
+    ) -> JsonObject: ...
     async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject: ...
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject: ...
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject: ...
@@ -70,6 +76,22 @@ def normalize_backend(value: str | None) -> str:
 
 
 def backend_from_environment() -> str:
+    env_values = _env_file_values(DEFAULT_ENV_FILE)
+    return execution_backend(
+        normalize_backend(
+            os.environ.get(CODING_BACKEND_ENV_KEY)
+            or os.environ.get(LEGACY_CODEX_BACKEND_ENV_KEY)
+            or env_values.get(CODING_BACKEND_ENV_KEY)
+            or env_values.get(LEGACY_CODEX_BACKEND_ENV_KEY)
+        )
+    )
+
+
+def execution_backend(backend: str) -> str:
+    return CODEX_BACKEND if backend in CODEX_COMPATIBLE_BACKENDS else backend
+
+
+def configured_backend_from_environment() -> str:
     env_values = _env_file_values(DEFAULT_ENV_FILE)
     return normalize_backend(
         os.environ.get(CODING_BACKEND_ENV_KEY)

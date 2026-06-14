@@ -11,14 +11,17 @@ from typing import Any, Callable, Iterator
 
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import LabelQueryInput
-from super_agents.app_protocol import is_active_status
+from super_agents.app_protocol import is_active_status, with_super_agent_identity_instructions
 from super_agents.app_sessions import required_label
-from super_agents.claude_tui.models import Session
-from super_agents.claude_tui.storage import Store
-from super_agents.claude_tui.timeutil import iso_now
+from super_agents.agent_store import Session, Store, iso_now
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
+CLAUDE_PERMISSION_MODE = "bypassPermissions"
+CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+CLAUDE_CONFIG_FILENAME = ".claude.json"
+CLAUDE_SETTINGS_FILENAME = "settings.json"
+CLAUDE_INSTRUCTIONS_FILENAME = "CLAUDE.md"
 
 SDK_IMPORT_ERROR = (
     "Claude Code backend requires the claude-agent-sdk package. "
@@ -61,10 +64,36 @@ class ClaudeAgentSdkClient:
         name = str(input_data.get("name") or input_data.get("label") or "").strip()
         if not name:
             raise ValueError("name is required.")
+        agent_name = _optional_str(input_data.get("agentName"))
+        developer_instructions = with_super_agent_identity_instructions(
+            _optional_str(input_data.get("developerInstructions")),
+            name,
+            agent_name=agent_name,
+        )
+        existing = self.store.get_by_name(name)
+        if existing is not None:
+            effective_agent_name = agent_name or existing.agent_name
+            effective_developer_instructions = with_super_agent_identity_instructions(
+                _optional_str(input_data.get("developerInstructions")) or existing.developer_instructions,
+                name,
+                agent_name=effective_agent_name,
+            )
+            session = self.store.update_session(
+                existing.id,
+                cwd=str(Path(_optional_str(input_data.get("cwd")) or existing.cwd).expanduser()),
+                agent_name=effective_agent_name,
+                developer_instructions=effective_developer_instructions,
+                model=_optional_str(input_data.get("model")) or existing.model,
+                status="waiting",
+                active_turn_id=None,
+                last_observed_state="Claude Code thread refreshed",
+            )
+            return {"backend": self.backend, "threadId": session.id, "session": session.to_json()}
         session = self.store.create_session(
             name,
             cwd=_optional_str(input_data.get("cwd")),
-            agent_name=_optional_str(input_data.get("agentName")),
+            agent_name=agent_name,
+            developer_instructions=developer_instructions,
             model=_optional_str(input_data.get("model")),
             command=["claude-agent-sdk"],
         )
@@ -90,9 +119,9 @@ class ClaudeAgentSdkClient:
             "logTail": self.store.tail_log(session, lines=80),
         }
         if include_turns:
-            payload["turns"] = [turn.to_json() for turn in turns]
+            payload["turns"] = [self._turn_view(session, turn) for turn in turns]
         else:
-            payload["recentTurns"] = [turn.to_json() for turn in turns[:5]]
+            payload["recentTurns"] = [self._turn_view(session, turn) for turn in turns[:5]]
         return payload
 
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject:
@@ -144,12 +173,20 @@ class ClaudeAgentSdkClient:
         session = self._resolve_session(input_data)
         turns = self.store.list_turns(session.id, limit=input_data.max_items or 10)
         payload = self._status_item(session)
-        payload["turns"] = [turn.to_json() for turn in turns]
+        payload["turns"] = [self._turn_view(session, turn) for turn in turns]
         payload["logTail"] = self.store.tail_log(session, lines=40)
         return payload
 
-    async def steer_by_label(self, input_data: LabelQueryInput, prompt: str) -> JsonObject:
-        return await self.start_turn_by_label(input_data, {"prompt": prompt})
+    async def steer_by_label(
+        self,
+        input_data: LabelQueryInput,
+        prompt: str,
+        turn_input: JsonObject | None = None,
+    ) -> JsonObject:
+        return await self.start_turn_by_label(
+            input_data,
+            {**(turn_input or {}), "prompt": prompt},
+        )
 
     async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         session = self._resolve_session(input_data)
@@ -169,8 +206,13 @@ class ClaudeAgentSdkClient:
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         session = self._resolve_session(input_data)
         if self._session_is_busy(session):
+            interrupted_turn_id = await self._interrupt_active_turn(
+                session,
+                reason="steered by follow-up",
+            )
             sdk = self._require_sdk()
             prompt = str(turn_input["prompt"])
+            sdk_prompt = self._prompt_for_session(session, turn_input)
             model = _optional_str(turn_input.get("model")) or session.model
             reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
             turn = self.store.create_turn(
@@ -192,7 +234,7 @@ class ClaudeAgentSdkClient:
                 self._run_turn(
                     session.id,
                     turn.id,
-                    prompt,
+                    sdk_prompt,
                     model,
                     reasoning_effort,
                     sdk,
@@ -206,11 +248,13 @@ class ClaudeAgentSdkClient:
                 "turn": turn.to_json(),
                 "queued": False,
                 "steered": True,
+                "interruptedTurnId": interrupted_turn_id,
                 "startedImmediately": False,
                 "drain": "steered_active_turn",
             }
         sdk = self._require_sdk()
         prompt = str(turn_input["prompt"])
+        sdk_prompt = self._prompt_for_session(session, turn_input)
         model = _optional_str(turn_input.get("model")) or session.model
         reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
         turn = self.store.create_turn(
@@ -232,7 +276,7 @@ class ClaudeAgentSdkClient:
             self._run_turn(
                 session.id,
                 turn.id,
-                prompt,
+                sdk_prompt,
                 model,
                 reasoning_effort,
                 sdk,
@@ -300,6 +344,9 @@ class ClaudeAgentSdkClient:
         async with lock:
             session = self.store.get_session(session_id)
             try:
+                if self._turn_was_cancelled(turn_id):
+                    self._finish_cancelled_turn(session_id, turn_id)
+                    return
                 sdk_client = await self._sdk_client_for(
                     session,
                     model,
@@ -311,27 +358,86 @@ class ClaudeAgentSdkClient:
                     await sdk_client.query(prompt)
                     async for message in sdk_client.receive_response():
                         append_log(session.log_path, _message_to_log(message))
+                        if claude_session_id := _message_session_id(message):
+                            self.store.update_session(session_id, backend_session_id=claude_session_id)
                         if useful := _message_preview(message):
                             last_useful_message = useful
-                self.store.update_turn(turn_id, status="completed", finished_at=iso_now())
-                self.store.update_session(
-                    session_id,
-                    status="waiting",
-                    active_turn_id=None,
-                    last_observed_state="Claude Code response completed",
-                    last_useful_message=last_useful_message or None,
-                )
+                            self.store.update_turn(turn_id, last_useful_message=last_useful_message)
+                if self._turn_was_cancelled(turn_id):
+                    self._finish_cancelled_turn(session_id, turn_id)
+                else:
+                    self.store.update_turn(
+                        turn_id,
+                        status="completed",
+                        finished_at=iso_now(),
+                        last_useful_message=last_useful_message or None,
+                    )
+                    self._finish_session_turn(
+                        session_id,
+                        turn_id,
+                        status="waiting",
+                        active_turn_id=None,
+                        last_observed_state="Claude Code response completed",
+                        last_useful_message=last_useful_message or None,
+                    )
             except Exception as exc:
                 append_log(session.log_path, f"[{iso_now()}] ERROR {type(exc).__name__}: {exc}\n")
-                self.store.update_turn(turn_id, status="failed", finished_at=iso_now(), last_error=str(exc))
-                self.store.update_session(
-                    session_id,
-                    status="failed",
-                    active_turn_id=None,
-                    last_observed_state=str(exc),
-                )
+                if self._turn_was_cancelled(turn_id):
+                    self._finish_cancelled_turn(session_id, turn_id)
+                else:
+                    self.store.update_turn(turn_id, status="failed", finished_at=iso_now(), last_error=str(exc))
+                    self._finish_session_turn(
+                        session_id,
+                        turn_id,
+                        status="failed",
+                        active_turn_id=None,
+                        last_observed_state=str(exc),
+                    )
             finally:
                 self._schedule_queue_drain(session_id)
+
+    async def _interrupt_active_turn(self, session: Session, *, reason: str) -> str | None:
+        turn_id = session.active_turn_id
+        if not turn_id:
+            return None
+
+        with contextlib.suppress(KeyError):
+            self.store.update_turn(turn_id, status="cancelled", finished_at=iso_now())
+
+        sdk_client = self._sdk_clients.get(session.id)
+        if sdk_client is not None and hasattr(sdk_client, "interrupt"):
+            await sdk_client.interrupt()
+
+        self.store.update_session(
+            session.id,
+            status="running",
+            active_turn_id=turn_id,
+            last_observed_state=f"Claude Code turn interrupted: {reason}",
+        )
+        return turn_id
+
+    def _finish_session_turn(self, session_id: str, turn_id: str, **fields: object) -> None:
+        try:
+            current = self.store.get_session(session_id)
+        except KeyError:
+            return
+        if current.active_turn_id == turn_id:
+            self.store.update_session(session_id, **fields)
+
+    def _finish_cancelled_turn(self, session_id: str, turn_id: str) -> None:
+        self._finish_session_turn(
+            session_id,
+            turn_id,
+            status="cancelled",
+            active_turn_id=None,
+            last_observed_state="Claude Code response interrupted",
+        )
+
+    def _turn_was_cancelled(self, turn_id: str) -> bool:
+        try:
+            return self.store.get_turn(turn_id).status == "cancelled"
+        except KeyError:
+            return False
 
     async def _sdk_client_for(
         self,
@@ -345,7 +451,13 @@ class ClaudeAgentSdkClient:
             if model and hasattr(existing, "set_model"):
                 await existing.set_model(model)
             return existing
-        options = _agent_options(sdk, session.cwd, model, reasoning_effort)
+        options = _agent_options(
+            sdk,
+            session.cwd,
+            model,
+            reasoning_effort,
+            resume=session.backend_session_id,
+        )
         with _without_unsupported_anthropic_api_keys():
             client = sdk.ClaudeSDKClient(options=options)
             await client.connect()
@@ -385,7 +497,7 @@ class ClaudeAgentSdkClient:
                 self._run_turn(
                     session_id,
                     turn.id,
-                    turn.prompt,
+                    self._prompt_for_session(session, {"prompt": turn.prompt}),
                     turn.model,
                     turn.reasoning_effort,
                     sdk,
@@ -463,6 +575,16 @@ class ClaudeAgentSdkClient:
             }
         )
 
+    def _turn_view(self, session: Session, turn: Any) -> JsonObject:
+        data = turn.to_json()
+        if (
+            "lastUsefulMessage" not in data
+            and turn.id == session.last_turn_id
+            and session.last_useful_message
+        ):
+            data["lastUsefulMessage"] = session.last_useful_message
+        return data
+
     def _sdk_ready(self) -> tuple[bool, str | None]:
         try:
             with _without_unsupported_anthropic_api_keys():
@@ -473,6 +595,24 @@ class ClaudeAgentSdkClient:
 
     def _session_is_busy(self, session: Session) -> bool:
         return bool(session.active_turn_id or session.status == "running")
+
+    def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
+        prompt = str(turn_input["prompt"])
+        developer_instructions = _combine_developer_instructions(
+            session.developer_instructions,
+            _optional_str(turn_input.get("developerInstructions")),
+        )
+        developer_instructions = with_super_agent_identity_instructions(
+            developer_instructions,
+            session.name,
+            session.id,
+            session.agent_name,
+        )
+        return _with_claude_turn_context(
+            prompt,
+            cwd=session.cwd,
+            developer_instructions=developer_instructions,
+        )
 
     def _require_sdk(self) -> Any:
         try:
@@ -510,17 +650,101 @@ def _agent_options(
     cwd: str,
     model: str | None,
     reasoning_effort: str | None,
+    *,
+    resume: str | None,
 ) -> Any:
-    kwargs: JsonObject = {"cwd": cwd}
+    kwargs: JsonObject = {
+        "cwd": cwd,
+        "permission_mode": CLAUDE_PERMISSION_MODE,
+        **_managed_claude_config_options(),
+    }
     if model:
         kwargs["model"] = model
     if reasoning_effort:
         kwargs["effort"] = reasoning_effort
+    if resume:
+        kwargs["resume"] = resume
     return sdk.ClaudeAgentOptions(**kwargs)
+
+
+def _with_claude_turn_context(
+    prompt: str,
+    *,
+    cwd: str,
+    developer_instructions: str | None,
+) -> str:
+    context_parts = [
+        "<openbase-claude-code-context>",
+        f"Current working directory: {cwd}",
+        (
+            "When the user asks you to create or edit files in the current working directory, "
+            "interpret that as this directory and prefer relative paths or paths under it."
+        ),
+    ]
+    if developer_instructions:
+        context_parts.extend(
+            [
+                "",
+                "Developer instructions for this Openbase thread:",
+                developer_instructions.strip(),
+            ]
+        )
+    context_parts.append("</openbase-claude-code-context>")
+    return "\n".join(context_parts) + "\n\n" + prompt
+
+
+def _managed_claude_config_options() -> JsonObject:
+    config_dir_value = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
+    if not config_dir_value:
+        return {}
+
+    config_dir = Path(config_dir_value).expanduser()
+    options: JsonObject = {
+        "env": {CLAUDE_CONFIG_DIR_ENV: str(config_dir)},
+        "setting_sources": ["project"],
+    }
+
+    settings_path = config_dir / CLAUDE_SETTINGS_FILENAME
+    if settings_path.exists():
+        options["settings"] = str(settings_path)
+
+    instructions_path = config_dir / CLAUDE_INSTRUCTIONS_FILENAME
+    if instructions_path.exists():
+        options["system_prompt"] = {
+            "type": "file",
+            "path": str(instructions_path),
+        }
+
+    mcp_servers = _managed_claude_mcp_servers(config_dir)
+    if mcp_servers:
+        options["mcp_servers"] = mcp_servers
+
+    return options
+
+
+def _managed_claude_mcp_servers(config_dir: Path) -> JsonObject | None:
+    config_path = config_dir / CLAUDE_CONFIG_FILENAME
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    mcp_servers = payload.get("mcpServers")
+    return mcp_servers if isinstance(mcp_servers, dict) and mcp_servers else None
 
 
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _combine_developer_instructions(base: str | None, overlay: str | None) -> str | None:
+    parts = [part.strip() for part in (base, overlay) if part and part.strip()]
+    if not parts:
+        return None
+    return "\n\n".join(parts)
 
 
 def append_log(path_value: str | None, text: str) -> None:
@@ -563,3 +787,8 @@ def _message_preview(message: Any) -> str:
                 parts.append(text)
         return "\n".join(parts).strip()
     return ""
+
+
+def _message_session_id(message: Any) -> str | None:
+    session_id = getattr(message, "session_id", None)
+    return session_id if isinstance(session_id, str) and session_id else None

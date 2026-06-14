@@ -23,15 +23,18 @@ Handler = Callable[[JsonObject], Awaitable[Any]]
 logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
-    "Control local Codex app-server threads asynchronously. Tools start, inspect, steer, cancel, and answer "
-    "callbacks; they do not wait for turns to finish. Do not silently approve app-server callbacks; use "
-    "codex_answer_request when a callback is pending."
+    "Control Openbase Super Agents threads asynchronously. A Super Agents thread may run on the configured "
+    "backend, including Codex-compatible app-server sessions or Claude Code Agent SDK sessions. Tools start, "
+    "inspect, steer, cancel, and answer callbacks; they do not wait for turns to finish. Do not silently approve "
+    "app-server callbacks; use codex_answer_request when a callback is pending."
 )
 
 OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "dispatcher-config.json"
 LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+CODEX_SERVICE_TIERS = {"fast", "standard"}
+DEFAULT_CODEX_SERVICE_TIER = "fast"
 CLAUDE_MODEL_ALIASES = {"opus", "sonnet", "haiku"}
 
 
@@ -108,8 +111,11 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="codex_app_server_status",
-            title="Codex App Server Status",
-            description="Check local Codex app-server readiness, websocket connection, pending requests, and active turns.",
+            title="Super Agents Backend Status",
+            description=(
+                "Check Super Agents backend readiness, pending requests, queued turns, and active turns. "
+                "The backend may be Codex-compatible or Claude Code."
+            ),
             input_schema=object_schema({}),
             annotations={"readOnlyHint": True, "idempotentHint": True},
             handler=lambda _input: client.status(),
@@ -117,7 +123,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_start",
             title="Start Super Agents Thread",
-            description="Create a named Codex app-server thread using Codex's native thread-name store.",
+            description="Create a named Super Agents thread on the configured backend.",
             input_schema=object_schema(
                 {
                     "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
@@ -138,7 +144,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_resume",
             title="Resume Super Agents Thread",
-            description="Resume a named Codex app-server thread.",
+            description="Resume a named Super Agents thread.",
             input_schema=name_query_schema(["name"]),
             annotations={"readOnlyHint": True},
             handler=lambda input_data: client.resume_by_label(clean_name_query_input(input_data)),
@@ -146,7 +152,10 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_read",
             title="Read Super Agents Thread",
-            description="Read a named or id-addressed Codex app-server thread. Compact by default; pass includeTurns=true to include full turns.",
+            description=(
+                "Read a named or id-addressed Super Agents thread. Compact by default; "
+                "pass includeTurns=true to include full turns."
+            ),
             input_schema=object_schema(
                 {**name_query_properties(), "includeTurns": {"type": "boolean", "default": False}},
             ),
@@ -159,7 +168,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_rename",
             title="Rename Super Agents Thread",
-            description="Rename a Codex app-server thread using its current name.",
+            description="Rename a Super Agents thread using its current name.",
             input_schema=object_schema(
                 {
                     **name_query_properties(include_ids=False, include_output_options=False),
@@ -174,10 +183,11 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="codex_answer_request",
-            title="Answer Codex Request",
+            title="Answer Super Agents Callback",
             description=(
-                "Answer a pending app-server callback. For plan questions, pass result { answers: { question_id: "
-                "{ answers: [...] } } }. For approvals, pass result { decision: 'accept' | 'decline' | 'cancel' }."
+                "Answer a pending Super Agents backend callback. For plan questions, pass result "
+                "{ answers: { question_id: { answers: [...] } } }. For approvals, pass result "
+                "{ decision: 'accept' | 'decline' | 'cancel' }. Some backends may not support callbacks."
             ),
             input_schema=object_schema(
                 {
@@ -193,7 +203,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_sessions",
             title="Super Agents Sessions",
-            description="List named Codex app-server threads.",
+            description="List named Super Agents threads from the configured backend.",
             input_schema=object_schema({}),
             annotations={"readOnlyHint": True, "idempotentHint": True},
             handler=lambda _input: client.sessions(),
@@ -206,7 +216,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                 {
                     "threadId": {
                         "type": "string",
-                        "description": "App-server thread id to inspect.",
+                        "description": "Super Agents thread id to inspect.",
                     },
                 },
                 ["threadId"],
@@ -233,7 +243,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                 {
                     "threadId": {
                         "type": "string",
-                        "description": "App-server thread id to inspect or tag.",
+                        "description": "Super Agents thread id to inspect or tag.",
                     },
                     "tags": {
                         "type": "array",
@@ -377,7 +387,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             description=(
                 "Queue a follow-up prompt in Super Agents' per-thread filesystem queue so it starts as a separate "
                 "turn after the target thread's active turn finishes. If no active turn exists, starts immediately. "
-                "Codex app-server does not expose native queued-next-turn semantics for normal user prompts."
+                "Some backends do not expose native queued-next-turn semantics for normal user prompts."
             ),
             input_schema=object_schema(
                 {
@@ -404,7 +414,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_recent",
             title="Recent Super Agents",
-            description="List recent named Codex app-server threads.",
+            description="List recent named Super Agents threads from the configured backend.",
             input_schema=name_query_schema(),
             annotations={"readOnlyHint": True, "idempotentHint": True},
             handler=lambda input_data: client.recent(clean_name_query_input(input_data)),
@@ -460,11 +470,11 @@ def name_query_properties(include_ids: bool = True, include_output_options: bool
             {
                 "threadId": {
                     "type": "string",
-                    "description": "Inspect a specific app-server thread without resolving a name.",
+                    "description": "Inspect a specific Super Agents thread without resolving a name.",
                 },
                 "turnId": {
                     "type": "string",
-                    "description": "Inspect a specific app-server turn when used with name or threadId.",
+                    "description": "Inspect a specific Super Agents turn when used with name or threadId.",
                 },
             }
         )
@@ -538,7 +548,7 @@ def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> J
             "model": optional_string(input_data, "model")
             or default_super_agents_model(backend=backend),
             "reasoningEffort": optional_string(input_data, "reasoningEffort") or default_reasoning_effort(),
-            "serviceTier": optional_string(input_data, "serviceTier") or "fast",
+            "serviceTier": optional_string(input_data, "serviceTier") or default_service_tier(),
             "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
             "name": optional_string(input_data, "name"),
             "label": optional_string(input_data, "name") or optional_string(input_data, "label"),
@@ -588,15 +598,27 @@ def default_reasoning_effort() -> str:
     return value if isinstance(value, str) and value in REASONING_EFFORTS else "high"
 
 
+def default_service_tier() -> str:
+    payload = default_dispatcher_config()
+    value = payload.get("codex_service_tier") or payload.get("codexServiceTier")
+    if isinstance(value, str) and value in CODEX_SERVICE_TIERS:
+        return value
+    env_value = os.environ.get("CODEX_SERVICE_TIER", "").strip()
+    if env_value in CODEX_SERVICE_TIERS:
+        return env_value
+    return DEFAULT_CODEX_SERVICE_TIER
+
+
 def default_super_agents_model(*, backend: str | None = None) -> str | None:
     payload = default_dispatcher_config()
+    selected_backend = _execution_backend(backend or backend_from_environment())
     return _model_for_backend(
         _backend_model(
             payload,
             "super_agents",
-            backend=backend or backend_from_environment(),
+            backend=selected_backend,
         ),
-        backend=backend,
+        backend=selected_backend,
     )
 
 
@@ -627,6 +649,10 @@ def _model_for_backend(model: str | None, *, backend: str | None = None) -> str 
         )
         return None
     return model
+
+
+def _execution_backend(backend: str) -> str:
+    return "codex" if backend == "openbase_cloud" else backend
 
 
 def default_dispatcher_config() -> JsonObject:
