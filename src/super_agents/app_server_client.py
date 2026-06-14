@@ -908,10 +908,10 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             int((time.monotonic() - started) * 1000),
         )
         turn_id = input_data.turn_id or resolved.turn_id
-        if turn_id and (
-            is_active_status(resolved.status)
-            or self.thread_has_active_turn(resolved.session.thread_id)
-        ):
+        thread_is_active = is_active_status(resolved.status) or self.thread_has_active_turn(
+            resolved.session.thread_id
+        )
+        if turn_id and not turn_id.startswith("q_") and thread_is_active:
             prompt = str(turn_input.get("prompt") or "")
             result = await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
             return {
@@ -920,6 +920,23 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 "steered": True,
                 "startedImmediately": False,
                 "drain": "steered_active_turn",
+            }
+        if thread_is_active:
+            logger.warning(
+                "Resolved active Super Agents thread without a steerable turn id; "
+                "starting a new turn instead of queueing thread_id=%s turn_id=%s status=%s",
+                resolved.session.thread_id,
+                turn_id,
+                resolved.status,
+            )
+            result = await self.start_turn(
+                {"cwd": resolved.session.cwd, **turn_input, "threadId": resolved.session.thread_id}
+            )
+            return {
+                **result,
+                "queued": False,
+                "startedImmediately": True,
+                "drain": "started_without_active_turn_id",
             }
         return await self.start_or_queue_turn(resolved, turn_input)
 

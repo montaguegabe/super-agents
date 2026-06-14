@@ -47,6 +47,10 @@ from .item_tags import thread_tags
 logger = logging.getLogger(__name__)
 
 
+def _is_queue_item_id(value: str | None) -> bool:
+    return bool(value and value.startswith("q_"))
+
+
 class SessionClientMixin:
     async def filtered_sessions(self, input_data: LabelQueryInput) -> list[SessionRecord]:
         state = await self.read_state()
@@ -157,17 +161,24 @@ class SessionClientMixin:
     def thread_has_active_turn(self, thread_id: str) -> bool:
         session = self.session_from_memory(thread_id)
         active_turn_id = session.active_turn_id if session else None
+        if _is_queue_item_id(active_turn_id):
+            active_turn_id = None
         for turn in self._turns.values():
             if (
                 turn.thread_id == thread_id
                 and self.tracked_turn_is_active(turn)
+                and not _is_queue_item_id(turn.turn_id)
                 and active_turn_id == turn.turn_id
             ):
                 return True
         return bool(session and is_active_status(self.session_status(session)))
 
     def tracked_turn_is_active(self, turn: TurnState) -> bool:
-        return is_active_status(turn.status) and not turn.finished_at
+        return (
+            is_active_status(turn.status)
+            and not turn.finished_at
+            and not _is_queue_item_id(turn.turn_id)
+        )
 
     async def resolve_thread_name(self, name: str, input_data: LabelQueryInput) -> JsonObject:
         try:
@@ -218,6 +229,8 @@ class SessionClientMixin:
         running_turn_id = (
             session.active_turn_id or session.last_turn_id if session and is_active_status(status) else None
         )
+        if _is_queue_item_id(running_turn_id):
+            running_turn_id = None
         updated_at = iso_from_thread_time(thread)
         last_event_at = session.last_event_at if session else None
         favorite = favorite_status(thread_id)
@@ -252,6 +265,8 @@ class SessionClientMixin:
     def session_view(self, session: SessionRecord) -> JsonObject:
         status = self.session_status(session)
         running_turn_id = session.active_turn_id or session.last_turn_id if is_active_status(status) else None
+        if _is_queue_item_id(running_turn_id):
+            running_turn_id = None
         started_at = session.last_started_at or session.updated_at
         favorite = favorite_status(session.thread_id)
         tags = thread_tags(session.thread_id)
@@ -346,8 +361,10 @@ class SessionClientMixin:
         return turn_summary.reasoning_effort if turn_summary else None
 
     def session_status(self, session: SessionRecord) -> StoredStatus:
-        if session.active_turn_id:
-            runtime_turn = self._turns.get(turn_key(session.thread_id, session.active_turn_id))
+        active_turn_id = None if _is_queue_item_id(session.active_turn_id) else session.active_turn_id
+        last_turn_id = None if _is_queue_item_id(session.last_turn_id) else session.last_turn_id
+        if active_turn_id:
+            runtime_turn = self._turns.get(turn_key(session.thread_id, active_turn_id))
             if runtime_turn:
                 if is_active_status(runtime_turn.status) and runtime_turn.finished_at:
                     if session.last_status and not is_active_status(session.last_status):
@@ -356,7 +373,9 @@ class SessionClientMixin:
                 return runtime_turn.status
             return session.last_status or "unknown"
         if session.last_status and is_active_status(session.last_status):
-            runtime_turn = self._turns.get(turn_key(session.thread_id, session.last_turn_id)) if session.last_turn_id else None
+            if not last_turn_id:
+                return "unknown"
+            runtime_turn = self._turns.get(turn_key(session.thread_id, last_turn_id))
             if runtime_turn:
                 if is_active_status(runtime_turn.status) and runtime_turn.finished_at:
                     return "unknown"
@@ -387,6 +406,15 @@ class SessionClientMixin:
         persisted_turn: JsonObject | None,
         pending_requests: list[PendingServerRequest],
     ) -> None:
+        if _is_queue_item_id(turn_id):
+            logger.warning(
+                "Ignoring queue item id as turn progress thread_id=%s turn_id=%s status=%s",
+                thread_id,
+                turn_id,
+                status,
+            )
+            self.schedule_queue_drain(thread_id)
+            return
         tracked_status: StoredStatus = "unknown" if status == "unknown" else to_tracked_turn_status(status)
         tracked_turn = self._turns.get(turn_key(thread_id, turn_id))
         state_session = await self.get_session(thread_id)

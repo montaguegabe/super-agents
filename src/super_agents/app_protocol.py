@@ -109,7 +109,14 @@ def extract_threads(value: JsonObject) -> list[JsonObject]:
 
 
 def extract_turn_id(value: JsonObject) -> str | None:
-    return get_string(value, "turnId") or get_string(value, "id") or get_string(as_object(value.get("turn")), "id")
+    for candidate in (
+        get_string(value, "turnId"),
+        get_string(value, "id"),
+        get_string(as_object(value.get("turn")), "id"),
+    ):
+        if candidate and not candidate.startswith("q_"):
+            return candidate
+    return None
 
 
 def extract_notification_thread_id(value: JsonObject) -> str | None:

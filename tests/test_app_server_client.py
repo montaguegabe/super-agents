@@ -936,6 +936,50 @@ async def test_start_turn_by_name_ignores_stale_runtime_last_turn(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_start_turn_by_name_ignores_queue_item_as_active_turn(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        captured.append(message)
+        if message.get("method") == "thread/list":
+            return {"data": []}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-real"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-queue-id",
+            {
+                "label": "queue-id",
+                "threadId": "thread-queue-id",
+                "cwd": "/tmp/project",
+                "lastTurnId": "q_stale-queue-item",
+                "lastStatus": "running",
+            },
+        )
+
+        result = await client.start_turn_by_label(
+            type_query(label="queue-id"),
+            {"label": "queue-id", "prompt": "follow up"},
+        )
+
+        assert result["queued"] is False
+        assert result["startedImmediately"] is True
+        assert result["turnId"] == "turn-real"
+        assert not client.queued_turn_summary()
+        assert not any(message.get("method") == "turn/steer" for message in captured)
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["threadId"] == "thread-queue-id"
+        assert start_request["params"]["input"] == [{"type": "text", "text": "follow up"}]
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_queue_turn_waits_for_active_turn_completion_then_starts_next_turn(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
     turn_index = 0
