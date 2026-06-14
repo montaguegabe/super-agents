@@ -820,12 +820,18 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         result = await self.read_thread(resolved.session.thread_id, include_turns)
         return without_none({"name": resolved.session.label, "trackedSession": resolved.session.to_json(), **result})
 
-    async def resume_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+    async def resume_by_label(
+        self,
+        input_data: LabelQueryInput,
+        *,
+        developer_instructions: str | None = None,
+    ) -> JsonObject:
         resolved = await self.resolve_session(required_label(input_data), replace(input_data, prefer="latest_any"))
         result = await self.resume_thread(
             resolved.session.thread_id,
             label=resolved.session.label,
             agent_name=resolved.session.agent_name,
+            developer_instructions=developer_instructions,
         )
         return {"name": resolved.session.label, **result}
 

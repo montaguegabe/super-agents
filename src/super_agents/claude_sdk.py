@@ -11,7 +11,11 @@ from typing import Any, Callable, Iterator
 
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import LabelQueryInput
-from super_agents.app_protocol import is_active_status, with_super_agent_identity_instructions
+from super_agents.app_protocol import (
+    _without_super_agent_identity_lines,
+    is_active_status,
+    with_super_agent_identity_instructions,
+)
 from super_agents.app_sessions import required_label
 from super_agents.agent_store import Session, Store, iso_now
 
@@ -99,8 +103,29 @@ class ClaudeAgentSdkClient:
         )
         return {"backend": self.backend, "threadId": session.id, "session": session.to_json()}
 
-    async def resume_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+    async def resume_by_label(
+        self,
+        input_data: LabelQueryInput,
+        *,
+        developer_instructions: str | None = None,
+    ) -> JsonObject:
         session = self._resolve_session(input_data)
+        if developer_instructions:
+            effective_developer_instructions = with_super_agent_identity_instructions(
+                _combine_developer_instructions(
+                    _without_super_agent_identity_lines(
+                        session.developer_instructions
+                    ),
+                    developer_instructions,
+                ),
+                session.name,
+                session.id,
+                session.agent_name,
+            )
+            session = self.store.update_session(
+                session.id,
+                developer_instructions=effective_developer_instructions,
+            )
         return {
             "backend": self.backend,
             "name": session.name,
@@ -744,6 +769,8 @@ def _combine_developer_instructions(base: str | None, overlay: str | None) -> st
     parts = [part.strip() for part in (base, overlay) if part and part.strip()]
     if not parts:
         return None
+    if len(parts) == 2 and parts[1] in parts[0]:
+        return parts[0]
     return "\n\n".join(parts)
 
 

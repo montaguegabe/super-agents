@@ -202,6 +202,49 @@ async def test_claude_sdk_persists_thread_developer_instructions(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_resume_by_label_adds_voice_instructions_to_session(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    started = await client.start_thread(
+        {
+            "name": "dispatcher",
+            "cwd": str(tmp_path),
+            "agentName": "Grace",
+            "developerInstructions": "Super agent instructions.",
+        }
+    )
+
+    await client.resume_by_label(
+        LabelQueryInput(thread_id=started["threadId"], cwd=str(tmp_path)),
+        developer_instructions="Direct voice instructions.",
+    )
+    await client.resume_by_label(
+        LabelQueryInput(thread_id=started["threadId"], cwd=str(tmp_path)),
+        developer_instructions="Direct voice instructions.",
+    )
+    result = await client.start_turn_by_label(
+        LabelQueryInput(thread_id=started["threadId"], cwd=str(tmp_path)),
+        {"prompt": "what instructions?"},
+    )
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    session = store.get_session(started["threadId"])
+    assert session.developer_instructions == (
+        "Super agent instructions.\n\nDirect voice instructions.\n\n"
+        "Super Agent thread name: dispatcher\n"
+        f"Super Agent thread id: {started['threadId']}\n"
+        "Your name is Grace."
+    )
+    assert "Super agent instructions." in FakeClaudeSDKClient.prompts[-1]
+    assert "Direct voice instructions." in FakeClaudeSDKClient.prompts[-1]
+    assert session.developer_instructions.count("Direct voice instructions.") == 1
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_turn_developer_instructions_compose_with_thread_instructions(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
