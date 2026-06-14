@@ -168,7 +168,35 @@ class ClaudeAgentSdkClient:
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         session = self._resolve_session(input_data)
         if self._session_is_busy(session):
-            return await self.queue_turn_by_label(input_data, turn_input)
+            sdk = self._require_sdk()
+            prompt = str(turn_input["prompt"])
+            model = _optional_str(turn_input.get("model")) or session.model
+            turn = self.store.create_turn(
+                session.id,
+                prompt,
+                status="running",
+                mode=_optional_str(turn_input.get("mode")),
+                model=model,
+            )
+            self.store.update_session(
+                session.id,
+                status="running",
+                active_turn_id=turn.id,
+                last_turn_id=turn.id,
+                last_observed_state="steering active turn via Claude Agent SDK",
+            )
+            asyncio.create_task(self._run_turn(session.id, turn.id, prompt, model, sdk))
+            return {
+                "backend": self.backend,
+                "threadId": session.id,
+                "name": session.name,
+                "turnId": turn.id,
+                "turn": turn.to_json(),
+                "queued": False,
+                "steered": True,
+                "startedImmediately": False,
+                "drain": "steered_active_turn",
+            }
         sdk = self._require_sdk()
         prompt = str(turn_input["prompt"])
         model = _optional_str(turn_input.get("model")) or session.model
@@ -200,6 +228,8 @@ class ClaudeAgentSdkClient:
 
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         session = self._resolve_session(input_data)
+        if not self._session_is_busy(session):
+            return await self.start_turn_by_label(input_data, turn_input)
         turn = self.store.create_turn(
             session.id,
             str(turn_input["prompt"]),

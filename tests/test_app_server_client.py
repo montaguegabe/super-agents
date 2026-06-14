@@ -11,7 +11,9 @@ import websockets
 
 import super_agents.app_server_client as app_server_client
 from super_agents.app_client_transport import websocket_max_size
+from super_agents.app_models import TurnState
 from super_agents.app_server_client import CodexAppServerClient
+from super_agents.app_time import turn_key
 from super_agents.mcp_server import (
     build_tools,
     clean_queue_turn_input,
@@ -794,7 +796,37 @@ async def test_start_turn_by_label_can_start_follow_up_on_latest_inactive_label(
 
 
 @pytest.mark.asyncio
-async def test_start_turn_by_name_on_running_thread_queues_prompt(tmp_path: Path) -> None:
+async def test_steer_by_label_starts_when_no_active_turn_exists(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-steer-idle", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-steer-idle"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "steer-idle", "cwd": "/tmp/project"})
+
+        result = await client.steer_by_label(type_query(label="steer-idle"), "start from steer")
+
+        assert result["queued"] is False
+        assert result["startedImmediately"] is True
+        assert result["turnId"] == "turn-steer-idle"
+        assert not any(message.get("method") == "turn/steer" for message in captured)
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["input"] == [{"type": "text", "text": "start from steer"}]
+        assert start_request["params"]["threadId"] == "thread-steer-idle"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_by_name_on_running_thread_steers_prompt(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
@@ -810,15 +842,69 @@ async def test_start_turn_by_name_on_running_thread_queues_prompt(tmp_path: Path
         await client.start_thread({"label": "active", "cwd": "/tmp/project"})
         await client.start_turn({"threadId": "thread-active", "label": "active", "prompt": "work"})
 
-        result = await client.start_turn_by_label(type_query(label="active"), {"label": "active", "prompt": "queued"})
+        result = await client.start_turn_by_label(type_query(label="active"), {"label": "active", "prompt": "adjust"})
 
         start_requests = [message for message in captured if message.get("method") == "turn/start"]
-        assert result["queued"] is True
-        assert result["drain"] == "waiting_for_active_turn"
-        assert result["queueDepth"] == 1
-        assert result["item"]["promptPreview"] == "queued"
+        steer_request = next(message for message in captured if message.get("method") == "turn/steer")
+        assert result["queued"] is False
+        assert result["steered"] is True
+        assert result["drain"] == "steered_active_turn"
         assert len(start_requests) == 1
-        assert client.queued_turn_summary()[0]["queueDepth"] == 1
+        assert steer_request["params"] == {
+            "threadId": "thread-active",
+            "expectedTurnId": "turn-active",
+            "input": [{"type": "text", "text": "adjust"}],
+        }
+        assert client.queued_turn_summary() == []
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_by_name_ignores_stale_runtime_last_turn(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        captured.append(message)
+        if message.get("method") == "thread/list":
+            return {"data": []}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-new"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-stale",
+            {
+                "label": "stale",
+                "threadId": "thread-stale",
+                "cwd": "/tmp/stale",
+                "lastTurnId": "turn-stale",
+                "lastStatus": "unknown",
+            },
+        )
+        client._turns[turn_key("thread-stale", "turn-stale")] = TurnState(
+            thread_id="thread-stale",
+            turn_id="turn-stale",
+            status="running",
+            started_at="2026-06-18T16:00:00.000Z",
+        )
+
+        result = await client.start_turn_by_label(
+            type_query(label="stale"),
+            {"label": "stale", "prompt": "new work"},
+        )
+
+        assert result["queued"] is False
+        assert result["startedImmediately"] is True
+        assert result["turnId"] == "turn-new"
+        assert not any(message.get("method") == "turn/steer" for message in captured)
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["threadId"] == "thread-stale"
+        assert start_request["params"]["input"] == [{"type": "text", "text": "new work"}]
     finally:
         await client.close()
         await server.close()
@@ -1667,7 +1753,8 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert "approvalPolicy" not in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "sandboxType" not in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "per-thread filesystem queue" in by_name["super_agents_queue_turn"].description
-    assert "no separate queued-next-turn API" in by_name["super_agents_start_turn"].description
+    assert "steers the active turn" in by_name["super_agents_start_turn"].description
+    assert "super_agents_queue_turn" in by_name["super_agents_start_turn"].description
     assert "threadId" not in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "agentName" not in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "reasoningEffort" not in by_name["super_agents_start_turn"].input_schema["properties"]

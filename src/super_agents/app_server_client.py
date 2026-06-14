@@ -852,10 +852,32 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         return await self.turn_progress(resolved.session.thread_id, turn_id, input_data)
 
     async def steer_by_label(self, input_data: LabelQueryInput, prompt: str) -> JsonObject:
-        resolved = await self.resolve_session(required_label(input_data), input_data)
+        try:
+            resolved = await self.resolve_session(required_label(input_data), input_data)
+        except ValueError:
+            target = await self.resolve_queue_target(input_data)
+            return await self.start_or_queue_turn(
+                target,
+                without_none(
+                    {
+                        "label": target.session.label,
+                        "agentName": target.session.agent_name,
+                        "prompt": prompt,
+                    }
+                ),
+            )
         turn_id = input_data.turn_id or resolved.turn_id
         if not turn_id or not is_active_status(resolved.status):
-            raise ValueError(f"No active turn is known for label {required_label(input_data)}.")
+            return await self.start_or_queue_turn(
+                resolved,
+                without_none(
+                    {
+                        "label": resolved.session.label,
+                        "agentName": resolved.session.agent_name,
+                        "prompt": prompt,
+                    }
+                ),
+            )
         return await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
 
     async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject:
@@ -885,6 +907,20 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             resolved.status,
             int((time.monotonic() - started) * 1000),
         )
+        turn_id = input_data.turn_id or resolved.turn_id
+        if turn_id and (
+            is_active_status(resolved.status)
+            or self.thread_has_active_turn(resolved.session.thread_id)
+        ):
+            prompt = str(turn_input.get("prompt") or "")
+            result = await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
+            return {
+                **result,
+                "queued": False,
+                "steered": True,
+                "startedImmediately": False,
+                "drain": "steered_active_turn",
+            }
         return await self.start_or_queue_turn(resolved, turn_input)
 
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:

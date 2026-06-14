@@ -155,10 +155,15 @@ class SessionClientMixin:
                 return
 
     def thread_has_active_turn(self, thread_id: str) -> bool:
-        for turn in self._turns.values():
-            if turn.thread_id == thread_id and self.tracked_turn_is_active(turn):
-                return True
         session = self.session_from_memory(thread_id)
+        active_turn_id = session.active_turn_id if session else None
+        for turn in self._turns.values():
+            if (
+                turn.thread_id == thread_id
+                and self.tracked_turn_is_active(turn)
+                and active_turn_id == turn.turn_id
+            ):
+                return True
         return bool(session and is_active_status(self.session_status(session)))
 
     def tracked_turn_is_active(self, turn: TurnState) -> bool:
@@ -341,14 +346,22 @@ class SessionClientMixin:
         return turn_summary.reasoning_effort if turn_summary else None
 
     def session_status(self, session: SessionRecord) -> StoredStatus:
-        turn_id = session.active_turn_id or session.last_turn_id
-        runtime_turn = self._turns.get(turn_key(session.thread_id, turn_id)) if turn_id else None
-        if runtime_turn:
-            if is_active_status(runtime_turn.status) and runtime_turn.finished_at:
-                if session.last_status and not is_active_status(session.last_status):
-                    return session.last_status
-                return "unknown"
-            return runtime_turn.status
+        if session.active_turn_id:
+            runtime_turn = self._turns.get(turn_key(session.thread_id, session.active_turn_id))
+            if runtime_turn:
+                if is_active_status(runtime_turn.status) and runtime_turn.finished_at:
+                    if session.last_status and not is_active_status(session.last_status):
+                        return session.last_status
+                    return "unknown"
+                return runtime_turn.status
+            return session.last_status or "unknown"
+        if session.last_status and is_active_status(session.last_status):
+            runtime_turn = self._turns.get(turn_key(session.thread_id, session.last_turn_id)) if session.last_turn_id else None
+            if runtime_turn:
+                if is_active_status(runtime_turn.status) and runtime_turn.finished_at:
+                    return "unknown"
+                return runtime_turn.status
+            return session.last_status
         return session.last_status or "unknown"
 
     def session_from_memory(self, thread_id: str | None) -> SessionRecord | None:

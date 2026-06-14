@@ -136,6 +136,53 @@ async def test_claude_sdk_waiting_session_accepts_follow_up(monkeypatch: pytest.
     assert FakeClaudeSDKClient.prompts == ["first", "second"]
 
 
+@pytest.mark.asyncio
+async def test_claude_sdk_busy_session_start_steers_instead_of_queueing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
+    FakeClaudeSDKClient.prompts = []
+    FakeClaudeSDKClient.options_seen = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "first"})
+    second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "second"})
+
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+
+    assert second["queued"] is False
+    assert second["steered"] is True
+    assert second["drain"] == "steered_active_turn"
+    assert FakeClaudeSDKClient.prompts == ["first", "second"]
+    assert store.queued_turns(second["threadId"]) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_queue_on_idle_session_starts_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
+    FakeClaudeSDKClient.prompts = []
+    FakeClaudeSDKClient.options_seen = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    result = await client.queue_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "queued while idle"})
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert result["queued"] is False
+    assert result["startedImmediately"] is True
+    assert FakeClaudeSDKClient.prompts == ["queued while idle"]
+    assert store.queued_turns(result["threadId"]) == []
+
+
 async def wait_for(predicate, timeout: float = 2.0) -> None:  # type: ignore[no-untyped-def]
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:

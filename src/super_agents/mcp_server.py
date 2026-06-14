@@ -324,7 +324,10 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_steer",
             title="Steer Super Agents By Name",
-            description="Send steering input to the latest active Super Agents turn matching a thread name.",
+            description=(
+                "Send steering input to the latest active Super Agents turn matching a thread name. "
+                "If no active turn exists, starts a new turn on the same thread."
+            ),
             input_schema=object_schema(
                 {**name_query_properties(include_output_options=False), "prompt": {"type": "string"}},
                 ["name", "prompt"],
@@ -345,9 +348,9 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             name="super_agents_start_turn",
             title="Start Super Agents Turn By Name",
             description=(
-                "Submit follow-up input to the latest matching named thread using Codex app-server turn/start. "
-                "There is no separate queued-next-turn API; app-server decides whether this starts a new turn "
-                "or is accepted as pending input for the current active turn."
+                "Submit follow-up input to the latest matching named thread. If a turn is active, this steers "
+                "the active turn; otherwise it starts a new turn. Use super_agents_queue_turn for an explicit "
+                "separate follow-up after the active turn finishes."
             ),
             input_schema=object_schema(
                 {
@@ -373,8 +376,8 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             title="Queue Super Agents Turn",
             description=(
                 "Queue a follow-up prompt in Super Agents' per-thread filesystem queue so it starts as a separate "
-                "turn after the target thread's active turn finishes. Codex app-server does not expose native "
-                "queued-next-turn semantics for normal user prompts."
+                "turn after the target thread's active turn finishes. If no active turn exists, starts immediately. "
+                "Codex app-server does not expose native queued-next-turn semantics for normal user prompts."
             ),
             input_schema=object_schema(
                 {
