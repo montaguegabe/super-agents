@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "super-agents"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP wrapper for controlling Codex app-server threads, turns, plan mode, and steering."
 license = "MIT"
 readme = "README.md"
@@ -24,7 +24,7 @@ super-agents-claude-tui = "super_agents.claude_tui.cli:main"
 super-agents-backend = "super_agents.backend:main"
 
 [project.optional-dependencies]
-# Needed when OPENBASE_CODING_BACKEND=claude-agent-sdk is selected.
+# Needed when OPENBASE_CODING_BACKEND=claude_code is selected.
 claude = [
   "claude-agent-sdk>=0.1.0",
 ]
