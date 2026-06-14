@@ -62,6 +62,7 @@ class Turn:
     updated_at: str
     mode: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     finished_at: str | None = None
     attempts: int = 0
     last_error: str | None = None
@@ -76,6 +77,7 @@ class Turn:
                 "status": self.status,
                 "mode": self.mode,
                 "model": self.model,
+                "reasoningEffort": self.reasoning_effort,
                 "createdAt": self.created_at,
                 "updatedAt": self.updated_at,
                 "finishedAt": self.finished_at,

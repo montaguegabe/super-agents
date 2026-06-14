@@ -360,7 +360,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {
                         "type": "string",
-                        "description": "Defaults to thread model, dispatcher config super_agents_model, or SUPER_AGENTS_MODEL.",
+                        "description": "Defaults to the model for the selected backend's Super Agents role.",
                     },
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
@@ -386,7 +386,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                     "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
                     "model": {
                         "type": "string",
-                        "description": "Defaults to thread model, dispatcher config super_agents_model, or SUPER_AGENTS_MODEL.",
+                        "description": "Defaults to the model for the selected backend's Super Agents role.",
                     },
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                     "agentName": {
@@ -431,7 +431,7 @@ def turn_start_properties() -> JsonObject:
         "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
         "model": {
             "type": "string",
-            "description": "Defaults to thread model, dispatcher config super_agents_model, or SUPER_AGENTS_MODEL.",
+            "description": "Defaults to the model for the selected backend's Super Agents role.",
         },
         "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "name": {"type": "string"},
@@ -590,40 +590,26 @@ def default_reasoning_effort() -> str:
 
 def default_super_agents_model(*, backend: str | None = None) -> str | None:
     payload = default_dispatcher_config()
-    backend_value = _backend_model(
-        payload,
-        "super_agents",
-        backend=backend or backend_from_environment(),
+    return _model_for_backend(
+        _backend_model(
+            payload,
+            "super_agents",
+            backend=backend or backend_from_environment(),
+        ),
+        backend=backend,
     )
-    if backend_value:
-        return _model_for_backend(backend_value, backend=backend)
-    value = payload.get("super_agents_model") or payload.get("superAgentsModel")
-    if isinstance(value, str) and value.strip():
-        return _model_for_backend(value.strip(), backend=backend)
-    return _model_for_backend(os.environ.get("SUPER_AGENTS_MODEL", "").strip(), backend=backend)
 
 
 def _backend_model(payload: JsonObject, role: str, *, backend: str) -> str | None:
     backend_models = payload.get("backend_models") or payload.get("backendModels")
     if not isinstance(backend_models, dict):
         return None
-    for backend_key in (backend, _legacy_backend_key(backend)):
-        if not backend_key:
-            continue
-        model_config = backend_models.get(backend_key)
-        if not isinstance(model_config, dict):
-            continue
-        value = model_config.get(role)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _legacy_backend_key(backend: str) -> str | None:
-    if backend == "claude-agent-sdk":
-        return "claude-code"
-    if backend == "claude-tui":
-        return "claude-code-tui"
+    model_config = backend_models.get(backend)
+    if not isinstance(model_config, dict):
+        return None
+    value = model_config.get(role)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None
 
 
@@ -632,7 +618,7 @@ def _model_for_backend(model: str | None, *, backend: str | None = None) -> str 
         return None
     selected_backend = backend or backend_from_environment()
     normalized_model = model.strip().lower()
-    if selected_backend == "codex" and (
+    if selected_backend in {"codex", "openbase_cloud"} and (
         normalized_model in CLAUDE_MODEL_ALIASES or normalized_model.startswith("claude-")
     ):
         logger.warning(

@@ -21,20 +21,21 @@ JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
 
 SDK_IMPORT_ERROR = (
-    "Claude Agent SDK backend requires the claude-agent-sdk package. "
+    "Claude Code backend requires the claude-agent-sdk package. "
     "Install super-agents with the claude extra, or install claude-agent-sdk in this environment."
 )
 
 
 class ClaudeAgentSdkClient:
-    """Super Agents backend using Claude Agent SDK without Anthropic API keys."""
+    """Super Agents backend using Claude Code without Anthropic API keys."""
 
-    backend = "claude-agent-sdk"
+    backend = "claude_code"
 
     def __init__(self, store: Store | None = None, sdk_loader: SdkLoader | None = None) -> None:
         self.store = store or Store()
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
+        self._sdk_client_efforts: dict[str, str | None] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -171,21 +172,32 @@ class ClaudeAgentSdkClient:
             sdk = self._require_sdk()
             prompt = str(turn_input["prompt"])
             model = _optional_str(turn_input.get("model")) or session.model
+            reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
             turn = self.store.create_turn(
                 session.id,
                 prompt,
                 status="running",
                 mode=_optional_str(turn_input.get("mode")),
                 model=model,
+                reasoning_effort=reasoning_effort,
             )
             self.store.update_session(
                 session.id,
                 status="running",
                 active_turn_id=turn.id,
                 last_turn_id=turn.id,
-                last_observed_state="steering active turn via Claude Agent SDK",
+                last_observed_state="steering active turn via Claude Code",
             )
-            asyncio.create_task(self._run_turn(session.id, turn.id, prompt, model, sdk))
+            asyncio.create_task(
+                self._run_turn(
+                    session.id,
+                    turn.id,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    sdk,
+                )
+            )
             return {
                 "backend": self.backend,
                 "threadId": session.id,
@@ -200,21 +212,32 @@ class ClaudeAgentSdkClient:
         sdk = self._require_sdk()
         prompt = str(turn_input["prompt"])
         model = _optional_str(turn_input.get("model")) or session.model
+        reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
         turn = self.store.create_turn(
             session.id,
             prompt,
             status="running",
             mode=_optional_str(turn_input.get("mode")),
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         self.store.update_session(
             session.id,
             status="running",
             active_turn_id=turn.id,
             last_turn_id=turn.id,
-            last_observed_state="running via Claude Agent SDK",
+            last_observed_state="running via Claude Code",
         )
-        asyncio.create_task(self._run_turn(session.id, turn.id, prompt, model, sdk))
+        asyncio.create_task(
+            self._run_turn(
+                session.id,
+                turn.id,
+                prompt,
+                model,
+                reasoning_effort,
+                sdk,
+            )
+        )
         return {
             "backend": self.backend,
             "threadId": session.id,
@@ -236,6 +259,7 @@ class ClaudeAgentSdkClient:
             status="queued",
             mode=_optional_str(turn_input.get("mode")),
             model=_optional_str(turn_input.get("model")) or session.model,
+            reasoning_effort=_optional_str(turn_input.get("reasoningEffort")),
         )
         position = len(self.store.queued_turns(session.id))
         self._schedule_queue_drain(session.id)
@@ -263,12 +287,25 @@ class ClaudeAgentSdkClient:
     async def report_tags(self, project_path: str, path: str, tags: list[Any] | None = None) -> JsonObject:
         return self._unsupported("super_agents_report_tags", projectPath=project_path, path=path, tags=tags)
 
-    async def _run_turn(self, session_id: str, turn_id: str, prompt: str, model: str | None, sdk: Any) -> None:
+    async def _run_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+        prompt: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        sdk: Any,
+    ) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             session = self.store.get_session(session_id)
             try:
-                sdk_client = await self._sdk_client_for(session, model, sdk)
+                sdk_client = await self._sdk_client_for(
+                    session,
+                    model,
+                    reasoning_effort,
+                    sdk,
+                )
                 last_useful_message = ""
                 with _without_unsupported_anthropic_api_keys():
                     await sdk_client.query(prompt)
@@ -281,7 +318,7 @@ class ClaudeAgentSdkClient:
                     session_id,
                     status="waiting",
                     active_turn_id=None,
-                    last_observed_state="Claude Agent SDK response completed",
+                    last_observed_state="Claude Code response completed",
                     last_useful_message=last_useful_message or None,
                 )
             except Exception as exc:
@@ -296,17 +333,24 @@ class ClaudeAgentSdkClient:
             finally:
                 self._schedule_queue_drain(session_id)
 
-    async def _sdk_client_for(self, session: Session, model: str | None, sdk: Any) -> Any:
+    async def _sdk_client_for(
+        self,
+        session: Session,
+        model: str | None,
+        reasoning_effort: str | None,
+        sdk: Any,
+    ) -> Any:
         existing = self._sdk_clients.get(session.id)
-        if existing is not None:
+        if existing is not None and self._sdk_client_efforts.get(session.id) == reasoning_effort:
             if model and hasattr(existing, "set_model"):
                 await existing.set_model(model)
             return existing
-        options = _agent_options(sdk, session.cwd, model)
+        options = _agent_options(sdk, session.cwd, model, reasoning_effort)
         with _without_unsupported_anthropic_api_keys():
             client = sdk.ClaudeSDKClient(options=options)
             await client.connect()
         self._sdk_clients[session.id] = client
+        self._sdk_client_efforts[session.id] = reasoning_effort
         return client
 
     def _schedule_queue_drain(self, session_id: str) -> None:
@@ -335,9 +379,18 @@ class ClaudeAgentSdkClient:
                 status="running",
                 active_turn_id=turn.id,
                 last_turn_id=turn.id,
-                last_observed_state="running queued turn via Claude Agent SDK",
+                last_observed_state="running queued turn via Claude Code",
             )
-            asyncio.create_task(self._run_turn(session_id, turn.id, turn.prompt, turn.model, sdk))
+            asyncio.create_task(
+                self._run_turn(
+                    session_id,
+                    turn.id,
+                    turn.prompt,
+                    turn.model,
+                    turn.reasoning_effort,
+                    sdk,
+                )
+            )
             return
 
     def _resolve_session(self, input_data: LabelQueryInput) -> Session:
@@ -452,10 +505,17 @@ def _without_unsupported_anthropic_api_keys() -> Iterator[None]:
             os.environ["ANTHROPIC_API_KEY"] = previous
 
 
-def _agent_options(sdk: Any, cwd: str, model: str | None) -> Any:
+def _agent_options(
+    sdk: Any,
+    cwd: str,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> Any:
     kwargs: JsonObject = {"cwd": cwd}
     if model:
         kwargs["model"] = model
+    if reasoning_effort:
+        kwargs["effort"] = reasoning_effort
     return sdk.ClaudeAgentOptions(**kwargs)
 
 

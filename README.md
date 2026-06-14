@@ -12,10 +12,8 @@ Super Agents is used by Openbase Coder, but it can also be run directly by any
 MCP client that needs to coordinate Codex app-server threads without blocking on
 long-running turns.
 
-It also includes two Claude backends that bypass Codex app-server entirely:
-a Claude Agent SDK backend for Super Agents UI-driver sessions, and a local
-Claude Code TUI backend. A small non-MCP command switches Openbase's default
-backend.
+It also supports Claude Code for Super Agents UI-driver sessions. A small
+non-MCP command switches Openbase's default backend.
 
 ## Install
 
@@ -95,26 +93,26 @@ Openbase Coder users usually do not need to run this by hand; the
 Super Agents supports three backend modes:
 
 - `codex`: native Codex app-server over websocket.
-- `claude-agent-sdk`: direct Claude Agent SDK sessions.
-- `claude-tui`: local Claude Code TUI sessions managed directly by Super Agents.
+- `openbase_cloud`: Codex-compatible sessions through Openbase Cloud.
+- `claude_code`: Claude Code sessions using local Claude auth/billing.
 
 Switch modes without MCP:
 
 ```bash
 super-agents-backend use codex
-super-agents-backend use claude-agent-sdk
-super-agents-backend use claude-tui
+super-agents-backend use openbase-cloud
+super-agents-backend use claude-code
 super-agents-backend status
 ```
 
-The aliases `claude`, `claude-code`, and `claude-sdk` also select
-`claude-agent-sdk`. Restart the process that owns Super Agents after switching.
-For `codex`, restart `codex-app-server`; for either Claude backend, restart the
-MCP host running `super-agents-mcp`.
+The aliases `claude` and `claude-sdk` also select `claude_code`. Restart the
+process that owns Super Agents after switching. For `codex` and
+`openbase_cloud`, restart `codex-app-server`; for Claude Code, restart the MCP
+host running `super-agents-mcp`.
 
-## Claude Agent SDK Backend
+## Claude Code Backend
 
-The Claude Agent SDK backend uses the `claude-agent-sdk` package directly. It
+The Claude Code backend uses the `claude-agent-sdk` package directly. It
 does not run a local Anthropic Messages API adapter, does not expose
 `/v1/responses`, does not require Codex app-server, and does not support
 `ANTHROPIC_API_KEY`. Billing/auth comes from the local Claude setup on the
@@ -122,39 +120,23 @@ computer.
 
 ```bash
 uv tool install 'super-agents[claude]'
-super-agents-backend use claude-agent-sdk
+super-agents-backend use claude-code
 ```
 
 or, from a source checkout:
 
 ```bash
 uv sync --extra dev --extra claude
-uv run super-agents-backend use claude-agent-sdk
+uv run super-agents-backend use claude-code
 ```
 
-Set `OPENBASE_CODING_BACKEND=claude-agent-sdk` to make `super-agents-mcp` use
+Set `OPENBASE_CODING_BACKEND=claude_code` to make `super-agents-mcp` use
 this backend. `OPENBASE_CODEX_BACKEND` is still read as a legacy fallback.
-Claude SDK sessions are stored in the same local SQLite/log directory used by
-the Claude TUI backend. Follow-up turns preserve live SDK conversation context
-while the MCP process remains running; persisted metadata and logs survive
-restarts.
+Follow-up turns preserve live SDK conversation context while the MCP process
+remains running; persisted metadata and logs survive restarts.
 
 If the SDK package is not installed, the backend reports `ready=false` with an
 install hint.
-
-## Claude TUI Backend
-
-The Claude TUI backend is in `claude-tui/` and exposes the
-`super-agents-claude-tui` command for direct operation:
-
-```bash
-super-agents-claude-tui doctor
-super-agents-claude-tui tui
-```
-
-Set `OPENBASE_CODING_BACKEND=claude-tui` to make `super-agents-mcp` use this
-backend. This path does not require `ANTHROPIC_API_KEY` and does not use
-`codex-app-server`.
 
 ## Add To Codex
 
@@ -216,13 +198,8 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `SUPER_AGENTS_WS_URL` | `ws://127.0.0.1:4500` | Codex app-server websocket URL |
-| `SUPER_AGENTS_MODEL` | `gpt-5.4` | Fallback default model for new plan/default turns when Openbase `super_agents_model` is unset |
-| `OPENBASE_CODING_BACKEND` | unset | Backend mode: `codex`, `claude-agent-sdk`, or `claude-tui` |
+| `OPENBASE_CODING_BACKEND` | unset | Backend mode: `codex`, `openbase_cloud`, or `claude_code` |
 | `OPENBASE_CODEX_BACKEND` | unset | Legacy fallback for `OPENBASE_CODING_BACKEND` |
-| `SUPER_AGENTS_CLAUDE_TUI_CMD` | `claude` | Claude Code TUI command for the `claude-tui` backend |
-| `SUPER_AGENTS_CLAUDE_TUI_ARGS` | unset | Extra Claude Code TUI arguments |
-| `SUPER_AGENTS_CLAUDE_TUI_MODEL` | unset | Claude Code TUI model passed as `--model` |
-| `SUPER_AGENTS_CLAUDE_TUI_HOME` | `~/.local/share/super-agents-claude-tui` | Local SQLite/log directory for TUI sessions |
 | `SUPER_AGENTS_STATE_FILE` | `~/.super-agents/state.json` | Local session metadata file |
 
 Openbase-specific defaults:
@@ -230,7 +207,7 @@ Openbase-specific defaults:
 | Config key | Description |
 | --- | --- |
 | `super_agents_reasoning_effort` | Default reasoning effort for Super Agents turns |
-| `super_agents_model` | Default model for Super Agents backends, for example `opus` |
+| `backend_models` | Model defaults keyed by backend and role |
 | `SUPER_AGENTS_QUEUE_DIR` | next to the state file | Directory for queued turn files |
 
 Super Agents does not silently approve app-server callbacks. If plan mode asks a

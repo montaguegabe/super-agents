@@ -10,8 +10,8 @@ from .app_server_client import CodexAppServerClient
 JsonObject = dict[str, Any]
 
 CODEX_BACKEND = "codex"
-CLAUDE_AGENT_SDK_BACKEND = "claude-agent-sdk"
-CLAUDE_TUI_BACKEND = "claude-tui"
+OPENBASE_CLOUD_BACKEND = "openbase_cloud"
+CLAUDE_CODE_BACKEND = "claude_code"
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
 LEGACY_CODEX_BACKEND_ENV_KEY = "OPENBASE_CODEX_BACKEND"
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
@@ -19,13 +19,19 @@ BACKEND_ALIASES = {
     "": CODEX_BACKEND,
     "openai": CODEX_BACKEND,
     "codex": CODEX_BACKEND,
-    "claude": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-code": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-agent": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-agent-sdk": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-sdk": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-tui": CLAUDE_TUI_BACKEND,
-    "claude-code-tui": CLAUDE_TUI_BACKEND,
+    "openbase": OPENBASE_CLOUD_BACKEND,
+    "openbase-cloud": OPENBASE_CLOUD_BACKEND,
+    "openbase_cloud": OPENBASE_CLOUD_BACKEND,
+    "cloud": OPENBASE_CLOUD_BACKEND,
+    "claude": CLAUDE_CODE_BACKEND,
+    "claude-code": CLAUDE_CODE_BACKEND,
+    "claude_code": CLAUDE_CODE_BACKEND,
+    "claude-agent": CLAUDE_CODE_BACKEND,
+    "claude-agent-sdk": CLAUDE_CODE_BACKEND,
+    "claude_agent_sdk": CLAUDE_CODE_BACKEND,
+    "claude-sdk": CLAUDE_CODE_BACKEND,
+    "claude-tui": CLAUDE_CODE_BACKEND,
+    "claude-code-tui": CLAUDE_CODE_BACKEND,
 }
 
 
@@ -57,7 +63,9 @@ def normalize_backend(value: str | None) -> str:
     try:
         return BACKEND_ALIASES[raw]
     except KeyError as exc:
-        supported = ", ".join(sorted({CODEX_BACKEND, CLAUDE_AGENT_SDK_BACKEND, CLAUDE_TUI_BACKEND}))
+        supported = ", ".join(
+            sorted({CODEX_BACKEND, OPENBASE_CLOUD_BACKEND, CLAUDE_CODE_BACKEND})
+        )
         raise ValueError(f"Unsupported {CODING_BACKEND_ENV_KEY}: {value}. Supported backends: {supported}.") from exc
 
 
@@ -86,11 +94,7 @@ def _env_file_values(path: Path) -> dict[str, str]:
 
 def client_from_environment() -> SuperAgentsClient:
     backend = backend_from_environment()
-    if backend == CLAUDE_TUI_BACKEND:
-        from super_agents.claude_tui.client import ClaudeTuiClient
-
-        return ClaudeTuiClient()
-    if backend == CLAUDE_AGENT_SDK_BACKEND:
+    if backend == CLAUDE_CODE_BACKEND:
         from super_agents.claude_sdk import ClaudeAgentSdkClient
 
         return ClaudeAgentSdkClient()

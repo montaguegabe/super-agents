@@ -92,7 +92,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
     session = store.get_session(started["threadId"])
     log = "\n".join(store.tail_log(session, lines=20))
 
-    assert result["backend"] == "claude-agent-sdk"
+    assert result["backend"] == "claude_code"
     assert FakeClaudeSDKClient.prompts == ["hello"]
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {"cwd": str(tmp_path), "model": "sonnet"}
     assert FakeClaudeSDKClient.env_seen
@@ -105,6 +105,34 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
+    FakeClaudeSDKClient.prompts = []
+    FakeClaudeSDKClient.options_seen = []
+    FakeClaudeSDKClient.env_seen = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(
+        LabelQueryInput(label="sdk"),
+        {"prompt": "hello", "reasoningEffort": "xhigh"},
+    )
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        "cwd": str(tmp_path),
+        "model": "sonnet",
+        "effort": "xhigh",
+    }
+    assert store.get_turn(result["turnId"]).reasoning_effort == "xhigh"
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_status_reports_missing_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
     store = Store(tmp_path / "state.sqlite3")
@@ -113,7 +141,7 @@ async def test_claude_sdk_status_reports_missing_sdk(monkeypatch: pytest.MonkeyP
     status = await client.status()
 
     assert status["ready"] is False
-    assert status["backend"] == "claude-agent-sdk"
+    assert status["backend"] == "claude_code"
     assert "claude-agent-sdk" in status["sdkError"]
 
 
@@ -159,6 +187,36 @@ async def test_claude_sdk_busy_session_start_steers_instead_of_queueing(
     assert second["drain"] == "steered_active_turn"
     assert FakeClaudeSDKClient.prompts == ["first", "second"]
     assert store.queued_turns(second["threadId"]) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_TUI_HOME", str(tmp_path))
+    FakeClaudeSDKClient.prompts = []
+    FakeClaudeSDKClient.options_seen = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "first"})
+    queued = await client.queue_turn_by_label(
+        LabelQueryInput(label="sdk"),
+        {"prompt": "second", "reasoningEffort": "low"},
+    )
+
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+    await wait_for(lambda: store.get_turn(queued["turnId"]).status == "completed")
+
+    assert queued["queued"] is True
+    assert store.get_turn(queued["turnId"]).reasoning_effort == "low"
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        "cwd": str(tmp_path),
+        "model": "sonnet",
+        "effort": "low",
+    }
 
 
 @pytest.mark.asyncio

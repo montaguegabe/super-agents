@@ -42,23 +42,15 @@ def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
     assert websocket_max_size() is None
 
 
-def test_default_model_ignores_legacy_claude_model_env(monkeypatch, tmp_path: Path) -> None:
+def test_default_model_ignores_model_env(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("SUPER_AGENTS_MODEL", raising=False)
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
     monkeypatch.setenv("CODEX_CLAUDE_MODEL", "claude-custom")
-
-    client = CodexAppServerClient(state_file=tmp_path / "state.json")
-
-    assert client.default_model == app_server_client.DEFAULT_MODEL
-
-
-def test_super_agents_model_overrides_default_model(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
     monkeypatch.setenv("SUPER_AGENTS_MODEL", "gpt-custom")
 
     client = CodexAppServerClient(state_file=tmp_path / "state.json")
 
-    assert client.default_model == "gpt-custom"
+    assert client.default_model == app_server_client.DEFAULT_MODEL
 
 
 @pytest.mark.asyncio
@@ -175,17 +167,17 @@ def test_turn_input_uses_openbase_super_agents_reasoning_default(monkeypatch, tm
     assert cleaned["reasoningEffort"] == "low"
 
 
-def test_turn_input_uses_openbase_super_agents_model_default(monkeypatch, tmp_path: Path) -> None:
+def test_turn_input_ignores_legacy_super_agents_model_default(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SUPER_AGENTS_MODEL", "sonnet")
-    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-agent-sdk")
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 
-    assert cleaned["model"] == "opus"
-    assert default_super_agents_model() == "opus"
+    assert "model" not in cleaned
+    assert default_super_agents_model() is None
 
 
 def test_turn_input_uses_backend_specific_super_agents_model(
@@ -197,15 +189,14 @@ def test_turn_input_uses_backend_specific_super_agents_model(
             {
                 "backend_models": {
                     "codex": {"super_agents": "gpt-5.5"},
-                    "claude-agent-sdk": {"super_agents": "sonnet"},
+                    "claude_code": {"super_agents": "sonnet"},
                 },
-                "super_agents_model": "legacy-model",
             }
         ),
         encoding="utf-8",
     )
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-agent-sdk")
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 
@@ -226,9 +217,12 @@ def test_turn_input_ignores_claude_model_default_for_codex(monkeypatch, tmp_path
     assert default_super_agents_model() is None
 
 
-def test_turn_input_keeps_codex_model_default_for_codex(monkeypatch, tmp_path: Path) -> None:
+def test_turn_input_uses_backend_specific_codex_model(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
-    config_path.write_text(json.dumps({"super_agents_model": "gpt-5.5"}), encoding="utf-8")
+    config_path.write_text(
+        json.dumps({"backend_models": {"codex": {"super_agents": "gpt-5.5"}}}),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
 

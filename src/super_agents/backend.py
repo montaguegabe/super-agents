@@ -7,21 +7,27 @@ from pathlib import Path
 
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
 CODEX_BACKEND = "codex"
-CLAUDE_AGENT_SDK_BACKEND = "claude-agent-sdk"
-CLAUDE_TUI_BACKEND = "claude-tui"
+OPENBASE_CLOUD_BACKEND = "openbase_cloud"
+CLAUDE_CODE_BACKEND = "claude_code"
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
 LEGACY_CODEX_BACKEND_ENV_KEY = "OPENBASE_CODEX_BACKEND"
-BACKENDS = {CODEX_BACKEND, CLAUDE_AGENT_SDK_BACKEND, CLAUDE_TUI_BACKEND}
+BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND, CLAUDE_CODE_BACKEND}
 BACKEND_ALIASES = {
     "codex": CODEX_BACKEND,
     "openai": CODEX_BACKEND,
-    "claude": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-code": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-agent": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-agent-sdk": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-sdk": CLAUDE_AGENT_SDK_BACKEND,
-    "claude-tui": CLAUDE_TUI_BACKEND,
-    "claude-code-tui": CLAUDE_TUI_BACKEND,
+    "openbase": OPENBASE_CLOUD_BACKEND,
+    "openbase-cloud": OPENBASE_CLOUD_BACKEND,
+    "openbase_cloud": OPENBASE_CLOUD_BACKEND,
+    "cloud": OPENBASE_CLOUD_BACKEND,
+    "claude": CLAUDE_CODE_BACKEND,
+    "claude-code": CLAUDE_CODE_BACKEND,
+    "claude_code": CLAUDE_CODE_BACKEND,
+    "claude-agent": CLAUDE_CODE_BACKEND,
+    "claude-agent-sdk": CLAUDE_CODE_BACKEND,
+    "claude_agent_sdk": CLAUDE_CODE_BACKEND,
+    "claude-sdk": CLAUDE_CODE_BACKEND,
+    "claude-tui": CLAUDE_CODE_BACKEND,
+    "claude-code-tui": CLAUDE_CODE_BACKEND,
 }
 
 
@@ -114,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
     use_parser = subparsers.add_parser("use")
-    use_parser.add_argument("backend", choices=sorted(BACKENDS | set(BACKEND_ALIASES)))
+    use_parser.add_argument("backend")
     args = parser.parse_args(argv)
 
     if args.command == "status":
@@ -127,13 +133,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "use":
         status = set_backend(args.backend, args.env_file)
         print(f"Backend set to {status.backend} in {status.env_file}.")
-        if status.backend == CLAUDE_AGENT_SDK_BACKEND:
+        if status.backend == CLAUDE_CODE_BACKEND:
             print(
-                "Restart the Super Agents MCP server for Claude Agent SDK mode. codex-app-server is not used by this backend."
+                "Restart the Super Agents MCP server for Claude Code mode. codex-app-server is not used by this backend."
             )
-        elif status.backend == CLAUDE_TUI_BACKEND:
+        elif status.backend == OPENBASE_CLOUD_BACKEND:
             print(
-                "Restart the Super Agents MCP server for claude-tui mode. codex-app-server is not used by this backend."
+                "Restart codex-app-server for Openbase Cloud model proxy mode."
             )
         else:
             print("Restart codex-app-server for the change to apply.")

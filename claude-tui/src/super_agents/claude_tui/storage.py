@@ -52,6 +52,7 @@ class Store:
                     prompt text not null,
                     mode text,
                     model text,
+                    reasoning_effort text,
                     status text not null,
                     attempts integer not null default 0,
                     last_error text,
@@ -62,6 +63,12 @@ class Store:
                 create index if not exists turns_session_idx on turns(session_id, created_at);
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("pragma table_info(turns)").fetchall()
+            }
+            if "reasoning_effort" not in columns:
+                conn.execute("alter table turns add column reasoning_effort text")
 
     def create_session(
         self,
@@ -171,6 +178,7 @@ class Store:
         status: str = "queued",
         mode: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Turn:
         now = iso_now()
         turn_id = f"t_{uuid.uuid4().hex}"
@@ -178,10 +186,20 @@ class Store:
             conn.execute(
                 """
                 insert into turns (
-                    id, session_id, prompt, mode, model, status, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, session_id, prompt, mode, model, reasoning_effort, status, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (turn_id, session_id, prompt, mode, model, status, now, now),
+                (
+                    turn_id,
+                    session_id,
+                    prompt,
+                    mode,
+                    model,
+                    reasoning_effort,
+                    status,
+                    now,
+                    now,
+                ),
             )
             conn.execute(
                 "update sessions set last_turn_id = ?, active_turn_id = ?, updated_at = ? where id = ?",
@@ -263,6 +281,7 @@ def row_to_turn(row: sqlite3.Row) -> Turn:
         prompt=row["prompt"],
         mode=row["mode"],
         model=row["model"],
+        reasoning_effort=row["reasoning_effort"],
         status=row["status"],
         attempts=row["attempts"],
         last_error=row["last_error"],

@@ -230,8 +230,6 @@ def _is_missing_rollout_error(exc: RuntimeError) -> bool:
 
 
 def default_model_from_environment() -> str:
-    if model := os.environ.get("SUPER_AGENTS_MODEL", "").strip():
-        return model
     return DEFAULT_MODEL
 
 
