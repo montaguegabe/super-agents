@@ -107,4 +107,3 @@ def preview(text: str | None, limit: int = 180) -> str | None:
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1] + "..."
-

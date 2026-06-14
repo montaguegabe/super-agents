@@ -16,7 +16,7 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from .app_server_client import LabelQueryInput
-from .backend_clients import SuperAgentsClient, client_from_environment
+from .backend_clients import SuperAgentsClient, backend_from_environment, client_from_environment
 
 JsonObject = dict[str, Any]
 Handler = Callable[[JsonObject], Awaitable[Any]]
@@ -32,6 +32,7 @@ OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "dispatcher-config
 LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+CLAUDE_MODEL_ALIASES = {"opus", "sonnet", "haiku"}
 
 
 @dataclass(slots=True)
@@ -364,7 +365,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             ),
             handler=lambda input_data: client.start_turn_by_label(
                 clean_name_query_input(input_data),
-                clean_start_turn_by_name_input(input_data),
+                clean_start_turn_by_name_input(input_data, backend=client_backend(client)),
             ),
         ),
         ToolDefinition(
@@ -394,7 +395,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             ),
             handler=lambda input_data: client.queue_turn_by_label(
                 clean_name_query_input(input_data),
-                clean_queue_turn_input(input_data),
+                clean_queue_turn_input(input_data, backend=client_backend(client)),
             ),
         ),
         ToolDefinition(
@@ -496,6 +497,11 @@ def text_tool_result(value: Any, is_error: bool = False) -> types.CallToolResult
     )
 
 
+def client_backend(client: SuperAgentsClient) -> str | None:
+    backend = getattr(client, "backend", None)
+    return backend if isinstance(backend, str) else None
+
+
 def clean_thread_input(input_data: JsonObject) -> JsonObject:
     cwd = optional_string(input_data, "cwd")
     validate_thread_cwd(cwd)
@@ -518,7 +524,7 @@ def validate_thread_cwd(cwd: str | None) -> None:
         raise ValueError(f"cwd must be an existing directory: {cwd}")
 
 
-def clean_turn_input(input_data: JsonObject) -> JsonObject:
+def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> JsonObject:
     prompt = required_string(input_data, "prompt")
     return without_none(
         {
@@ -526,7 +532,8 @@ def clean_turn_input(input_data: JsonObject) -> JsonObject:
             "prompt": prompt,
             "cwd": optional_string(input_data, "cwd"),
             "mode": optional_mode(input_data, "mode") or "default",
-            "model": optional_string(input_data, "model") or default_super_agents_model(),
+            "model": optional_string(input_data, "model")
+            or default_super_agents_model(backend=backend),
             "reasoningEffort": optional_string(input_data, "reasoningEffort") or default_reasoning_effort(),
             "serviceTier": optional_string(input_data, "serviceTier") or "fast",
             "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
@@ -578,12 +585,28 @@ def default_reasoning_effort() -> str:
     return value if isinstance(value, str) and value in REASONING_EFFORTS else "high"
 
 
-def default_super_agents_model() -> str | None:
+def default_super_agents_model(*, backend: str | None = None) -> str | None:
     payload = default_dispatcher_config()
     value = payload.get("super_agents_model") or payload.get("superAgentsModel")
     if isinstance(value, str) and value.strip():
-        return value.strip()
-    return os.environ.get("SUPER_AGENTS_MODEL", "").strip() or None
+        return _model_for_backend(value.strip(), backend=backend)
+    return _model_for_backend(os.environ.get("SUPER_AGENTS_MODEL", "").strip(), backend=backend)
+
+
+def _model_for_backend(model: str | None, *, backend: str | None = None) -> str | None:
+    if not model:
+        return None
+    selected_backend = backend or backend_from_environment()
+    normalized_model = model.strip().lower()
+    if selected_backend == "codex" and (
+        normalized_model in CLAUDE_MODEL_ALIASES or normalized_model.startswith("claude-")
+    ):
+        logger.warning(
+            "Ignoring Claude Super Agents model %s for Codex backend; using Codex default model",
+            model,
+        )
+        return None
+    return model
 
 
 def default_dispatcher_config() -> JsonObject:
@@ -623,8 +646,8 @@ def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:
     )
 
 
-def clean_start_turn_by_name_input(input_data: JsonObject) -> JsonObject:
-    cleaned = clean_turn_input({"threadId": "__placeholder__", **input_data})
+def clean_start_turn_by_name_input(input_data: JsonObject, *, backend: str | None = None) -> JsonObject:
+    cleaned = clean_turn_input({"threadId": "__placeholder__", **input_data}, backend=backend)
     cleaned.pop("threadId", None)
     cleaned.pop("agentName", None)
     cleaned["name"] = required_string(input_data, "name")
@@ -632,10 +655,13 @@ def clean_start_turn_by_name_input(input_data: JsonObject) -> JsonObject:
     return cleaned
 
 
-def clean_queue_turn_input(input_data: JsonObject) -> JsonObject:
+def clean_queue_turn_input(input_data: JsonObject, *, backend: str | None = None) -> JsonObject:
     if not optional_string(input_data, "name") and not optional_string(input_data, "threadId"):
         raise ValueError("name or threadId must be provided.")
-    cleaned = clean_turn_input({"threadId": optional_string(input_data, "threadId") or "__placeholder__", **input_data})
+    cleaned = clean_turn_input(
+        {"threadId": optional_string(input_data, "threadId") or "__placeholder__", **input_data},
+        backend=backend,
+    )
     cleaned.pop("threadId", None)
     if name := optional_string(input_data, "name"):
         cleaned["name"] = name

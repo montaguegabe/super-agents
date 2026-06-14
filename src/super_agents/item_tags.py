@@ -83,11 +83,7 @@ def _item_tags(kind: ItemKind, item_id: str) -> dict[str, Any]:
     payload = read_tags()
     entry = payload[f"{kind}s"].get(item_id) if item_id else None
     slugs = entry.get("tags") if isinstance(entry, dict) else []
-    tags = [
-        payload["options"][slug]["label"]
-        for slug in slugs
-        if isinstance(slug, str) and slug in payload["options"]
-    ]
+    tags = [payload["options"][slug]["label"] for slug in slugs if isinstance(slug, str) and slug in payload["options"]]
     return {
         f"{kind}Id": item_id,
         "tags": tags,
@@ -190,11 +186,7 @@ def _read_assignments(raw_assignments: Any, kind: ItemKind) -> dict[str, dict[st
         item_id = _normalize_item_id(raw_item_id)
         if not item_id or not isinstance(raw_entry, dict):
             continue
-        tags = [
-            slug
-            for raw_slug in raw_entry.get("tags", [])
-            if (slug := _slugify(raw_slug))
-        ]
+        tags = [slug for raw_slug in raw_entry.get("tags", []) if (slug := _slugify(raw_slug))]
         if not tags:
             continue
         assignments[item_id] = {

@@ -41,11 +41,7 @@ class ClaudeTuiClient:
             "dataStore": str(self.store.path),
             "pendingRequests": [],
             "pendingPermissionRequests": [],
-            "queuedTurns": [
-                turn.to_json()
-                for session in sessions
-                for turn in self.store.queued_turns(session.id)
-            ],
+            "queuedTurns": [turn.to_json() for session in sessions for turn in self.store.queued_turns(session.id)],
             "activeTurns": [
                 self._status_item(session)
                 for session in sessions
@@ -110,7 +106,13 @@ class ClaudeTuiClient:
         session = self._resolve_session(LabelQueryInput(label=str(request_id), thread_id=str(request_id)))
         decision = _decision_from_result(result)
         await asyncio.to_thread(self.runtime.answer, session, decision)
-        return {"backend": self.backend, "answered": True, "threadId": session.id, "name": session.name, "decision": decision}
+        return {
+            "backend": self.backend,
+            "answered": True,
+            "threadId": session.id,
+            "name": session.name,
+            "decision": decision,
+        }
 
     async def sessions(self) -> list[JsonObject]:
         return [self._session_view(session) for session in self.store.list_sessions(include_inactive=True)]
@@ -134,7 +136,11 @@ class ClaudeTuiClient:
             self._status_item(session)
             for session in self._query_sessions(query, include_inactive=bool(query.include_inactive))
         ][: query.limit or 50]
-        return {"backend": self.backend, "count": len(items), "agents": [apply_field_selection(item, query.fields) for item in items]}
+        return {
+            "backend": self.backend,
+            "count": len(items),
+            "agents": [apply_field_selection(item, query.fields) for item in items],
+        }
 
     async def resolve_label(self, input_data: LabelQueryInput) -> JsonObject:
         session = self._resolve_session(input_data)
@@ -282,7 +288,9 @@ class ClaudeTuiClient:
                 "updatedAt": session.updated_at,
                 "lastObservedState": session.last_observed_state,
                 "queueDepth": len(self.store.queued_turns(session.id)),
-                "preview": turns[0].to_json().get("promptPreview") if turns and query.include_preview is not False else None,
+                "preview": turns[0].to_json().get("promptPreview")
+                if turns and query.include_preview is not False
+                else None,
             }
         )
         return apply_field_selection(item, query.fields)

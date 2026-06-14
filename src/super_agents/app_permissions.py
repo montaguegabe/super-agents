@@ -15,7 +15,7 @@ DEFAULT_APPROVAL_REQUESTS_FILE = Path.home() / ".super-agents" / "approval-reque
 
 
 def is_permission_request(method: str) -> bool:
-    return "requestApproval" in method
+    return "requestApproval" in method or method == "mcpServer/elicitation/request"
 
 
 def shared_permission_requests(path: str | Path | None = None) -> list[JsonObject]:

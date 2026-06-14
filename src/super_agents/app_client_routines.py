@@ -25,6 +25,7 @@ class RoutineClientMixin:
     async def save_routine(self, input_data: JsonObject) -> JsonObject:
         name = str(input_data["name"])
         async with self._state_lock:
+
             def update(state: StateFile) -> JsonObject:
                 now = iso_now()
                 current = state.routines.get(name)
@@ -70,6 +71,7 @@ class RoutineClientMixin:
 
     async def delete_routine(self, name: str) -> JsonObject:
         async with self._state_lock:
+
             def update(state: StateFile) -> JsonObject:
                 if name not in state.routines:
                     raise ValueError(f"No Super Agents routine found for name {name}.")
@@ -106,6 +108,7 @@ class RoutineClientMixin:
 
     async def reserve_due_routines(self, name: str | None = None, force: bool = False) -> list[RoutineRecord]:
         async with self._state_lock:
+
             def update(state: StateFile) -> list[RoutineRecord]:
                 candidates = [
                     routine
@@ -189,6 +192,7 @@ class RoutineClientMixin:
 
     async def record_routine_run(self, name: str, patch: JsonObject) -> None:
         async with self._state_lock:
+
             def update(state: StateFile) -> None:
                 routine = state.routines.get(name)
                 if routine is None:

@@ -60,11 +60,7 @@ class SessionClientMixin:
             if not input_data.status or self.session_status(session) == input_data.status
         ]
         if input_data.favorite is not None:
-            sessions = [
-                session
-                for session in sessions
-                if is_favorite(session.thread_id) is input_data.favorite
-            ]
+            sessions = [session for session in sessions if is_favorite(session.thread_id) is input_data.favorite]
         return sorted(sessions, key=session_recency, reverse=True)
 
     async def resolve_session(self, label: str, input_data: LabelQueryInput) -> ResolvedSession:
@@ -207,11 +203,7 @@ class SessionClientMixin:
         if input_data.status:
             items = [item for item in items if item.get("status") == input_data.status]
         if input_data.favorite is not None:
-            items = [
-                item
-                for item in items
-                if item.get("isFavorite") is input_data.favorite
-            ]
+            items = [item for item in items if item.get("isFavorite") is input_data.favorite]
         return sorted(items, key=lambda item: parse_iso_ms(str(item.get("updatedAt") or "")), reverse=True)
 
     def thread_view(self, thread: JsonObject) -> JsonObject:
@@ -426,6 +418,7 @@ class SessionClientMixin:
 
     async def remember_session(self, thread_id: str, patch: JsonObject) -> None:
         async with self._state_lock:
+
             def update(state: StateFile) -> None:
                 now = iso_now()
                 state.sessions[thread_id] = session_from_patch(
@@ -441,6 +434,7 @@ class SessionClientMixin:
         clear_fields: list[str] | None = None,
     ) -> None:
         async with self._state_lock:
+
             def update(state: StateFile) -> None:
                 now = iso_now()
                 current = state.sessions.get(thread_id) or SessionRecord(

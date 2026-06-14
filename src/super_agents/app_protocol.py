@@ -62,11 +62,7 @@ def super_agent_thread_id(value: Any) -> str | None:
 def _without_super_agent_identity_lines(value: str | None) -> str:
     if not value:
         return ""
-    lines = [
-        line
-        for line in value.strip().splitlines()
-        if not _is_super_agent_identity_line(line)
-    ]
+    lines = [line for line in value.strip().splitlines() if not _is_super_agent_identity_line(line)]
     return "\n".join(lines).strip()
 
 
@@ -76,10 +72,7 @@ def _is_super_agent_identity_line(line: str) -> bool:
         stripped.startswith(SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX)
         or stripped.startswith(LEGACY_SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX)
         or stripped.startswith(SUPER_AGENT_THREAD_ID_INSTRUCTION_PREFIX)
-        or (
-            stripped.startswith(SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX)
-            and stripped.endswith(".")
-        )
+        or (stripped.startswith(SUPER_AGENT_AGENT_NAME_INSTRUCTION_PREFIX) and stripped.endswith("."))
     )
 
 

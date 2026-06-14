@@ -257,7 +257,9 @@ class TransportClientMixin:
         try:
             task = asyncio.create_task(self._poll_permission_decision(pending_request))
         except RuntimeError:
-            logger.exception("Could not schedule Super Agents permission decision polling without a running event loop.")
+            logger.exception(
+                "Could not schedule Super Agents permission decision polling without a running event loop."
+            )
             return
         self._permission_decision_tasks.add(task)
         task.add_done_callback(self._permission_decision_tasks.discard)

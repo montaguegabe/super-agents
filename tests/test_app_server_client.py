@@ -178,11 +178,37 @@ def test_turn_input_uses_openbase_super_agents_model_default(monkeypatch, tmp_pa
     config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SUPER_AGENTS_MODEL", "sonnet")
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-agent-sdk")
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 
     assert cleaned["model"] == "opus"
     assert default_super_agents_model() == "opus"
+
+
+def test_turn_input_ignores_claude_model_default_for_codex(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+    monkeypatch.delenv("SUPER_AGENTS_MODEL", raising=False)
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert "model" not in cleaned
+    assert default_super_agents_model() is None
+
+
+def test_turn_input_keeps_codex_model_default_for_codex(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({"super_agents_model": "gpt-5.5"}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["model"] == "gpt-5.5"
+    assert default_super_agents_model() == "gpt-5.5"
 
 
 def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:
@@ -1366,12 +1392,85 @@ async def test_status_lists_pending_permission_requests_across_threads(tmp_path:
         "plan/question",
         {"threadId": "thread-two", "turnId": "turn-two", "text": "Choose"},
     )
+    client.handle_server_request(
+        "elicitation-1",
+        "mcpServer/elicitation/request",
+        {"threadId": "thread-three", "turnId": "turn-three", "serverName": "super_agents"},
+    )
 
     status = await client.status()
 
-    assert [item["id"] for item in status["pendingRequests"]] == ["approval-1", "question-1"]
-    assert [item["id"] for item in status["pendingPermissionRequests"]] == ["approval-1"]
-    assert [item.id for item in client.pending_permission_requests()] == ["approval-1"]
+    assert [item["id"] for item in status["pendingRequests"]] == [
+        "approval-1",
+        "question-1",
+        "elicitation-1",
+    ]
+    assert [item["id"] for item in status["pendingPermissionRequests"]] == [
+        "approval-1",
+        "elicitation-1",
+    ]
+    assert [item.id for item in client.pending_permission_requests()] == [
+        "approval-1",
+        "elicitation-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_can_answer_mcp_elicitation_request(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    received: list[dict[str, Any]] = []
+    server_request_id = "elicitation-1"
+
+    async def after_message(message: dict[str, Any], websocket: Any) -> None:
+        if message.get("method") == "turn/start":
+            await websocket.send(
+                json.dumps(
+                    {
+                        "id": server_request_id,
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "threadId": "thread-elicitation",
+                            "turnId": "turn-elicitation",
+                            "serverName": "super_agents",
+                        },
+                    }
+                )
+            )
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-elicitation", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-elicitation"}
+        return {"ok": True}
+
+    async def permission_callback(request: app_server_client.PendingServerRequest) -> dict[str, Any]:
+        received.append(request.to_json())
+        return {"action": "accept", "content": None, "_meta": None}
+
+    server = await start_fake_app_server(captured, handler, after_message)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    client.register_permission_callback(permission_callback)
+    try:
+        await client.start_thread({"label": "elicitation"})
+        await client.start_turn({"threadId": "thread-elicitation", "label": "elicitation", "prompt": "work"})
+
+        expected = {"id": server_request_id, "result": {"action": "accept", "content": None, "_meta": None}}
+        for _ in range(20):
+            if expected in captured:
+                break
+            await asyncio.sleep(0.01)
+
+        assert received[0]["id"] == server_request_id
+        assert received[0]["method"] == "mcpServer/elicitation/request"
+        assert expected in captured
+        status = await client.status()
+        assert status["pendingRequests"] == []
+        assert status["pendingPermissionRequests"] == []
+        assert status["activeTurns"][0]["status"] == "running"
+    finally:
+        await client.close()
+        await server.close()
 
 
 @pytest.mark.asyncio

@@ -41,9 +41,7 @@ def read_favorites() -> dict[str, dict[str, Any]]:
             continue
         favorites[thread_id] = {
             "thread_id": thread_id,
-            "favorited_at": raw_entry.get("favorited_at")
-            if isinstance(raw_entry.get("favorited_at"), str)
-            else None,
+            "favorited_at": raw_entry.get("favorited_at") if isinstance(raw_entry.get("favorited_at"), str) else None,
         }
     return favorites
 

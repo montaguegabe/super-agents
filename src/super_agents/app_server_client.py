@@ -247,7 +247,9 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
     ) -> None:
         self.ws_url = ws_url or os.environ.get("SUPER_AGENTS_WS_URL") or DEFAULT_WS_URL
         self.state_file = Path(state_file or os.environ.get("SUPER_AGENTS_STATE_FILE") or DEFAULT_STATE_FILE)
-        self.queue_dir = Path(queue_dir or os.environ.get("SUPER_AGENTS_QUEUE_DIR") or self.state_file.parent / "queues")
+        self.queue_dir = Path(
+            queue_dir or os.environ.get("SUPER_AGENTS_QUEUE_DIR") or self.state_file.parent / "queues"
+        )
         self.approval_requests_file = Path(
             approval_requests_file
             or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE")
@@ -276,14 +278,10 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "websocketConnected": websocket_is_open(self._ws),
             "managedProcess": False,
             "pendingRequests": [request.to_json() for request in self._pending_server_requests.values()],
-            "pendingPermissionRequests": [
-                request.to_json() for request in self.pending_permission_requests()
-            ],
+            "pendingPermissionRequests": [request.to_json() for request in self.pending_permission_requests()],
             "queuedTurns": self.queued_turn_summary(),
             "activeTurns": [
-                self.compact_tracked_turn(turn)
-                for turn in self._turns.values()
-                if self.tracked_turn_is_active(turn)
+                self.compact_tracked_turn(turn) for turn in self._turns.values() if self.tracked_turn_is_active(turn)
             ],
             "routines": await self.routine_status_summary(),
         }
@@ -309,11 +307,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         self._permission_callback = None
 
     def pending_permission_requests(self) -> list[PendingServerRequest]:
-        return [
-            request
-            for request in self._pending_server_requests.values()
-            if is_permission_request(request.method)
-        ]
+        return [request for request in self._pending_server_requests.values() if is_permission_request(request.method)]
 
     async def _routine_scheduler_loop(self) -> None:
         while True:
