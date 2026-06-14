@@ -12,6 +12,10 @@ Super Agents is used by Openbase Coder, but it can also be run directly by any
 MCP client that needs to coordinate Codex app-server threads without blocking on
 long-running turns.
 
+It also includes two Claude backends: a Python proxy for Codex app-server
+clients, and a local Claude Code TUI backend that bypasses Codex app-server
+entirely. A small non-MCP command switches Openbase's default backend.
+
 ## Install
 
 The recommended install path is `uv tool install`, which installs the
@@ -85,6 +89,68 @@ codex app-server --listen ws://127.0.0.1:4500
 Openbase Coder users usually do not need to run this by hand; the
 `codex-app-server` background service owns that process.
 
+## Backends
+
+Super Agents supports three backend modes:
+
+- `codex`: native Codex app-server over websocket.
+- `claude-code-proxy`: Codex app-server pointed at the packaged Claude proxy.
+- `claude-tui`: local Claude Code TUI sessions managed directly by Super Agents.
+
+Switch modes without MCP:
+
+```bash
+super-agents-backend use codex
+super-agents-backend use claude-code-proxy
+super-agents-backend use claude-tui
+super-agents-backend status
+```
+
+Restart the process that owns Super Agents after switching. For app-server
+backends, restart `codex-app-server`; for `claude-tui`, restart the MCP host
+running `super-agents-mcp`.
+
+## Claude Backend Proxy
+
+Run the packaged Python proxy with:
+
+```bash
+super-agents-claude-proxy --port 6066
+```
+
+The proxy exposes `GET /health` and `POST /v1/responses`, uses
+`ANTHROPIC_API_KEY`, and includes a packaged Codex model catalog:
+
+```bash
+super-agents-claude-proxy --print-model-catalog-path
+```
+
+Openbase users can switch the managed app-server default without using MCP:
+
+```bash
+super-agents-backend use claude-code-proxy
+super-agents-backend use codex
+super-agents-backend status
+```
+
+Restart `codex-app-server` after switching so the managed service picks up the
+updated environment. Keep the managed `codex-claude-proxy` service running for
+proxy mode.
+
+## Claude TUI Backend
+
+The Claude TUI backend is in `claude-tui/` and exposes the
+`super-agents-claude-tui` command for direct operation:
+
+```bash
+super-agents-claude-tui doctor
+super-agents-claude-tui tui
+```
+
+Set `OPENBASE_CODEX_BACKEND=claude-tui` to make `super-agents-mcp` use this
+backend. This path does not require `ANTHROPIC_API_KEY` and does not use
+`codex-app-server`.
+
 ## Add To Codex
 
 Install the package, then register the MCP server:
@@ -145,6 +211,14 @@ Super Agents is configured with environment variables:
 | --- | --- | --- |
 | `SUPER_AGENTS_WS_URL` | `ws://127.0.0.1:4500` | Codex app-server websocket URL |
 | `SUPER_AGENTS_MODEL` | `gpt-5.4` | Default model for new plan/default turns |
+| `OPENBASE_CODEX_BACKEND` | unset | Backend mode: `codex`, `claude-code-proxy`, or `claude-tui` |
+| `CODEX_CLAUDE_MODEL` | `claude-code` | Claude model alias to use when `OPENBASE_CODEX_BACKEND=claude-code-proxy` |
+| `CODEX_CLAUDE_PROXY_COMMAND` | `super-agents-claude-proxy` | Proxy command used by Openbase's managed Codex app-server service |
+| `CODEX_CLAUDE_MODEL_CATALOG_JSON` | packaged model catalog | Codex model catalog for the Claude proxy profile |
+| `SUPER_AGENTS_CLAUDE_TUI_CMD` | `claude` | Claude Code TUI command for the `claude-tui` backend |
+| `SUPER_AGENTS_CLAUDE_TUI_ARGS` | unset | Extra Claude Code TUI arguments |
+| `SUPER_AGENTS_CLAUDE_TUI_MODEL` | unset | Claude Code TUI model passed as `--model` |
+| `SUPER_AGENTS_CLAUDE_TUI_HOME` | `~/.local/share/super-agents-claude-tui` | Local SQLite/log directory for TUI sessions |
 | `SUPER_AGENTS_STATE_FILE` | `~/.super-agents/state.json` | Local session metadata file |
 | `SUPER_AGENTS_QUEUE_DIR` | next to the state file | Directory for queued turn files |
 

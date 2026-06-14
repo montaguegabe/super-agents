@@ -39,6 +39,25 @@ def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
     assert websocket_max_size() is None
 
 
+def test_default_model_uses_claude_code_backend(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("SUPER_AGENTS_MODEL", raising=False)
+    monkeypatch.setenv("OPENBASE_CODEX_BACKEND", "claude-code")
+    monkeypatch.setenv("CODEX_CLAUDE_MODEL", "claude-custom")
+
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+
+    assert client.default_model == "claude-custom"
+
+
+def test_super_agents_model_overrides_claude_backend(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENBASE_CODEX_BACKEND", "claude-code")
+    monkeypatch.setenv("SUPER_AGENTS_MODEL", "gpt-custom")
+
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+
+    assert client.default_model == "gpt-custom"
+
+
 @pytest.mark.asyncio
 async def test_shared_tags_apply_to_threads_and_reports(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OPENBASE_CODER_CLI_DATA_DIR", str(tmp_path))

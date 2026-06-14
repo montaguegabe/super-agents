@@ -1,0 +1,60 @@
+{
+  "models": [
+    {
+      "slug": "claude-code",
+      "display_name": "Claude Code Proxy",
+      "description": "Local Anthropic Messages proxy model for Codex CLI experiments.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Lower reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balanced reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Higher reasoning"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 0,
+      "additional_speed_tiers": [],
+      "service_tiers": [],
+      "default_service_tier": null,
+      "availability_nux": null,
+      "upgrade": null,
+      "base_instructions": "You are Codex running through a local Anthropic Messages proxy. Use available tools when needed and answer concisely.",
+      "model_messages": null,
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "concise",
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text_and_image",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "supports_image_detail_original": false,
+      "context_window": 200000,
+      "max_context_window": 200000,
+      "auto_compact_token_limit": null,
+      "effective_context_window_percent": 95,
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "supports_search_tool": true,
+      "use_responses_lite": false,
+      "auto_review_model_override": null,
+      "tool_mode": null,
+      "multi_agent_version": null
+    }
+  ]
+}

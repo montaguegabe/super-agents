@@ -15,7 +15,8 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
-from .app_server_client import CodexAppServerClient, LabelQueryInput
+from .app_server_client import LabelQueryInput
+from .backend_clients import SuperAgentsClient, client_from_environment
 
 JsonObject = dict[str, Any]
 Handler = Callable[[JsonObject], Awaitable[Any]]
@@ -53,8 +54,8 @@ class ToolDefinition:
         return types.Tool(**kwargs)
 
 
-def create_server(client: CodexAppServerClient | None = None) -> Server:
-    app_client = client or CodexAppServerClient()
+def create_server(client: SuperAgentsClient | None = None) -> Server:
+    app_client = client or client_from_environment()
     server = Server("super-agents", instructions=INSTRUCTIONS)
     tool_by_name = {tool.name: tool for tool in build_tools(app_client)}
 
@@ -101,7 +102,7 @@ def create_server(client: CodexAppServerClient | None = None) -> Server:
     return server
 
 
-def build_tools(client: CodexAppServerClient) -> list[ToolDefinition]:
+def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="codex_app_server_status",
