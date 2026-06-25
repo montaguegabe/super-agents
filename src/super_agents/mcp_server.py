@@ -34,7 +34,7 @@ LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
-DEFAULT_CODEX_SERVICE_TIER = "fast"
+DEFAULT_CODEX_SERVICE_TIER = "standard"
 CLAUDE_MODEL_ALIASES = {"opus", "sonnet", "haiku"}
 
 
@@ -136,6 +136,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                         "type": "string",
                         "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
                     },
+                    **permission_option_properties(include_sandbox=True),
                 },
                 ["name"],
             ),
@@ -373,6 +374,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                         "description": "Defaults to the model for the selected backend's Super Agents role.",
                     },
                     "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    **permission_option_properties(include_sandbox_type=True),
                 },
                 ["name", "prompt"],
             ),
@@ -403,6 +405,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                         "type": "string",
                         "description": "Optional agent name/persona to store for this thread.",
                     },
+                    **permission_option_properties(include_sandbox_type=True),
                 },
                 ["prompt"],
             ),
@@ -499,6 +502,32 @@ def name_query_properties(include_ids: bool = True, include_output_options: bool
     return properties
 
 
+def permission_option_properties(
+    *, include_sandbox: bool = False, include_sandbox_type: bool = False
+) -> JsonObject:
+    properties: JsonObject = {
+        "approvalPolicy": {
+            "type": "string",
+            "description": 'Codex approval policy override, e.g. "never".',
+        },
+        "sandboxPolicy": {
+            "type": "string",
+            "description": 'Codex sandbox policy override, e.g. "danger-full-access".',
+        },
+    }
+    if include_sandbox:
+        properties["sandbox"] = {
+            "type": "string",
+            "description": 'Alias for sandboxPolicy, e.g. "danger-full-access".',
+        }
+    if include_sandbox_type:
+        properties["sandboxType"] = {
+            "type": "string",
+            "description": 'Openbase sandbox type alias, e.g. "dangerFullAccess".',
+        }
+    return properties
+
+
 def name_query_schema(required: list[str] | None = None) -> JsonObject:
     return object_schema(name_query_properties(), required)
 
@@ -524,6 +553,9 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
             "agentName": optional_string(input_data, "agentName"),
+            "approvalPolicy": optional_string(input_data, "approvalPolicy"),
+            "sandbox": optional_string(input_data, "sandbox"),
+            "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
@@ -553,6 +585,9 @@ def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> J
             "name": optional_string(input_data, "name"),
             "label": optional_string(input_data, "name") or optional_string(input_data, "label"),
             "agentName": optional_string(input_data, "agentName"),
+            "approvalPolicy": optional_string(input_data, "approvalPolicy"),
+            "sandboxType": optional_string(input_data, "sandboxType"),
+            "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )

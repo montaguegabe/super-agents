@@ -26,6 +26,11 @@ CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 CLAUDE_CONFIG_FILENAME = ".claude.json"
 CLAUDE_SETTINGS_FILENAME = "settings.json"
 CLAUDE_INSTRUCTIONS_FILENAME = "CLAUDE.md"
+CLAUDE_SERVICE_TIER_EFFORTS = {
+    "fast": "low",
+    "standard": "high",
+    "slow": "high",
+}
 
 SDK_IMPORT_ERROR = (
     "Claude Code backend requires the claude-agent-sdk package. "
@@ -42,7 +47,7 @@ class ClaudeAgentSdkClient:
         self.store = store or Store()
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
-        self._sdk_client_efforts: dict[str, str | None] = {}
+        self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -240,6 +245,7 @@ class ClaudeAgentSdkClient:
             sdk_prompt = self._prompt_for_session(session, turn_input)
             model = _optional_str(turn_input.get("model")) or session.model
             reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
+            service_tier = _optional_str(turn_input.get("serviceTier"))
             turn = self.store.create_turn(
                 session.id,
                 prompt,
@@ -247,6 +253,7 @@ class ClaudeAgentSdkClient:
                 mode=_optional_str(turn_input.get("mode")),
                 model=model,
                 reasoning_effort=reasoning_effort,
+                service_tier=service_tier,
             )
             self.store.update_session(
                 session.id,
@@ -262,6 +269,7 @@ class ClaudeAgentSdkClient:
                     sdk_prompt,
                     model,
                     reasoning_effort,
+                    service_tier,
                     sdk,
                 )
             )
@@ -282,6 +290,7 @@ class ClaudeAgentSdkClient:
         sdk_prompt = self._prompt_for_session(session, turn_input)
         model = _optional_str(turn_input.get("model")) or session.model
         reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
+        service_tier = _optional_str(turn_input.get("serviceTier"))
         turn = self.store.create_turn(
             session.id,
             prompt,
@@ -289,6 +298,7 @@ class ClaudeAgentSdkClient:
             mode=_optional_str(turn_input.get("mode")),
             model=model,
             reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
         )
         self.store.update_session(
             session.id,
@@ -304,6 +314,7 @@ class ClaudeAgentSdkClient:
                 sdk_prompt,
                 model,
                 reasoning_effort,
+                service_tier,
                 sdk,
             )
         )
@@ -329,6 +340,7 @@ class ClaudeAgentSdkClient:
             mode=_optional_str(turn_input.get("mode")),
             model=_optional_str(turn_input.get("model")) or session.model,
             reasoning_effort=_optional_str(turn_input.get("reasoningEffort")),
+            service_tier=_optional_str(turn_input.get("serviceTier")),
         )
         position = len(self.store.queued_turns(session.id))
         self._schedule_queue_drain(session.id)
@@ -363,6 +375,7 @@ class ClaudeAgentSdkClient:
         prompt: str,
         model: str | None,
         reasoning_effort: str | None,
+        service_tier: str | None,
         sdk: Any,
     ) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
@@ -376,6 +389,7 @@ class ClaudeAgentSdkClient:
                     session,
                     model,
                     reasoning_effort,
+                    service_tier,
                     sdk,
                 )
                 last_useful_message = ""
@@ -469,10 +483,12 @@ class ClaudeAgentSdkClient:
         session: Session,
         model: str | None,
         reasoning_effort: str | None,
+        service_tier: str | None,
         sdk: Any,
     ) -> Any:
+        effective_effort = _claude_effort(reasoning_effort, service_tier)
         existing = self._sdk_clients.get(session.id)
-        if existing is not None and self._sdk_client_efforts.get(session.id) == reasoning_effort:
+        if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
             if model and hasattr(existing, "set_model"):
                 await existing.set_model(model)
             return existing
@@ -480,14 +496,14 @@ class ClaudeAgentSdkClient:
             sdk,
             session.cwd,
             model,
-            reasoning_effort,
+            effective_effort,
             resume=session.backend_session_id,
         )
         with _without_unsupported_anthropic_api_keys():
             client = sdk.ClaudeSDKClient(options=options)
             await client.connect()
         self._sdk_clients[session.id] = client
-        self._sdk_client_efforts[session.id] = reasoning_effort
+        self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
         return client
 
     def _schedule_queue_drain(self, session_id: str) -> None:
@@ -525,6 +541,7 @@ class ClaudeAgentSdkClient:
                     self._prompt_for_session(session, {"prompt": turn.prompt}),
                     turn.model,
                     turn.reasoning_effort,
+                    turn.service_tier,
                     sdk,
                 )
             )
@@ -690,6 +707,13 @@ def _agent_options(
     if resume:
         kwargs["resume"] = resume
     return sdk.ClaudeAgentOptions(**kwargs)
+
+
+def _claude_effort(reasoning_effort: str | None, service_tier: str | None) -> str | None:
+    if reasoning_effort and reasoning_effort != "high":
+        return reasoning_effort
+    tier_effort = CLAUDE_SERVICE_TIER_EFFORTS.get((service_tier or "").strip().lower())
+    return tier_effort or reasoning_effort
 
 
 def _with_claude_turn_context(

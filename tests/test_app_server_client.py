@@ -87,7 +87,7 @@ def test_tag_tools_are_registered(tmp_path: Path) -> None:
     }.issubset(tool_names)
 
 
-def test_turn_input_does_not_default_approval_or_sandbox() -> None:
+def test_turn_input_preserves_explicit_approval_and_sandbox() -> None:
     cleaned = clean_turn_input(
         {
             "threadId": "thread-1",
@@ -97,10 +97,10 @@ def test_turn_input_does_not_default_approval_or_sandbox() -> None:
         }
     )
 
-    assert "approvalPolicy" not in cleaned
-    assert "sandboxType" not in cleaned
+    assert cleaned["approvalPolicy"] == "never"
+    assert cleaned["sandboxType"] == "dangerFullAccess"
     assert cleaned["reasoningEffort"] == "high"
-    assert cleaned["serviceTier"] == "fast"
+    assert cleaned["serviceTier"] == "standard"
 
 
 def test_turn_input_accepts_hidden_reasoning_and_service_tier_overrides() -> None:
@@ -117,7 +117,7 @@ def test_turn_input_accepts_hidden_reasoning_and_service_tier_overrides() -> Non
     assert cleaned["serviceTier"] == "standard"
 
 
-def test_thread_input_does_not_default_approval_or_sandbox() -> None:
+def test_thread_input_preserves_explicit_approval_and_sandbox() -> None:
     cleaned = clean_thread_input(
         {
             "name": "new-agent",
@@ -127,8 +127,8 @@ def test_thread_input_does_not_default_approval_or_sandbox() -> None:
         }
     )
 
-    assert "approvalPolicy" not in cleaned
-    assert "sandbox" not in cleaned
+    assert cleaned["approvalPolicy"] == "never"
+    assert cleaned["sandbox"] == "danger-full-access"
     assert cleaned["agentName"] == "Dottie"
 
 
@@ -391,6 +391,45 @@ async def test_label_tools_resolve_latest_active_session_and_list_active_agents(
         assert active["count"] == 2
         assert active["agents"][0]["threadId"] == "thread-2"
         assert active["agents"][0]["runningTurnId"] == "turn-2"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_active_list_does_not_report_idle_native_thread_as_running(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-idle", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-idle"}
+        if message.get("method") == "thread/list":
+            return {
+                "threads": [
+                    {
+                        "id": "thread-idle",
+                        "name": "idle-task",
+                        "cwd": "/tmp/project",
+                        "updatedAt": 1782343247,
+                        "status": {"type": "idle"},
+                    }
+                ]
+            }
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "idle-task", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-idle", "label": "idle-task", "prompt": "work"})
+
+        recent = await client.recent(type_query(label="idle-task", include_inactive=True))
+        assert recent["agents"][0]["status"] == "completed"
+
+        active = await client.active(type_query(label="idle-task"))
+        assert active["count"] == 0
     finally:
         await client.close()
         await server.close()
@@ -665,16 +704,22 @@ async def test_start_turn_by_name_resolves_native_app_server_thread_name(
         caplog.set_level("INFO", logger="super_agents.app_server_client")
         result = await client.start_turn_by_label(
             type_query(label="native-name"),
-            {"label": "native-name", "prompt": "continue", "_mcpCallId": "mcp-test"},
+            {
+                "label": "native-name",
+                "prompt": "continue",
+                "approvalPolicy": "never",
+                "sandboxType": "dangerFullAccess",
+                "_mcpCallId": "mcp-test",
+            },
         )
 
         assert result["threadId"] == "thread-native"
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         assert start_request["params"]["threadId"] == "thread-native"
         assert start_request["params"]["cwd"] == "/tmp/native"
-        assert start_request["params"]["serviceTier"] == "fast"
-        assert "approvalPolicy" not in start_request["params"]
-        assert "sandboxPolicy" not in start_request["params"]
+        assert start_request["params"]["serviceTier"] == "standard"
+        assert start_request["params"]["approvalPolicy"] == "never"
+        assert start_request["params"]["sandboxPolicy"] == {"type": "dangerFullAccess"}
         messages = [record.getMessage() for record in caplog.records]
         assert any("stage=super_agents_resolve_start" in message for message in messages)
         assert any("stage=super_agents_resolve_end" in message for message in messages)
@@ -1844,12 +1889,12 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
         "path",
     ]
     assert "favorite" in by_name["super_agents_recent"].input_schema["properties"]
-    assert "approvalPolicy" not in by_name["super_agents_start"].input_schema["properties"]
-    assert "sandbox" not in by_name["super_agents_start"].input_schema["properties"]
-    assert "approvalPolicy" not in by_name["super_agents_start_turn"].input_schema["properties"]
-    assert "sandboxType" not in by_name["super_agents_start_turn"].input_schema["properties"]
-    assert "approvalPolicy" not in by_name["super_agents_queue_turn"].input_schema["properties"]
-    assert "sandboxType" not in by_name["super_agents_queue_turn"].input_schema["properties"]
+    assert "approvalPolicy" in by_name["super_agents_start"].input_schema["properties"]
+    assert "sandbox" in by_name["super_agents_start"].input_schema["properties"]
+    assert "approvalPolicy" in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "sandboxType" in by_name["super_agents_start_turn"].input_schema["properties"]
+    assert "approvalPolicy" in by_name["super_agents_queue_turn"].input_schema["properties"]
+    assert "sandboxType" in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "per-thread filesystem queue" in by_name["super_agents_queue_turn"].description
     assert "steers the active turn" in by_name["super_agents_start_turn"].description
     assert "super_agents_queue_turn" in by_name["super_agents_start_turn"].description

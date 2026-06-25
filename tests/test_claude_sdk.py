@@ -170,6 +170,79 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(
+        LabelQueryInput(label="sdk"),
+        {"prompt": "hello", "reasoningEffort": "high", "serviceTier": "fast"},
+    )
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        "cwd": str(tmp_path),
+        "model": "sonnet",
+        "permission_mode": "bypassPermissions",
+        "effort": "low",
+    }
+    assert store.get_turn(result["turnId"]).reasoning_effort == "high"
+    assert store.get_turn(result["turnId"]).service_tier == "fast"
+    assert store.get_turn(result["turnId"]).to_json()["serviceTier"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(
+        LabelQueryInput(label="sdk"),
+        {"prompt": "hello", "serviceTier": "standard"},
+    )
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        "cwd": str(tmp_path),
+        "model": "sonnet",
+        "permission_mode": "bypassPermissions",
+        "effort": "high",
+    }
+    assert store.get_turn(result["turnId"]).service_tier == "standard"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(
+        LabelQueryInput(label="sdk"),
+        {"prompt": "hello", "reasoningEffort": "xhigh", "serviceTier": "fast"},
+    )
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        "cwd": str(tmp_path),
+        "model": "sonnet",
+        "permission_mode": "bypassPermissions",
+        "effort": "xhigh",
+    }
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_persists_thread_developer_instructions(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)

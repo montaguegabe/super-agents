@@ -225,7 +225,10 @@ class SessionClientMixin:
     def thread_view(self, thread: JsonObject) -> JsonObject:
         thread_id = extract_thread_id(thread)
         session = self.session_from_memory(thread_id) if thread_id else None
-        status = self.session_status(session) if session else normalize_thread_status(thread) or "unknown"
+        native_status = normalize_thread_status(thread)
+        status = self.session_status(session) if session else native_status or "unknown"
+        if session and native_status and not is_active_status(native_status):
+            status = native_status
         running_turn_id = (
             session.active_turn_id or session.last_turn_id if session and is_active_status(status) else None
         )

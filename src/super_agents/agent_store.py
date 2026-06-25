@@ -72,6 +72,7 @@ class Turn:
     mode: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     finished_at: str | None = None
     attempts: int = 0
     last_error: str | None = None
@@ -88,6 +89,7 @@ class Turn:
                 "mode": self.mode,
                 "model": self.model,
                 "reasoningEffort": self.reasoning_effort,
+                "serviceTier": self.service_tier,
                 "createdAt": self.created_at,
                 "updatedAt": self.updated_at,
                 "finishedAt": self.finished_at,
@@ -143,6 +145,7 @@ class Store:
                     mode text,
                     model text,
                     reasoning_effort text,
+                    service_tier text,
                     status text not null,
                     attempts integer not null default 0,
                     last_error text,
@@ -159,6 +162,8 @@ class Store:
             }
             if "reasoning_effort" not in columns:
                 conn.execute("alter table turns add column reasoning_effort text")
+            if "service_tier" not in columns:
+                conn.execute("alter table turns add column service_tier text")
             if "last_useful_message" not in columns:
                 conn.execute("alter table turns add column last_useful_message text")
             session_columns = {
@@ -285,6 +290,7 @@ class Store:
         mode: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        service_tier: str | None = None,
     ) -> Turn:
         now = iso_now()
         turn_id = f"t_{uuid.uuid4().hex}"
@@ -292,8 +298,8 @@ class Store:
             conn.execute(
                 """
                 insert into turns (
-                    id, session_id, prompt, mode, model, reasoning_effort, status, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, session_id, prompt, mode, model, reasoning_effort, service_tier, status, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn_id,
@@ -302,6 +308,7 @@ class Store:
                     mode,
                     model,
                     reasoning_effort,
+                    service_tier,
                     status,
                     now,
                     now,
@@ -444,6 +451,7 @@ def row_to_turn(row: sqlite3.Row) -> Turn:
         mode=row["mode"],
         model=row["model"],
         reasoning_effort=row["reasoning_effort"],
+        service_tier=row["service_tier"],
         status=row["status"],
         attempts=row["attempts"],
         last_error=row["last_error"],

@@ -342,6 +342,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
             "config": await login_shell_config_override(include_super_agent_identity=False),
+            **self.permission_overrides(input_data),
         }
         if developer_instructions := with_super_agent_identity_instructions(
             get_string(input_data, "developerInstructions"),
@@ -518,7 +519,8 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         params: JsonObject = {
             "threadId": thread_id,
             "cwd": input_data.get("cwd") or (session.cwd if session else None) or str(Path.home()),
-            "serviceTier": input_data.get("serviceTier") or "fast",
+            "serviceTier": input_data.get("serviceTier") or "standard",
+            **self.permission_overrides(input_data),
             "config": await login_shell_config_override(
                 thread_id=thread_id,
                 label=label,
@@ -613,6 +615,27 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             },
         )
         return {**result, "threadId": thread_id, "turnId": turn_id, "mode": mode, "reasoningEffort": reasoning_effort}
+
+    def permission_overrides(self, input_data: JsonObject) -> JsonObject:
+        result: JsonObject = {}
+        approval_policy = input_data.get("approvalPolicy")
+        if isinstance(approval_policy, str) and approval_policy:
+            result["approvalPolicy"] = approval_policy
+        sandbox_policy = input_data.get("sandboxPolicy") or input_data.get("sandbox")
+        sandbox_type = input_data.get("sandboxType")
+        if not sandbox_policy and sandbox_type == "dangerFullAccess":
+            sandbox_policy = {"type": "dangerFullAccess"}
+        elif sandbox_policy == "danger-full-access":
+            sandbox_policy = {"type": "dangerFullAccess"}
+        elif sandbox_policy == "workspace-write":
+            sandbox_policy = {"type": "workspaceWrite"}
+        elif sandbox_policy == "read-only":
+            sandbox_policy = {"type": "readOnly"}
+        if isinstance(sandbox_policy, str) and sandbox_policy:
+            result["sandboxPolicy"] = sandbox_policy
+        elif isinstance(sandbox_policy, dict) and sandbox_policy:
+            result["sandboxPolicy"] = sandbox_policy
+        return result
 
     async def steer_turn(self, thread_id: str, turn_id: str, prompt: str) -> JsonObject:
         await self.ensure_connected()
@@ -925,7 +948,27 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         )
         if turn_id and not turn_id.startswith("q_") and thread_is_active:
             prompt = str(turn_input.get("prompt") or "")
-            result = await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
+            try:
+                result = await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
+            except RuntimeError as exc:
+                if "no active turn to steer" not in str(exc):
+                    raise
+                logger.warning(
+                    "Resolved active Super Agents thread had no native active turn; "
+                    "starting a new turn instead thread_id=%s turn_id=%s status=%s",
+                    resolved.session.thread_id,
+                    turn_id,
+                    resolved.status,
+                )
+                result = await self.start_turn(
+                    {"cwd": resolved.session.cwd, **turn_input, "threadId": resolved.session.thread_id}
+                )
+                return {
+                    **result,
+                    "queued": False,
+                    "startedImmediately": True,
+                    "drain": "started_after_stale_steer",
+                }
             return {
                 **result,
                 "queued": False,

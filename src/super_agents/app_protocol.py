@@ -191,12 +191,16 @@ def normalize_thread_status(thread: JsonObject) -> StoredStatus | None:
     if isinstance(raw_status, str):
         if raw_status in {"active", "running", "inProgress"}:
             return "running"
+        if raw_status == "idle":
+            return "completed"
         if raw_status in {"completed", "failed", "cancelled", "waiting", "unknown"}:
             return raw_status  # type: ignore[return-value]
     if isinstance(raw_status, dict):
         kind = get_string(raw_status, "type") or get_string(raw_status, "status")
         if kind in {"active", "running", "inProgress"}:
             return "running"
+        if kind == "idle":
+            return "completed"
         if kind in {"completed", "failed", "cancelled", "waiting", "unknown"}:
             return kind  # type: ignore[return-value]
     return None
