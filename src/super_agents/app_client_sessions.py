@@ -51,6 +51,9 @@ def _is_queue_item_id(value: str | None) -> bool:
     return bool(value and value.startswith("q_"))
 
 
+STALE_ACTIVE_TURN_WARNING = "stale_active_turn"
+
+
 class SessionClientMixin:
     async def filtered_sessions(self, input_data: LabelQueryInput) -> list[SessionRecord]:
         state = await self.read_state()
@@ -229,6 +232,7 @@ class SessionClientMixin:
         status = self.session_status(session) if session else native_status or "unknown"
         if session and native_status and not is_active_status(native_status):
             status = native_status
+        status_warning = self.session_status_warning(session)
         running_turn_id = (
             session.active_turn_id or session.last_turn_id if session and is_active_status(status) else None
         )
@@ -258,7 +262,8 @@ class SessionClientMixin:
                 "lastEventAt": last_event_at,
                 "lastEventAgeMs": age_ms(last_event_at),
                 "ageSinceUpdateMs": age_ms(updated_at),
-                "isLikelyStale": is_likely_stale(status, last_event_at or updated_at),
+                "isLikelyStale": bool(status_warning) or is_likely_stale(status, last_event_at or updated_at),
+                "statusWarning": status_warning,
                 "preview": get_string(thread, "preview"),
                 "lastUsefulMessage": session.last_useful_message if session else None,
                 "pendingRequestCount": self.pending_request_count(thread_id, running_turn_id) if thread_id else None,
@@ -267,6 +272,7 @@ class SessionClientMixin:
 
     def session_view(self, session: SessionRecord) -> JsonObject:
         status = self.session_status(session)
+        status_warning = self.session_status_warning(session)
         running_turn_id = session.active_turn_id or session.last_turn_id if is_active_status(status) else None
         if _is_queue_item_id(running_turn_id):
             running_turn_id = None
@@ -292,7 +298,8 @@ class SessionClientMixin:
                 "lastEventAt": session.last_event_at,
                 "lastEventAgeMs": age_ms(session.last_event_at),
                 "ageSinceUpdateMs": age_ms(session.updated_at),
-                "isLikelyStale": is_likely_stale(status, session.last_event_at or session.updated_at),
+                "isLikelyStale": bool(status_warning) or is_likely_stale(status, session.last_event_at or session.updated_at),
+                "statusWarning": status_warning,
                 "lastUsefulMessage": session.last_useful_message,
                 "pendingRequestCount": self.pending_request_count(session.thread_id, running_turn_id),
             }
@@ -374,6 +381,8 @@ class SessionClientMixin:
                         return session.last_status
                     return "unknown"
                 return runtime_turn.status
+            if session.last_status and is_active_status(session.last_status):
+                return "unknown"
             return session.last_status or "unknown"
         if session.last_status and is_active_status(session.last_status):
             if not last_turn_id:
@@ -385,6 +394,18 @@ class SessionClientMixin:
                 return runtime_turn.status
             return session.last_status
         return session.last_status or "unknown"
+
+    def session_status_warning(self, session: SessionRecord | None) -> str | None:
+        if session is None:
+            return None
+        active_turn_id = None if _is_queue_item_id(session.active_turn_id) else session.active_turn_id
+        if not active_turn_id:
+            return None
+        if self._turns.get(turn_key(session.thread_id, active_turn_id)) is not None:
+            return None
+        if session.last_status and is_active_status(session.last_status):
+            return STALE_ACTIVE_TURN_WARNING
+        return None
 
     def session_from_memory(self, thread_id: str | None) -> SessionRecord | None:
         if not thread_id:

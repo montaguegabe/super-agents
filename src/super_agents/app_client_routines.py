@@ -8,6 +8,7 @@ from .app_protocol import extract_thread_id
 from .app_routines import (
     DEFAULT_ROUTINE_TIMEZONE,
     routine_from_patch,
+    routine_fresh_thread_name,
     routine_is_due,
     routine_local_date,
     routine_next_run_sort_key,
@@ -121,9 +122,11 @@ class RoutineClientMixin:
                 now = iso_now()
                 for routine in candidates:
                     run_date = routine_local_date(routine)
+                    run_at = now if routine.schedule_type == "interval" else routine.last_run_at
                     merged = {
                         **routine.to_json(),
                         "lastRunDate": run_date,
+                        "lastRunAt": run_at,
                         "lastStartedAt": now,
                         "lastStatus": "starting",
                         "lastError": None,
@@ -140,8 +143,30 @@ class RoutineClientMixin:
         if not routine.enabled and not force:
             return {"name": routine.name, "skipped": True, "reason": "disabled"}
         run_date = routine_local_date(routine)
+        run_at = routine.last_run_at or iso_now()
         try:
-            if routine.thread_id:
+            if routine.fresh_thread_per_run:
+                thread_name = routine_fresh_thread_name(routine)
+                agent_name = await self.routine_fresh_thread_agent_name(routine)
+                thread_result = await self.start_thread(
+                    without_none(
+                        {
+                            "name": thread_name,
+                            "agentName": agent_name,
+                            "cwd": routine.cwd,
+                            "approvalPolicy": routine.approval_policy,
+                            "sandboxType": routine.sandbox_type,
+                            "developerInstructions": routine.developer_instructions,
+                        }
+                    )
+                )
+                thread_id = extract_thread_id(thread_result)
+                if not thread_id:
+                    raise RuntimeError(f"Could not start thread for routine {routine.name}.")
+                result = await self.start_turn(
+                    {**routine_turn_input(routine), "threadId": thread_id, "name": thread_name, "label": thread_name}
+                )
+            elif routine.thread_id:
                 target = await self.resolve_queue_target(LabelQueryInput(thread_id=routine.thread_id, cwd=routine.cwd))
                 result = await self.start_or_queue_turn(target, routine_turn_input(routine))
             elif routine.target_name:
@@ -155,6 +180,8 @@ class RoutineClientMixin:
                         {
                             "name": routine.name,
                             "cwd": routine.cwd,
+                            "approvalPolicy": routine.approval_policy,
+                            "sandboxType": routine.sandbox_type,
                             "developerInstructions": routine.developer_instructions,
                         }
                     )
@@ -169,6 +196,7 @@ class RoutineClientMixin:
                 routine.name,
                 {
                     "lastRunDate": run_date,
+                    "lastRunAt": run_at if routine.schedule_type == "interval" else routine.last_run_at,
                     "lastStartedAt": iso_now(),
                     "lastThreadId": get_string(result, "threadId"),
                     "lastTurnId": get_string(result, "turnId"),
@@ -182,6 +210,7 @@ class RoutineClientMixin:
                 routine.name,
                 {
                     "lastRunDate": run_date,
+                    "lastRunAt": run_at if routine.schedule_type == "interval" else routine.last_run_at,
                     "lastStartedAt": iso_now(),
                     "lastStatus": "failed",
                     "lastError": str(exc),
@@ -189,6 +218,17 @@ class RoutineClientMixin:
             )
             logger.exception("Failed to run Super Agents routine name=%s", routine.name)
             return {"name": routine.name, "ran": False, "error": str(exc)}
+
+    async def routine_fresh_thread_agent_name(self, routine: RoutineRecord) -> str | None:
+        if not routine.target_name:
+            return None
+        try:
+            target = await self.resolve_queue_target(
+                LabelQueryInput(label=routine.target_name, cwd=routine.cwd, prefer="latest_any")
+            )
+        except ValueError:
+            return None
+        return target.session.agent_name
 
     async def record_routine_run(self, name: str, patch: JsonObject) -> None:
         async with self._state_lock:

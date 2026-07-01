@@ -1054,6 +1054,62 @@ async def test_start_turn_by_name_ignores_queue_item_as_active_turn(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_start_turn_by_name_warns_and_starts_after_orphaned_active_turn(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        captured.append(message)
+        if message.get("method") == "thread/list":
+            return {"data": []}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-new"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-orphan",
+            {
+                "label": "orphan",
+                "threadId": "thread-orphan",
+                "cwd": "/tmp/project",
+                "activeTurnId": "turn-orphan",
+                "lastTurnId": "turn-orphan",
+                "lastStatus": "running",
+                "turns": {
+                    "turn-orphan": {
+                        "turnId": "turn-orphan",
+                        "status": "running",
+                        "startedAt": "2026-06-30T22:13:13.000Z",
+                        "updatedAt": "2026-06-30T22:13:13.000Z",
+                    },
+                },
+            },
+        )
+
+        session = await client.get_session("thread-orphan")
+        assert session is not None
+        assert client.session_status(session) == "unknown"
+        assert client.session_view(session)["statusWarning"] == "stale_active_turn"
+
+        result = await client.start_turn_by_label(
+            type_query(label="orphan"),
+            {"label": "orphan", "prompt": "start fresh"},
+        )
+
+        assert result["queued"] is False
+        assert result["startedImmediately"] is True
+        assert result["turnId"] == "turn-new"
+        assert not any(message.get("method") == "turn/steer" for message in captured)
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        assert start_request["params"]["threadId"] == "thread-orphan"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_queue_turn_waits_for_active_turn_completion_then_starts_next_turn(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
     turn_index = 0
@@ -1768,6 +1824,8 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
                 "timezone": "UTC",
                 "threadId": "thread-routine",
                 "cwd": "/tmp/routine",
+                "approvalPolicy": "never",
+                "sandboxType": "dangerFullAccess",
                 "mode": "plan",
                 "model": "gpt-test",
                 "reasoningEffort": "low",
@@ -1785,8 +1843,8 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
         params = start_request["params"]
         assert params["threadId"] == "thread-routine"
         assert params["cwd"] == "/tmp/routine"
-        assert "approvalPolicy" not in params
-        assert "sandboxPolicy" not in params
+        assert params["approvalPolicy"] == "never"
+        assert params["sandboxPolicy"] == {"type": "dangerFullAccess"}
         assert params["collaborationMode"]["mode"] == "plan"
         assert params["collaborationMode"]["settings"]["model"] == "gpt-test"
         assert params["collaborationMode"]["settings"]["reasoning_effort"] == "low"
@@ -1800,6 +1858,81 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
         assert stored["routine"]["lastThreadId"] == "thread-routine"
         assert stored["routine"]["lastTurnId"] == "turn-routine"
         assert stored["routine"]["lastStatus"] == "started"
+        assert not any(message.get("method") == "thread/start" for message in captured)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_thread_per_run_routine_starts_new_named_thread(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-fresh"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-fresh"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-existing-target",
+            {
+                "label": "ignored-target",
+                "agentName": "Dottie",
+                "threadId": "thread-existing-target",
+                "cwd": "/tmp/routine",
+                "lastStatus": "completed",
+            },
+        )
+        await client.save_routine(
+            {
+                "name": "daily-check",
+                "prompt": "Inspect project health.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "ignored-thread",
+                "targetName": "ignored-target",
+                "freshThreadPerRun": True,
+                "cwd": "/tmp/routine",
+                "approvalPolicy": "never",
+                "sandboxType": "dangerFullAccess",
+                "mode": "plan",
+                "model": "gpt-test",
+                "reasoningEffort": "low",
+                "developerInstructions": "routine instructions",
+            }
+        )
+
+        result = await client.run_due_routines()
+        assert result["count"] == 1
+        assert result["results"][0]["threadId"] == "thread-fresh"
+        assert result["results"][0]["turnId"] == "turn-fresh"
+
+        thread_start = next(message for message in captured if message.get("method") == "thread/start")
+        thread_params = thread_start["params"]
+        assert thread_params["cwd"] == "/tmp/routine"
+        assert thread_params["approvalPolicy"] == "never"
+        assert thread_params["sandboxPolicy"] == {"type": "dangerFullAccess"}
+        assert "Super Agent thread name: daily-check-" in thread_params["developerInstructions"]
+        assert "Your name is Dottie." in thread_params["developerInstructions"]
+        assert "routine instructions" in thread_params["developerInstructions"]
+
+        turn_start = next(message for message in captured if message.get("method") == "turn/start")
+        turn_params = turn_start["params"]
+        assert turn_params["threadId"] == "thread-fresh"
+        assert turn_params["cwd"] == "/tmp/routine"
+        assert turn_params["approvalPolicy"] == "never"
+        assert turn_params["sandboxPolicy"] == {"type": "dangerFullAccess"}
+        assert turn_params["collaborationMode"]["mode"] == "plan"
+        assert turn_params["collaborationMode"]["settings"]["model"] == "gpt-test"
+        assert turn_params["collaborationMode"]["settings"]["reasoning_effort"] == "low"
+        turn_instructions = turn_params["collaborationMode"]["settings"]["developer_instructions"]
+        assert "Super Agent thread name: daily-check-" in turn_instructions
+        assert turn_params["input"] == [{"type": "text", "text": "Inspect project health."}]
     finally:
         await client.close()
         await server.close()
@@ -1835,6 +1968,50 @@ async def test_routine_reservation_prevents_duplicate_due_runs(tmp_path: Path) -
     finally:
         await first_client.close()
         await second_client.close()
+
+
+@pytest.mark.asyncio
+async def test_interval_routine_runs_after_interval_elapsed(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": f"turn-{len(captured)}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "priority-poller",
+                "prompt": "Poll Notion prioritized tasks.",
+                "scheduleType": "interval",
+                "intervalSeconds": 60,
+                "threadId": "thread-routine",
+            }
+        )
+
+        first = await client.run_due_routines()
+        assert first["count"] == 1
+        stored = await client.read_routine("priority-poller")
+        assert stored["routine"]["lastRunAt"]
+        assert stored["routine"]["nextRunAt"]
+
+        second = await client.run_due_routines()
+        assert second["count"] == 0
+
+        await client.save_routine(
+            {
+                "name": "priority-poller",
+                "lastRunAt": "2000-01-01T00:00:00.000Z",
+            }
+        )
+        third = await client.run_due_routines()
+        assert third["count"] == 1
+    finally:
+        await client.close()
+        await server.close()
 
 
 @pytest.mark.asyncio

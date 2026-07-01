@@ -228,6 +228,10 @@ The MCP server exposes these tools:
 - `super_agents_sessions`: list named Codex app-server threads.
 - `super_agents_thread_favorite`: check whether one local Openbase Coder thread
   is favorited.
+- `super_agents_tags`: list local Openbase Coder tag options shared by threads
+  and reports.
+- `super_agents_thread_tags`: read or replace local tags for one thread.
+- `super_agents_report_tags`: read or replace local tags for one report file.
 - `super_agents_active`: list active tracked agents with compact previews.
 - `super_agents_status`: return a compact status list for voice/status checks.
 - `super_agents_resolve`: resolve a name to the latest matching active thread.
@@ -246,6 +250,23 @@ Openbase Coder's local per-machine favorite metadata.
 Default responses are intentionally compact. Full turns, tracked event
 transcripts, diffs, and large previews are opt-in through each tool's detail
 flags.
+
+## Openbase Coder Report Tags
+
+Openbase Coder stores thread and report tags in the same local tag registry.
+When an agent writes a report under a project's `.reports` directory, it can
+tag that report by calling `super_agents_report_tags` with:
+
+- `projectPath`: the project directory that contains `.reports`.
+- `path`: the report path relative to `.reports`, such as `summary.md` or
+  `audits/security.md`.
+- `tags`: the complete list of tag labels that should be assigned.
+
+For example, after creating `/workspace/app/.reports/audit.md`, call
+`super_agents_report_tags` with `projectPath=/workspace/app`,
+`path=audit.md`, and `tags=["Needs Review", "Security"]`. Omitting `tags`
+reads the current assignment. New tag labels are added to the shared options
+and can then be reused by thread and report tag pickers in Openbase Coder.
 
 ## Python API
 

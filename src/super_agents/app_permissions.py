@@ -21,10 +21,12 @@ def is_permission_request(method: str) -> bool:
 def shared_permission_requests(path: str | Path | None = None) -> list[JsonObject]:
     store = read_permission_store(path)
     raw_requests = as_object(store.get("requests"))
+    raw_decisions = as_object(store.get("decisions"))
     return [
         item
-        for item in raw_requests.values()
+        for request_id, item in raw_requests.items()
         if isinstance(item, dict) and is_permission_request(str(item.get("method") or ""))
+        and request_id not in raw_decisions
     ]
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -10,6 +11,8 @@ from .state import JsonObject, RoutineRecord, routine_record_from_json
 
 DEFAULT_ROUTINE_TIMEZONE = "America/New_York"
 DEFAULT_ROUTINE_POLL_SECONDS = 30
+DEFAULT_ROUTINE_INTERVAL_SECONDS = 60
+MIN_ROUTINE_INTERVAL_SECONDS = 5
 
 
 def routine_from_patch(value: JsonObject) -> RoutineRecord:
@@ -28,6 +31,8 @@ def routine_turn_input(routine: RoutineRecord) -> JsonObject:
         {
             "prompt": routine.prompt,
             "cwd": routine.cwd,
+            "approvalPolicy": routine.approval_policy,
+            "sandboxType": routine.sandbox_type,
             "mode": routine.mode or "default",
             "model": routine.model,
             "reasoningEffort": routine.reasoning_effort,
@@ -39,6 +44,12 @@ def routine_turn_input(routine: RoutineRecord) -> JsonObject:
     )
 
 
+def routine_fresh_thread_name(routine: RoutineRecord) -> str:
+    timestamp = routine.last_started_at or routine.last_run_at or iso_now()
+    normalized = re.sub(r"[^0-9A-Za-z]+", "-", timestamp).strip("-")
+    return f"{routine.name}-{normalized}" if normalized else routine.name
+
+
 def routine_with_next_run(routine: RoutineRecord) -> JsonObject:
     return {**routine.to_json(), "nextRunAt": safe_routine_next_run_at(routine)}
 
@@ -47,6 +58,8 @@ def routine_next_run_summary(routine: RoutineRecord) -> JsonObject:
     return {
         "name": routine.name,
         "time": routine.time,
+        "scheduleType": routine.schedule_type,
+        "intervalSeconds": routine.interval_seconds,
         "timezone": routine.timezone or DEFAULT_ROUTINE_TIMEZONE,
         "nextRunAt": safe_routine_next_run_at(routine),
         "lastStatus": routine.last_status,
@@ -61,6 +74,18 @@ def routine_next_run_sort_key(routine: RoutineRecord) -> int:
 def routine_is_due(routine: RoutineRecord) -> bool:
     if not routine.enabled:
         return False
+    if routine.schedule_type == "interval":
+        try:
+            interval_seconds = parse_routine_interval_seconds(routine.interval_seconds)
+        except ValueError:
+            return False
+        if not routine.last_run_at:
+            return True
+        last_run_ms = parse_iso_ms(routine.last_run_at)
+        if last_run_ms <= 0:
+            return True
+        now_ms = parse_iso_ms(iso_now())
+        return now_ms - last_run_ms >= interval_seconds * 1000
     try:
         now = routine_now(routine)
         hour, minute = parse_routine_time(routine.time)
@@ -77,6 +102,8 @@ def routine_local_date(routine: RoutineRecord) -> str:
 
 
 def routine_next_run_at(routine: RoutineRecord) -> str:
+    if routine.schedule_type == "interval":
+        return routine_interval_next_run_at(routine)
     now = routine_now(routine)
     hour, minute = parse_routine_time(routine.time)
     next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -110,6 +137,28 @@ def parse_routine_time(value: str) -> tuple[int, int]:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError("routine time must use HH:MM in 24-hour time.")
     return hour, minute
+
+
+def parse_routine_interval_seconds(value: int | None) -> int:
+    interval = value or DEFAULT_ROUTINE_INTERVAL_SECONDS
+    if interval < MIN_ROUTINE_INTERVAL_SECONDS:
+        raise ValueError("routine interval must be at least 5 seconds.")
+    return interval
+
+
+def routine_interval_next_run_at(routine: RoutineRecord) -> str:
+    interval_seconds = parse_routine_interval_seconds(routine.interval_seconds)
+    now_ms = parse_iso_ms(iso_now())
+    last_run_ms = parse_iso_ms(routine.last_run_at)
+    if last_run_ms <= 0:
+        next_run_ms = now_ms
+    else:
+        next_run_ms = max(now_ms, last_run_ms + interval_seconds * 1000)
+    return (
+        datetime.fromtimestamp(next_run_ms / 1000, timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def routine_poll_seconds() -> int:
