@@ -13,6 +13,8 @@ DEFAULT_ROUTINE_TIMEZONE = "America/New_York"
 DEFAULT_ROUTINE_POLL_SECONDS = 30
 DEFAULT_ROUTINE_INTERVAL_SECONDS = 60
 MIN_ROUTINE_INTERVAL_SECONDS = 5
+ACTIVE_ROUTINE_STATUSES = {"starting", "started", "queued"}
+DEFAULT_ROUTINE_COMMAND_TIMEOUT_SECONDS = 300
 
 
 def routine_from_patch(value: JsonObject) -> RoutineRecord:
@@ -57,6 +59,7 @@ def routine_with_next_run(routine: RoutineRecord) -> JsonObject:
 def routine_next_run_summary(routine: RoutineRecord) -> JsonObject:
     return {
         "name": routine.name,
+        "kind": routine.kind,
         "time": routine.time,
         "scheduleType": routine.schedule_type,
         "intervalSeconds": routine.interval_seconds,
@@ -95,6 +98,10 @@ def routine_is_due(routine: RoutineRecord) -> bool:
     if routine.last_run_date == run_key:
         return False
     return (now.hour, now.minute) >= (hour, minute)
+
+
+def routine_has_active_run(routine: RoutineRecord) -> bool:
+    return routine.last_status in ACTIVE_ROUTINE_STATUSES
 
 
 def routine_local_date(routine: RoutineRecord) -> str:
@@ -168,3 +175,10 @@ def routine_poll_seconds() -> int:
     except ValueError:
         return DEFAULT_ROUTINE_POLL_SECONDS
     return max(5, value)
+
+
+def parse_routine_command_timeout_seconds(value: int | None) -> int:
+    timeout = value or DEFAULT_ROUTINE_COMMAND_TIMEOUT_SECONDS
+    if timeout < 1:
+        raise ValueError("routine command timeout must be at least 1 second.")
+    return timeout

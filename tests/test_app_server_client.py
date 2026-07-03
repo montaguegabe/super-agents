@@ -44,6 +44,7 @@ def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
 
 
 def test_default_model_ignores_model_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(tmp_path / "missing.json"))
     monkeypatch.delenv("SUPER_AGENTS_MODEL", raising=False)
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
     monkeypatch.setenv("CODEX_CLAUDE_MODEL", "claude-custom")
@@ -217,6 +218,21 @@ def test_turn_input_uses_backend_specific_super_agents_model(
     assert default_super_agents_model() == "sonnet"
 
 
+def test_turn_input_uses_claude_fable_model(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        json.dumps({"backend_models": {"claude_code": {"super_agents": "fable"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["model"] == "fable"
+    assert default_super_agents_model() == "fable"
+
+
 def test_turn_input_ignores_claude_model_default_for_codex(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({"super_agents_model": "opus"}), encoding="utf-8")
@@ -352,6 +368,102 @@ async def test_steer_turn_sends_expected_turn_id(tmp_path: Path) -> None:
             "input": [{"type": "text", "text": "narrow the scope"}],
         }
         assert "turnId" not in steer_request["params"]
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_python_client_uses_super_agents_model_and_reasoning_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "super_agents_reasoning_effort": "low",
+                "backend_models": {"codex": {"super_agents": "gpt-default"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-defaults", "cwd": message["params"]["cwd"]}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-defaults"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    state_file = tmp_path / "state.json"
+    client = ReadyClient(server.ws_url, state_file)
+    try:
+        await client.start_thread({"label": "defaults", "cwd": "/tmp/defaults"})
+        result = await client.start_turn(
+            {"threadId": "thread-defaults", "label": "defaults", "prompt": "work"}
+        )
+
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        settings = start_request["params"]["collaborationMode"]["settings"]
+        assert settings["model"] == "gpt-default"
+        assert settings["reasoning_effort"] == "low"
+        assert result["reasoningEffort"] == "low"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_python_client_explicit_model_and_reasoning_override_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "super_agents_reasoning_effort": "low",
+                "backend_models": {"codex": {"super_agents": "gpt-default"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-override", "cwd": message["params"]["cwd"]}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-override"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    state_file = tmp_path / "state.json"
+    client = ReadyClient(server.ws_url, state_file)
+    try:
+        await client.start_thread({"label": "override", "cwd": "/tmp/override"})
+        result = await client.start_turn(
+            {
+                "threadId": "thread-override",
+                "label": "override",
+                "prompt": "work",
+                "model": "gpt-explicit",
+                "reasoningEffort": "xhigh",
+            }
+        )
+
+        start_request = next(message for message in captured if message.get("method") == "turn/start")
+        settings = start_request["params"]["collaborationMode"]["settings"]
+        assert settings["model"] == "gpt-explicit"
+        assert settings["reasoning_effort"] == "xhigh"
+        assert result["reasoningEffort"] == "xhigh"
     finally:
         await client.close()
         await server.close()
@@ -1833,6 +1945,7 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
         )
         assert saved["nativeSupport"] is False
         assert saved["routine"]["name"] == "daily-check"
+        assert saved["routine"]["kind"] == "agent"
 
         result = await client.run_due_routines()
         assert result["count"] == 1
@@ -1859,6 +1972,126 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
         assert stored["routine"]["lastTurnId"] == "turn-routine"
         assert stored["routine"]["lastStatus"] == "started"
         assert not any(message.get("method") == "thread/start" for message in captured)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_command_routine_runs_local_command_without_app_server(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        captured.append(message)
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "discover-prs",
+                "kind": "command",
+                "command": "printf '{\"eligible\":[]}'",
+                "time": "00:00",
+                "timezone": "UTC",
+                "cwd": str(tmp_path),
+            }
+        )
+
+        result = await client.run_due_routines(name="discover-prs", force=True)
+        assert result["count"] == 1
+        assert result["results"][0]["kind"] == "command"
+        assert result["results"][0]["exitCode"] == 0
+        assert result["results"][0]["stdout"] == '{"eligible":[]}'
+        assert not any(message.get("method") in {"thread/start", "turn/start"} for message in captured)
+
+        stored = await client.read_routine("discover-prs")
+        assert stored["routine"]["lastStatus"] == "completed"
+        assert "lastThreadId" not in stored["routine"]
+        assert "lastTurnId" not in stored["routine"]
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_command_routine_records_nonzero_exit_as_failed(tmp_path: Path) -> None:
+    client = ReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "failing-command",
+                "kind": "command",
+                "command": "exit 7",
+                "time": "00:00",
+                "timezone": "UTC",
+            }
+        )
+
+        result = await client.run_due_routines(name="failing-command", force=True)
+        assert result["results"][0]["exitCode"] == 7
+        stored = await client.read_routine("failing-command")
+        assert stored["routine"]["lastStatus"] == "failed"
+        assert stored["routine"]["lastError"] == "Command routine exited with code 7."
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_routine_marks_immediately_interrupted_turn_failed(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-interrupted"}
+        return {"ok": True}
+
+    async def after_message(message: dict[str, Any], websocket: Any) -> None:
+        if message.get("method") == "turn/start":
+            await websocket.send(
+                json.dumps(
+                    {
+                        "method": "turn/interrupted",
+                        "params": {
+                            "threadId": "thread-routine",
+                            "turnId": "turn-interrupted",
+                            "status": "interrupted",
+                        },
+                    }
+                )
+            )
+
+    server = await start_fake_app_server(captured, handler, after_message)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "daily-check",
+                "prompt": "Inspect project health.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+            }
+        )
+
+        result = await client.run_due_routines()
+        assert result["count"] == 1
+        assert result["results"][0]["turnId"] == "turn-interrupted"
+
+        stored = await client.read_routine("daily-check")
+        assert stored["routine"]["lastThreadId"] == "thread-routine"
+        assert stored["routine"]["lastTurnId"] == "turn-interrupted"
+        assert stored["routine"]["lastStatus"] == "failed"
+        assert stored["routine"]["lastError"] == "Routine turn became cancelled immediately after launch."
+
+        await asyncio.sleep(0.01)
+        session = await client.get_session("thread-routine")
+        assert session is not None
+        assert session.last_status == "cancelled"
+        assert session.active_turn_id is None
+        assert session.turns is not None
+        assert session.turns["turn-interrupted"].status == "cancelled"
     finally:
         await client.close()
         await server.close()
@@ -1971,6 +2204,46 @@ async def test_routine_reservation_prevents_duplicate_due_runs(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_read_routine_reconciles_terminal_turn_status(tmp_path: Path) -> None:
+    client = ReadyClient("ws://127.0.0.1:1", tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "daily-check",
+                "prompt": "Inspect project health.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+                "lastThreadId": "thread-routine",
+                "lastTurnId": "turn-routine",
+                "lastStatus": "starting",
+            }
+        )
+        await client.remember_session(
+            "thread-routine",
+            {
+                "threadId": "thread-routine",
+                "lastTurnId": "turn-routine",
+                "lastStatus": "cancelled",
+                "turns": {
+                    "turn-routine": {
+                        "turnId": "turn-routine",
+                        "status": "cancelled",
+                        "startedAt": "2026-07-02T13:16:49.142Z",
+                        "updatedAt": "2026-07-02T13:17:00.000Z",
+                    }
+                },
+            },
+        )
+
+        stored = await client.read_routine("daily-check")
+        assert stored["routine"]["lastStatus"] == "failed"
+        assert stored["routine"]["lastError"] == "Routine turn became cancelled."
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_interval_routine_runs_after_interval_elapsed(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
@@ -2005,10 +2278,47 @@ async def test_interval_routine_runs_after_interval_elapsed(tmp_path: Path) -> N
             {
                 "name": "priority-poller",
                 "lastRunAt": "2000-01-01T00:00:00.000Z",
+                "lastStatus": "completed",
             }
         )
         third = await client.run_due_routines()
         assert third["count"] == 1
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_interval_routine_does_not_overlap_active_run(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": f"turn-{len(captured)}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "open-pr-review-routine",
+                "prompt": "Review open PRs.",
+                "scheduleType": "interval",
+                "intervalSeconds": 60,
+                "threadId": "thread-routine",
+                "lastRunAt": "2000-01-01T00:00:00.000Z",
+                "lastStatus": "started",
+            }
+        )
+
+        skipped = await client.run_due_routines()
+        assert skipped["count"] == 0
+        assert not any(message.get("method") == "turn/start" for message in captured)
+
+        await client.save_routine({"name": "open-pr-review-routine", "lastStatus": "completed"})
+        started = await client.run_due_routines()
+        assert started["count"] == 1
     finally:
         await client.close()
         await server.close()

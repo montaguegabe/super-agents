@@ -16,7 +16,12 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from .app_server_client import LabelQueryInput
-from .backend_clients import SuperAgentsClient, backend_from_environment, client_from_environment
+from .backend_clients import SuperAgentsClient, client_from_environment
+from .defaults import (
+    default_service_tier,
+    default_super_agents_model,
+    default_super_agents_reasoning_effort,
+)
 
 JsonObject = dict[str, Any]
 Handler = Callable[[JsonObject], Awaitable[Any]]
@@ -29,13 +34,7 @@ INSTRUCTIONS = (
     "app-server callbacks; use codex_answer_request when a callback is pending."
 )
 
-OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "dispatcher-config.json"
-LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH = Path.home() / ".openbase" / "codex_home" / "dispatcher-config.json"
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
-REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
-CODEX_SERVICE_TIERS = {"fast", "standard"}
-DEFAULT_CODEX_SERVICE_TIER = "standard"
-CLAUDE_MODEL_ALIASES = {"opus", "sonnet", "haiku"}
 
 
 @dataclass(slots=True)
@@ -579,7 +578,8 @@ def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> J
             "mode": optional_mode(input_data, "mode") or "default",
             "model": optional_string(input_data, "model")
             or default_super_agents_model(backend=backend),
-            "reasoningEffort": optional_string(input_data, "reasoningEffort") or default_reasoning_effort(),
+            "reasoningEffort": optional_string(input_data, "reasoningEffort")
+            or default_super_agents_reasoning_effort(),
             "serviceTier": optional_string(input_data, "serviceTier") or default_service_tier(),
             "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
             "name": optional_string(input_data, "name"),
@@ -625,83 +625,6 @@ def default_super_agent_instructions_path() -> Path:
     if codex_home := os.environ.get("CODEX_HOME"):
         return Path(codex_home).expanduser() / SUPER_AGENT_INSTRUCTIONS_FILENAME
     return Path.home() / ".openbase" / "instructions" / SUPER_AGENT_INSTRUCTIONS_FILENAME
-
-
-def default_reasoning_effort() -> str:
-    payload = default_dispatcher_config()
-    value = payload.get("super_agents_reasoning_effort") or payload.get("superAgentsReasoningEffort")
-    return value if isinstance(value, str) and value in REASONING_EFFORTS else "high"
-
-
-def default_service_tier() -> str:
-    payload = default_dispatcher_config()
-    value = payload.get("codex_service_tier") or payload.get("codexServiceTier")
-    if isinstance(value, str) and value in CODEX_SERVICE_TIERS:
-        return value
-    env_value = os.environ.get("CODEX_SERVICE_TIER", "").strip()
-    if env_value in CODEX_SERVICE_TIERS:
-        return env_value
-    return DEFAULT_CODEX_SERVICE_TIER
-
-
-def default_super_agents_model(*, backend: str | None = None) -> str | None:
-    payload = default_dispatcher_config()
-    selected_backend = _execution_backend(backend or backend_from_environment())
-    return _model_for_backend(
-        _backend_model(
-            payload,
-            "super_agents",
-            backend=selected_backend,
-        ),
-        backend=selected_backend,
-    )
-
-
-def _backend_model(payload: JsonObject, role: str, *, backend: str) -> str | None:
-    backend_models = payload.get("backend_models") or payload.get("backendModels")
-    if not isinstance(backend_models, dict):
-        return None
-    model_config = backend_models.get(backend)
-    if not isinstance(model_config, dict):
-        return None
-    value = model_config.get(role)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _model_for_backend(model: str | None, *, backend: str | None = None) -> str | None:
-    if not model:
-        return None
-    selected_backend = backend or backend_from_environment()
-    normalized_model = model.strip().lower()
-    if selected_backend in {"codex", "openbase_cloud"} and (
-        normalized_model in CLAUDE_MODEL_ALIASES or normalized_model.startswith("claude-")
-    ):
-        logger.warning(
-            "Ignoring Claude Super Agents model %s for Codex backend; using Codex default model",
-            model,
-        )
-        return None
-    return model
-
-
-def _execution_backend(backend: str) -> str:
-    return "codex" if backend == "openbase_cloud" else backend
-
-
-def default_dispatcher_config() -> JsonObject:
-    configured = os.environ.get("SUPER_AGENTS_DEFAULT_CONFIG_PATH") or os.environ.get("LIVEKIT_DISPATCHER_CONFIG_PATH")
-    paths = [Path(configured).expanduser()] if configured else []
-    paths.extend([OPENBASE_DISPATCHER_CONFIG_PATH, LEGACY_OPENBASE_DISPATCHER_CONFIG_PATH])
-    for config_path in paths:
-        try:
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
-            return payload
-    return {}
 
 
 def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:

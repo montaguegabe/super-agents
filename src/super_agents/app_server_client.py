@@ -107,6 +107,7 @@ from .app_time import (
 from .app_client_routines import RoutineClientMixin
 from .app_client_sessions import SessionClientMixin
 from .app_client_transport import TransportClientMixin
+from .defaults import default_super_agents_model
 from .state import (
     JsonObject,
     TrackedStatus,
@@ -238,7 +239,7 @@ def _is_missing_rollout_error(exc: RuntimeError) -> bool:
 
 
 def default_model_from_environment() -> str:
-    return DEFAULT_MODEL
+    return default_super_agents_model() or DEFAULT_MODEL
 
 
 class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClientMixin):
@@ -590,8 +591,12 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             self._turns[key] = turn
         elif turn.reasoning_effort is None:
             turn.reasoning_effort = reasoning_effort
-        status: TrackedStatus = "waiting" if turn.pending_requests or turn.status == "waiting" else "running"
+        if turn.status in {"completed", "failed", "cancelled"}:
+            status: TrackedStatus = turn.status
+        else:
+            status = "waiting" if turn.pending_requests or turn.status == "waiting" else "running"
         turn.status = status
+        clear_fields = [] if is_active_status(status) else ["activeTurnId"]
         await self.merge_session(
             thread_id,
             {
@@ -602,8 +607,9 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 "group": input_data.get("group"),
                 "model": model,
                 "lastTurnId": turn_id,
-                "activeTurnId": turn_id,
+                "activeTurnId": turn_id if is_active_status(status) else None,
                 "lastStartedAt": now,
+                "lastFinishedAt": turn.finished_at,
                 "lastStatus": status,
                 "lastUsefulMessage": text_preview(result),
                 "turns": {
@@ -614,6 +620,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                         "reasoningEffort": reasoning_effort,
                         "startedAt": turn.started_at,
                         "updatedAt": now,
+                        "finishedAt": turn.finished_at,
                         "promptPreview": preview_text(str(input_data["prompt"])),
                         "lastUsefulMessage": text_preview(result),
                         "pendingRequestIds": [request.id for request in turn.pending_requests],
@@ -621,6 +628,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                     }
                 },
             },
+            clear_fields=clear_fields,
         )
         return {**result, "threadId": thread_id, "turnId": turn_id, "mode": mode, "reasoningEffort": reasoning_effort}
 

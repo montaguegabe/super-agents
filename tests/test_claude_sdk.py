@@ -95,7 +95,11 @@ def assert_claude_prompt(prompt: str, user_prompt: str, cwd: Path, developer_ins
 
 
 @pytest.fixture(autouse=True)
-def reset_fake_claude_sdk() -> None:
+def reset_fake_claude_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv(
+        "SUPER_AGENTS_DEFAULT_CONFIG_PATH",
+        str(tmp_path / "missing-dispatcher-config.json"),
+    )
     FakeClaudeSDKClient.prompts = []
     FakeClaudeSDKClient.options_seen = []
     FakeClaudeSDKClient.env_seen = []
@@ -126,6 +130,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "effort": "high",
     }
     assert FakeClaudeSDKClient.env_seen
     assert all(seen is False for _stage, seen in FakeClaudeSDKClient.env_seen)
@@ -139,6 +144,40 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
 
     readback = await client.read_by_label(LabelQueryInput(label="sdk"), include_turns=True)
     assert readback["turns"][0]["lastUsefulMessage"].endswith("\n\nhello")
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "super_agents_reasoning_effort": "low",
+                "backend_models": {"claude_code": {"super_agents": "sonnet"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert store.get_session(started["threadId"]).model == "sonnet"
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        "cwd": str(tmp_path),
+        "model": "sonnet",
+        "permission_mode": "bypassPermissions",
+        "effort": "low",
+    }
+    assert store.get_turn(result["turnId"]).reasoning_effort == "low"
 
 
 @pytest.mark.asyncio
@@ -446,6 +485,7 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
         "cwd": str(tmp_path),
         "permission_mode": "bypassPermissions",
+        "effort": "high",
         "env": {"CLAUDE_CONFIG_DIR": str(config_dir)},
         "settings": str(settings_path),
         "setting_sources": ["project"],

@@ -382,7 +382,9 @@ class SessionClientMixin:
                     return "unknown"
                 return runtime_turn.status
             if session.last_status and is_active_status(session.last_status):
-                return "unknown"
+                if self.persisted_active_turn_is_stale(session, active_turn_id):
+                    return "unknown"
+                return session.last_status
             return session.last_status or "unknown"
         if session.last_status and is_active_status(session.last_status):
             if not last_turn_id:
@@ -403,9 +405,16 @@ class SessionClientMixin:
             return None
         if self._turns.get(turn_key(session.thread_id, active_turn_id)) is not None:
             return None
-        if session.last_status and is_active_status(session.last_status):
+        if session.last_status and is_active_status(session.last_status) and self.persisted_active_turn_is_stale(
+            session, active_turn_id
+        ):
             return STALE_ACTIVE_TURN_WARNING
         return None
+
+    def persisted_active_turn_is_stale(self, session: SessionRecord, turn_id: str) -> bool:
+        turn_summary = (session.turns or {}).get(turn_id)
+        last_update_at = turn_summary.updated_at if turn_summary else session.last_event_at or session.updated_at
+        return is_likely_stale(session.last_status, last_update_at)
 
     def session_from_memory(self, thread_id: str | None) -> SessionRecord | None:
         if not thread_id:

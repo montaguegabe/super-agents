@@ -4,6 +4,7 @@ from typing import Any
 
 from .app_formatting import as_object
 from .app_time import age_ms, turn_recency
+from .defaults import default_super_agents_reasoning_effort
 from .state import JsonObject, StoredStatus, TrackedStatus, get_string
 
 SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent thread name:"
@@ -77,7 +78,7 @@ def _is_super_agent_identity_line(line: str) -> bool:
 
 
 def effective_reasoning_effort(input_data: JsonObject) -> str:
-    return get_string(input_data, "reasoningEffort") or "high"
+    return get_string(input_data, "reasoningEffort") or default_super_agents_reasoning_effort()
 
 
 def extract_model(value: JsonObject) -> str | None:

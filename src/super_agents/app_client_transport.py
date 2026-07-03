@@ -294,11 +294,14 @@ class TransportClientMixin:
         elif method == "turn/failed":
             turn.status = "failed"
             turn.finished_at = iso_now()
-        elif turn.status not in {"waiting", "completed", "failed"}:
+        elif method in {"turn/cancelled", "turn/canceled", "turn/interrupted"}:
+            turn.status = "cancelled"
+            turn.finished_at = iso_now()
+        elif turn.status not in {"waiting", "completed", "failed", "cancelled"}:
             turn.status = "running"
 
         last_useful_message = text_preview(params) or method
-        clear_fields = ["activeTurnId"] if turn.status in {"completed", "failed"} else []
+        clear_fields = ["activeTurnId"] if turn.status in {"completed", "failed", "cancelled"} else []
         merge_task = asyncio.create_task(
             self.merge_session(
                 thread_id,
@@ -327,7 +330,7 @@ class TransportClientMixin:
                 clear_fields=clear_fields,
             )
         )
-        if turn.status in {"completed", "failed"}:
+        if turn.status in {"completed", "failed", "cancelled"}:
             merge_task.add_done_callback(
                 lambda _task, completed_thread_id=thread_id: self.schedule_queue_drain(completed_thread_id)
             )

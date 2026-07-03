@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 
 from .app_formatting import without_none
 from .app_models import LabelQueryInput
@@ -9,15 +11,19 @@ from .app_routines import (
     DEFAULT_ROUTINE_TIMEZONE,
     routine_from_patch,
     routine_fresh_thread_name,
+    routine_has_active_run,
     routine_is_due,
     routine_local_date,
     routine_next_run_sort_key,
     routine_next_run_summary,
+    parse_routine_command_timeout_seconds,
     routine_turn_input,
     routine_with_next_run,
 )
 from .app_time import iso_now
-from .state import JsonObject, RoutineRecord, StateFile, get_string, update_state_file
+from .app_protocol import is_active_status
+from .app_time import turn_key
+from .state import JsonObject, RoutineRecord, StateFile, get_string, read_state_file, update_state_file, write_state_file
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,7 @@ class RoutineClientMixin:
         }
 
     async def list_routines(self) -> JsonObject:
+        await self.reconcile_routine_terminal_statuses()
         state = await self.read_state()
         routines = sorted(state.routines.values(), key=lambda routine: routine.updated_at, reverse=True)
         return {
@@ -60,6 +67,7 @@ class RoutineClientMixin:
         }
 
     async def read_routine(self, name: str) -> JsonObject:
+        await self.reconcile_routine_terminal_statuses()
         state = await self.read_state()
         routine = state.routines.get(name)
         if routine is None:
@@ -83,6 +91,7 @@ class RoutineClientMixin:
         return {"deleted": True, "routine": removed}
 
     async def routine_status_summary(self) -> JsonObject:
+        await self.reconcile_routine_terminal_statuses()
         state = await self.read_state()
         enabled = [routine for routine in state.routines.values() if routine.enabled]
         return {
@@ -114,7 +123,8 @@ class RoutineClientMixin:
                 candidates = [
                     routine
                     for routine in state.routines.values()
-                    if (not name or routine.name == name) and (force or routine_is_due(routine))
+                    if (not name or routine.name == name)
+                    and (force or (routine_is_due(routine) and not routine_has_active_run(routine)))
                 ]
                 if name and not candidates and name not in state.routines:
                     raise ValueError(f"No Super Agents routine found for name {name}.")
@@ -145,53 +155,13 @@ class RoutineClientMixin:
         run_date = routine_local_date(routine)
         run_at = routine.last_run_at or iso_now()
         try:
-            if routine.fresh_thread_per_run:
-                thread_name = routine_fresh_thread_name(routine)
-                agent_name = await self.routine_fresh_thread_agent_name(routine)
-                thread_result = await self.start_thread(
-                    without_none(
-                        {
-                            "name": thread_name,
-                            "agentName": agent_name,
-                            "cwd": routine.cwd,
-                            "approvalPolicy": routine.approval_policy,
-                            "sandboxType": routine.sandbox_type,
-                            "developerInstructions": routine.developer_instructions,
-                        }
-                    )
-                )
-                thread_id = extract_thread_id(thread_result)
-                if not thread_id:
-                    raise RuntimeError(f"Could not start thread for routine {routine.name}.")
-                result = await self.start_turn(
-                    {**routine_turn_input(routine), "threadId": thread_id, "name": thread_name, "label": thread_name}
-                )
-            elif routine.thread_id:
-                target = await self.resolve_queue_target(LabelQueryInput(thread_id=routine.thread_id, cwd=routine.cwd))
-                result = await self.start_or_queue_turn(target, routine_turn_input(routine))
-            elif routine.target_name:
-                target = await self.resolve_queue_target(
-                    LabelQueryInput(label=routine.target_name, cwd=routine.cwd, prefer="latest_any")
-                )
-                result = await self.start_or_queue_turn(target, routine_turn_input(routine))
-            else:
-                thread_result = await self.start_thread(
-                    without_none(
-                        {
-                            "name": routine.name,
-                            "cwd": routine.cwd,
-                            "approvalPolicy": routine.approval_policy,
-                            "sandboxType": routine.sandbox_type,
-                            "developerInstructions": routine.developer_instructions,
-                        }
-                    )
-                )
-                thread_id = extract_thread_id(thread_result)
-                if not thread_id:
-                    raise RuntimeError(f"Could not start thread for routine {routine.name}.")
-                result = await self.start_turn(
-                    {**routine_turn_input(routine), "threadId": thread_id, "label": routine.name}
-                )
+            result = (
+                await self.run_command_routine(routine)
+                if routine.kind == "command"
+                else await self.run_agent_routine(routine)
+            )
+            await asyncio.sleep(0)
+            launch_status, launch_error = self.routine_launch_status(routine, result)
             await self.record_routine_run(
                 routine.name,
                 {
@@ -200,8 +170,8 @@ class RoutineClientMixin:
                     "lastStartedAt": iso_now(),
                     "lastThreadId": get_string(result, "threadId"),
                     "lastTurnId": get_string(result, "turnId"),
-                    "lastStatus": "queued" if result.get("queued") else "started",
-                    "lastError": None,
+                    "lastStatus": launch_status,
+                    "lastError": launch_error,
                 },
             )
             return {"name": routine.name, "ran": True, **result}
@@ -219,6 +189,79 @@ class RoutineClientMixin:
             logger.exception("Failed to run Super Agents routine name=%s", routine.name)
             return {"name": routine.name, "ran": False, "error": str(exc)}
 
+    async def run_agent_routine(self, routine: RoutineRecord) -> JsonObject:
+        if routine.fresh_thread_per_run:
+            thread_name = routine_fresh_thread_name(routine)
+            agent_name = await self.routine_fresh_thread_agent_name(routine)
+            thread_result = await self.start_thread(
+                without_none(
+                    {
+                        "name": thread_name,
+                        "agentName": agent_name,
+                        "cwd": routine.cwd,
+                        "approvalPolicy": routine.approval_policy,
+                        "sandboxType": routine.sandbox_type,
+                        "developerInstructions": routine.developer_instructions,
+                    }
+                )
+            )
+            thread_id = extract_thread_id(thread_result)
+            if not thread_id:
+                raise RuntimeError(f"Could not start thread for routine {routine.name}.")
+            return await self.start_turn(
+                {**routine_turn_input(routine), "threadId": thread_id, "name": thread_name, "label": thread_name}
+            )
+        if routine.thread_id:
+            target = await self.resolve_queue_target(LabelQueryInput(thread_id=routine.thread_id, cwd=routine.cwd))
+            return await self.start_or_queue_turn(target, routine_turn_input(routine))
+        if routine.target_name:
+            target = await self.resolve_queue_target(
+                LabelQueryInput(label=routine.target_name, cwd=routine.cwd, prefer="latest_any")
+            )
+            return await self.start_or_queue_turn(target, routine_turn_input(routine))
+        thread_result = await self.start_thread(
+            without_none(
+                {
+                    "name": routine.name,
+                    "cwd": routine.cwd,
+                    "approvalPolicy": routine.approval_policy,
+                    "sandboxType": routine.sandbox_type,
+                    "developerInstructions": routine.developer_instructions,
+                }
+            )
+        )
+        thread_id = extract_thread_id(thread_result)
+        if not thread_id:
+            raise RuntimeError(f"Could not start thread for routine {routine.name}.")
+        return await self.start_turn({**routine_turn_input(routine), "threadId": thread_id, "label": routine.name})
+
+    async def run_command_routine(self, routine: RoutineRecord) -> JsonObject:
+        if not routine.command:
+            raise RuntimeError(f"Command routine {routine.name} is missing a command.")
+        timeout = parse_routine_command_timeout_seconds(routine.command_timeout_seconds)
+        process = await asyncio.create_subprocess_shell(
+            routine.command,
+            cwd=routine.cwd or None,
+            env=os.environ.copy(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise RuntimeError(f"Command routine {routine.name} timed out after {timeout} seconds.") from exc
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        return {
+            "kind": "command",
+            "command": routine.command,
+            "exitCode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
     async def routine_fresh_thread_agent_name(self, routine: RoutineRecord) -> str | None:
         if not routine.target_name:
             return None
@@ -229,6 +272,53 @@ class RoutineClientMixin:
         except ValueError:
             return None
         return target.session.agent_name
+
+    def routine_launch_status(self, routine: RoutineRecord, result: JsonObject) -> tuple[str, str | None]:
+        if routine.kind == "command":
+            exit_code = result.get("exitCode")
+            if exit_code == 0:
+                return "completed", None
+            return "failed", f"Command routine exited with code {exit_code}."
+        if result.get("queued"):
+            return "queued", None
+        thread_id = get_string(result, "threadId")
+        turn_id = get_string(result, "turnId")
+        if not thread_id or not turn_id:
+            return "failed", "Routine turn launch did not return a threadId and turnId."
+        turn = self._turns.get(turn_key(thread_id, turn_id))
+        if turn and not is_active_status(turn.status):
+            return "failed", f"Routine turn became {turn.status} immediately after launch."
+        return "started", None
+
+    async def reconcile_routine_terminal_statuses(self) -> None:
+        async with self._state_lock:
+            state = read_state_file(self.state_file)
+            now = iso_now()
+            changed = False
+            for routine in state.routines.values():
+                if routine.last_status not in {"starting", "started", "queued"}:
+                    continue
+                if not routine.last_thread_id or not routine.last_turn_id:
+                    continue
+                session = state.sessions.get(routine.last_thread_id)
+                if session is None:
+                    continue
+                turn = (session.turns or {}).get(routine.last_turn_id)
+                status = turn.status if turn else None
+                if status is None and session.last_turn_id == routine.last_turn_id:
+                    status = session.last_status
+                if status in {"completed", "failed", "cancelled"}:
+                    patch: JsonObject = {
+                        **routine.to_json(),
+                        "lastStatus": "completed" if status == "completed" else "failed",
+                        "updatedAt": now,
+                    }
+                    if status != "completed" and not routine.last_error:
+                        patch["lastError"] = f"Routine turn became {status}."
+                    state.routines[routine.name] = routine_from_patch(patch)
+                    changed = True
+            if changed:
+                write_state_file(self.state_file, state)
 
     async def record_routine_run(self, name: str, patch: JsonObject) -> None:
         async with self._state_lock:

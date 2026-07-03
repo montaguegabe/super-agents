@@ -18,6 +18,10 @@ from super_agents.app_protocol import (
 )
 from super_agents.app_sessions import required_label
 from super_agents.agent_store import Session, Store, iso_now
+from super_agents.defaults import (
+    default_super_agents_model,
+    default_super_agents_reasoning_effort,
+)
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
@@ -92,7 +96,7 @@ class ClaudeAgentSdkClient:
                 cwd=str(Path(_optional_str(input_data.get("cwd")) or existing.cwd).expanduser()),
                 agent_name=effective_agent_name,
                 developer_instructions=effective_developer_instructions,
-                model=_optional_str(input_data.get("model")) or existing.model,
+                model=_optional_str(input_data.get("model")) or existing.model or self._default_model(),
                 status="waiting",
                 active_turn_id=None,
                 last_observed_state="Claude Code thread refreshed",
@@ -103,7 +107,7 @@ class ClaudeAgentSdkClient:
             cwd=_optional_str(input_data.get("cwd")),
             agent_name=agent_name,
             developer_instructions=developer_instructions,
-            model=_optional_str(input_data.get("model")),
+            model=_optional_str(input_data.get("model")) or self._default_model(),
             command=["claude-agent-sdk"],
         )
         return {"backend": self.backend, "threadId": session.id, "session": session.to_json()}
@@ -243,8 +247,8 @@ class ClaudeAgentSdkClient:
             sdk = self._require_sdk()
             prompt = str(turn_input["prompt"])
             sdk_prompt = self._prompt_for_session(session, turn_input)
-            model = _optional_str(turn_input.get("model")) or session.model
-            reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
+            model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
+            reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
             service_tier = _optional_str(turn_input.get("serviceTier"))
             turn = self.store.create_turn(
                 session.id,
@@ -288,8 +292,8 @@ class ClaudeAgentSdkClient:
         sdk = self._require_sdk()
         prompt = str(turn_input["prompt"])
         sdk_prompt = self._prompt_for_session(session, turn_input)
-        model = _optional_str(turn_input.get("model")) or session.model
-        reasoning_effort = _optional_str(turn_input.get("reasoningEffort"))
+        model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
+        reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
         service_tier = _optional_str(turn_input.get("serviceTier"))
         turn = self.store.create_turn(
             session.id,
@@ -338,8 +342,8 @@ class ClaudeAgentSdkClient:
             str(turn_input["prompt"]),
             status="queued",
             mode=_optional_str(turn_input.get("mode")),
-            model=_optional_str(turn_input.get("model")) or session.model,
-            reasoning_effort=_optional_str(turn_input.get("reasoningEffort")),
+            model=_optional_str(turn_input.get("model")) or session.model or self._default_model(),
+            reasoning_effort=_optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort(),
             service_tier=_optional_str(turn_input.get("serviceTier")),
         )
         position = len(self.store.queued_turns(session.id))
@@ -367,6 +371,12 @@ class ClaudeAgentSdkClient:
 
     async def report_tags(self, project_path: str, path: str, tags: list[Any] | None = None) -> JsonObject:
         return self._unsupported("super_agents_report_tags", projectPath=project_path, path=path, tags=tags)
+
+    def _default_model(self) -> str | None:
+        return default_super_agents_model(backend=self.backend)
+
+    def _default_reasoning_effort(self) -> str:
+        return default_super_agents_reasoning_effort()
 
     async def _run_turn(
         self,

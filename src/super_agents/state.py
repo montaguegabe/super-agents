@@ -100,6 +100,7 @@ class RoutineRecord:
     prompt: str
     time: str
     updated_at: str
+    kind: str = "agent"
     schedule_type: str = "daily"
     interval_seconds: int | None = None
     timezone: str | None = None
@@ -115,6 +116,8 @@ class RoutineRecord:
     reasoning_effort: str | None = None
     service_tier: str | None = None
     developer_instructions: str | None = None
+    command: str | None = None
+    command_timeout_seconds: int | None = None
     created_at: str | None = None
     last_run_date: str | None = None
     last_run_at: str | None = None
@@ -130,6 +133,7 @@ class RoutineRecord:
                 "name": self.name,
                 "prompt": self.prompt,
                 "time": self.time,
+                "kind": self.kind,
                 "scheduleType": self.schedule_type,
                 "intervalSeconds": self.interval_seconds,
                 "timezone": self.timezone,
@@ -145,6 +149,8 @@ class RoutineRecord:
                 "reasoningEffort": self.reasoning_effort,
                 "serviceTier": self.service_tier,
                 "developerInstructions": self.developer_instructions,
+                "command": self.command,
+                "commandTimeoutSeconds": self.command_timeout_seconds,
                 "createdAt": self.created_at,
                 "updatedAt": self.updated_at,
                 "lastRunDate": self.last_run_date,
@@ -183,10 +189,17 @@ def read_state_file(path: Path) -> StateFile:
 def write_state_file(path: Path, state: StateFile) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(state.to_json(), indent=2) + "\n"
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-        tmp.write(payload)
-        tmp_name = tmp.name
-    os.replace(tmp_name, path)
+    tmp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+            tmp.write(payload)
+            tmp_name = tmp.name
+        os.replace(tmp_name, path)
+    except Exception:
+        if tmp_name:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+        raise
 
 
 @contextlib.contextmanager
@@ -308,9 +321,10 @@ def routine_record_from_json(
 
     name = get_string(value, "name") or name_fallback
     prompt = get_string(value, "prompt") or ""
+    kind = as_routine_kind(get_string(value, "kind"))
     time_value = get_string(value, "time") or default_time
     schedule_type = as_routine_schedule_type(get_string(value, "scheduleType"))
-    if require_prompt_time and not prompt:
+    if require_prompt_time and kind != "command" and not prompt:
         return None
     if require_prompt_time and schedule_type != "interval" and not get_string(value, "time"):
         return None
@@ -319,6 +333,7 @@ def routine_record_from_json(
         name=name,
         prompt=prompt,
         time=time_value,
+        kind=kind,
         schedule_type=schedule_type,
         interval_seconds=get_positive_int(value, "intervalSeconds"),
         timezone=get_string(value, "timezone") or default_timezone,
@@ -334,6 +349,8 @@ def routine_record_from_json(
         reasoning_effort=get_string(value, "reasoningEffort"),
         service_tier=get_string(value, "serviceTier"),
         developer_instructions=get_string(value, "developerInstructions"),
+        command=get_string(value, "command"),
+        command_timeout_seconds=get_positive_int(value, "commandTimeoutSeconds"),
         created_at=get_string(value, "createdAt"),
         updated_at=get_string(value, "updatedAt") or default_updated_at,
         last_run_date=get_string(value, "lastRunDate"),
@@ -362,6 +379,10 @@ def get_positive_int(value: JsonObject, key: str) -> int | None:
 
 def as_routine_schedule_type(value: str | None) -> str:
     return value if value in {"daily", "interval"} else "daily"
+
+
+def as_routine_kind(value: str | None) -> str:
+    return value if value in {"agent", "command"} else "agent"
 
 
 def as_stored_status(status: str | None) -> StoredStatus | None:
