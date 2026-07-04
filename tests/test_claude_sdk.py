@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from super_agents.app_models import LabelQueryInput
 from super_agents.agent_store import Store
+from super_agents.app_models import LabelQueryInput
 from super_agents.claude_sdk import ClaudeAgentSdkClient
 
 
@@ -131,9 +131,13 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "high",
+        "env": {"ANTHROPIC_API_KEY": ""},
     }
+    # The process environment is never mutated; the key is blanked for the
+    # spawned CLI through the SDK env option instead.
     assert FakeClaudeSDKClient.env_seen
-    assert all(seen is False for _stage, seen in FakeClaudeSDKClient.env_seen)
+    assert all(seen is True for _stage, seen in FakeClaudeSDKClient.env_seen)
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs["env"] == {"ANTHROPIC_API_KEY": ""}
     assert os.environ["ANTHROPIC_API_KEY"] == "must-not-reach-sdk"
     assert store.get_turn(result["turnId"]).status == "completed"
     assert store.get_turn(result["turnId"]).last_useful_message.endswith("\n\nhello")
@@ -176,6 +180,7 @@ async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "low",
+        "env": {"ANTHROPIC_API_KEY": ""},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "low"
 
@@ -204,6 +209,7 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "xhigh",
+        "env": {"ANTHROPIC_API_KEY": ""},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "xhigh"
 
@@ -228,6 +234,7 @@ async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "low",
+        "env": {"ANTHROPIC_API_KEY": ""},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "high"
     assert store.get_turn(result["turnId"]).service_tier == "fast"
@@ -254,6 +261,7 @@ async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "high",
+        "env": {"ANTHROPIC_API_KEY": ""},
     }
     assert store.get_turn(result["turnId"]).service_tier == "standard"
 
@@ -278,6 +286,7 @@ async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "xhigh",
+        "env": {"ANTHROPIC_API_KEY": ""},
     }
 
 
@@ -414,9 +423,7 @@ async def test_claude_sdk_start_thread_refreshes_existing_named_session(tmp_path
     session = store.get_session(refreshed["threadId"])
     assert session.cwd == str(tmp_path)
     assert session.agent_name == "Dottie"
-    assert session.developer_instructions == (
-        "new fruit\n\nSuper Agent thread name: dispatcher\nYour name is Dottie."
-    )
+    assert session.developer_instructions == ("new fruit\n\nSuper Agent thread name: dispatcher\nYour name is Dottie.")
     assert session.status == "waiting"
 
 
@@ -486,7 +493,7 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
         "cwd": str(tmp_path),
         "permission_mode": "bypassPermissions",
         "effort": "high",
-        "env": {"CLAUDE_CONFIG_DIR": str(config_dir)},
+        "env": {"CLAUDE_CONFIG_DIR": str(config_dir), "ANTHROPIC_API_KEY": ""},
         "settings": str(settings_path),
         "setting_sources": ["project"],
         "system_prompt": {"type": "file", "path": str(instructions_path)},
@@ -631,6 +638,7 @@ async def test_claude_sdk_steer_by_label_preserves_reasoning_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "low",
+        "env": {"ANTHROPIC_API_KEY": ""},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
 
@@ -662,6 +670,7 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "effort": "low",
+        "env": {"ANTHROPIC_API_KEY": ""},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
 

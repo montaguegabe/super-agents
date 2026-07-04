@@ -5,8 +5,6 @@ import os
 import subprocess
 import urllib.request
 
-from .state import JsonObject
-
 LOGIN_ENV_TIMEOUT_SECONDS = 5
 
 
@@ -16,18 +14,6 @@ def _check_ready_sync(url: str) -> bool:
 
 
 _login_shell_environment_task: asyncio.Task[dict[str, str]] | None = None
-
-
-async def login_shell_config_override(
-    *,
-    thread_id: str | None = None,
-    label: str | None = None,
-    agent_name: str | None = None,
-    include_super_agent_identity: bool = True,
-) -> JsonObject:
-    env = await login_shell_environment()
-    set_values = {key: value for key in ["PATH", "SHELL", "HOME", "USER", "LOGNAME"] if (value := env.get(key))}
-    return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
 
 
 async def login_shell_environment() -> dict[str, str]:

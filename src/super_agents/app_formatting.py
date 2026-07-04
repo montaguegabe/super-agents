@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .state import JsonObject, get_string
+from .state import JsonObject, get_string, without_none  # noqa: F401  (without_none re-exported)
 
 
 def preview_text(value: str, max_length: int = 240) -> str:
@@ -42,10 +42,6 @@ def find_useful_text(value: Any, depth: int = 0) -> str | None:
 
 def as_object(value: Any) -> JsonObject:
     return value if isinstance(value, dict) else {}
-
-
-def without_none(value: JsonObject) -> JsonObject:
-    return {key: item for key, item in value.items() if item is not None}
 
 
 def compact_turn_summary(

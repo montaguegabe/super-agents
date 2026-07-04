@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .app_formatting import as_object, without_none
-from .app_models import LabelQueryInput
+from .app_models import LabelQueryInput, TurnState
 from .app_protocol import extract_thread_cwd, extract_thread_id, normalize_thread_status
 from .app_time import iso_from_thread_time, iso_now, parse_iso_ms
 from .state import JsonObject, SessionRecord, TurnSummary, as_mode, as_stored_status, get_string
@@ -17,6 +17,49 @@ def required_label(input_data: LabelQueryInput) -> str:
 
 def session_recency(session: SessionRecord) -> int:
     return parse_iso_ms(session.last_event_at or session.updated_at)
+
+
+def turn_patch(
+    turn_id: str,
+    status: str,
+    *,
+    turn: TurnState | None = None,
+    updated_at: str | None = None,
+    reasoning_effort: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    last_useful_message: str | None = None,
+    pending_request_ids: list[str | int] | None = None,
+    event_count: int | None = None,
+    mode: str | None = None,
+    prompt_preview: str | None = None,
+) -> JsonObject:
+    """Build the per-turn summary used in merge_session {"turns": {turn_id: ...}} patches.
+
+    Explicit keyword values win; unset fields fall back to the tracked ``turn``
+    when one is provided. None values are dropped by merge_turns.
+    """
+    if turn is not None:
+        reasoning_effort = reasoning_effort or turn.reasoning_effort
+        started_at = started_at or turn.started_at
+        finished_at = finished_at or turn.finished_at
+        if pending_request_ids is None:
+            pending_request_ids = [request.id for request in turn.pending_requests]
+        if event_count is None:
+            event_count = len(turn.events)
+    return {
+        "turnId": turn_id,
+        "status": status,
+        "mode": mode,
+        "reasoningEffort": reasoning_effort,
+        "startedAt": started_at,
+        "updatedAt": updated_at,
+        "finishedAt": finished_at,
+        "promptPreview": prompt_preview,
+        "lastUsefulMessage": last_useful_message,
+        "pendingRequestIds": pending_request_ids,
+        "eventCount": event_count,
+    }
 
 
 def merge_turns(current: dict[str, TurnSummary] | None, patch: Any) -> JsonObject | None:

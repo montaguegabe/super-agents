@@ -20,8 +20,8 @@ from super_agents.mcp_server import (
     clean_start_turn_by_name_input,
     clean_thread_input,
     clean_turn_input,
-    default_super_agent_instructions_path,
     default_service_tier,
+    default_super_agent_instructions_path,
     default_super_agents_model,
 )
 
@@ -194,9 +194,7 @@ def test_turn_input_ignores_legacy_super_agents_model_default(monkeypatch, tmp_p
     assert default_super_agents_model() is None
 
 
-def test_turn_input_uses_backend_specific_super_agents_model(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_turn_input_uses_backend_specific_super_agents_model(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(
         json.dumps(
@@ -404,9 +402,7 @@ async def test_python_client_uses_super_agents_model_and_reasoning_defaults(
     client = ReadyClient(server.ws_url, state_file)
     try:
         await client.start_thread({"label": "defaults", "cwd": "/tmp/defaults"})
-        result = await client.start_turn(
-            {"threadId": "thread-defaults", "label": "defaults", "prompt": "work"}
-        )
+        result = await client.start_turn({"threadId": "thread-defaults", "label": "defaults", "prompt": "work"})
 
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         settings = start_request["params"]["collaborationMode"]["settings"]
@@ -655,22 +651,13 @@ async def test_login_shell_config_excludes_legacy_super_agent_identity_environme
     monkeypatch.setenv("OPENBASE_SUPER_AGENT_AGENT_NAME", "Parent Name")
     monkeypatch.setattr(app_server_client, "login_shell_environment", fake_login_shell_environment)
 
-    first = await app_server_client.login_shell_config_override(
-        thread_id="thread-a",
-        label="Agent A",
-        agent_name="Dottie",
-    )
-    second = await app_server_client.login_shell_config_override(
-        thread_id="thread-b",
-        label="Agent B",
-    )
-    cleared = await app_server_client.login_shell_config_override()
+    config = await app_server_client.login_shell_config_override()
 
-    for config in (first, second, cleared):
-        set_env = config["shell_environment_policy"]["set"]
-        assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
-        assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
-        assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
+    set_env = config["shell_environment_policy"]["set"]
+    assert set_env["PATH"] == "/usr/bin"
+    assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
+    assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
+    assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
     assert os.environ["OPENBASE_SUPER_AGENT_THREAD_ID"] == "parent-thread"
     assert os.environ["OPENBASE_SUPER_AGENT_AGENT_NAME"] == "Parent Name"
 

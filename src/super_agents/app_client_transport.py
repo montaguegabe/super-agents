@@ -22,6 +22,7 @@ from .app_protocol import (
     extract_notification_thread_id,
     extract_notification_turn_id,
 )
+from .app_sessions import turn_patch
 from .app_time import iso_now, turn_key
 from .state import JsonObject
 
@@ -57,6 +58,9 @@ class TransportClientMixin:
         for task in self._permission_decision_tasks:
             task.cancel()
         self._permission_decision_tasks.clear()
+        for task in self._merge_session_tasks:
+            task.cancel()
+        self._merge_session_tasks.clear()
         for task in self._queue_tasks.values():
             task.cancel()
         self._queue_tasks.clear()
@@ -182,30 +186,26 @@ class TransportClientMixin:
             turn = self.ensure_turn(thread_id, turn_id)
             turn.status = "waiting"
             turn.pending_requests.append(pending_request)
-            asyncio.create_task(
-                self.merge_session(
-                    thread_id,
-                    {
-                        "threadId": thread_id,
-                        "activeTurnId": turn_id,
-                        "lastTurnId": turn_id,
-                        "lastStatus": "waiting",
-                        "lastEventAt": pending_request.received_at,
-                        "lastUsefulMessage": text_preview(params) or method,
-                        "turns": {
-                            turn_id: {
-                                "turnId": turn_id,
-                                "status": "waiting",
-                                "reasoningEffort": turn.reasoning_effort,
-                                "startedAt": turn.started_at,
-                                "updatedAt": pending_request.received_at,
-                                "lastUsefulMessage": text_preview(params) or method,
-                                "pendingRequestIds": [request.id for request in turn.pending_requests],
-                                "eventCount": len(turn.events),
-                            }
-                        },
+            last_useful_message = text_preview(params) or method
+            self._schedule_merge_session(
+                thread_id,
+                {
+                    "threadId": thread_id,
+                    "activeTurnId": turn_id,
+                    "lastTurnId": turn_id,
+                    "lastStatus": "waiting",
+                    "lastEventAt": pending_request.received_at,
+                    "lastUsefulMessage": last_useful_message,
+                    "turns": {
+                        turn_id: turn_patch(
+                            turn_id,
+                            "waiting",
+                            turn=turn,
+                            updated_at=pending_request.received_at,
+                            last_useful_message=last_useful_message,
+                        )
                     },
-                )
+                },
             )
         self.schedule_permission_callback(pending_request)
         self.record_pending_permission_request(pending_request)
@@ -302,38 +302,44 @@ class TransportClientMixin:
 
         last_useful_message = text_preview(params) or method
         clear_fields = ["activeTurnId"] if turn.status in {"completed", "failed", "cancelled"} else []
-        merge_task = asyncio.create_task(
-            self.merge_session(
-                thread_id,
-                {
-                    "threadId": thread_id,
-                    "activeTurnId": None if clear_fields else turn_id,
-                    "lastTurnId": turn_id,
-                    "lastStatus": turn.status,
-                    "lastEventAt": received_at,
-                    "lastFinishedAt": turn.finished_at,
-                    "lastUsefulMessage": last_useful_message,
-                    "turns": {
-                        turn_id: {
-                            "turnId": turn_id,
-                            "status": turn.status,
-                            "reasoningEffort": turn.reasoning_effort,
-                            "startedAt": turn.started_at,
-                            "updatedAt": received_at,
-                            "finishedAt": turn.finished_at,
-                            "lastUsefulMessage": last_useful_message,
-                            "pendingRequestIds": [request.id for request in turn.pending_requests],
-                            "eventCount": len(turn.events),
-                        }
-                    },
+        merge_task = self._schedule_merge_session(
+            thread_id,
+            {
+                "threadId": thread_id,
+                "activeTurnId": None if clear_fields else turn_id,
+                "lastTurnId": turn_id,
+                "lastStatus": turn.status,
+                "lastEventAt": received_at,
+                "lastFinishedAt": turn.finished_at,
+                "lastUsefulMessage": last_useful_message,
+                "turns": {
+                    turn_id: turn_patch(
+                        turn_id,
+                        turn.status,
+                        turn=turn,
+                        updated_at=received_at,
+                        last_useful_message=last_useful_message,
+                    )
                 },
-                clear_fields=clear_fields,
-            )
+            },
+            clear_fields=clear_fields,
         )
         if turn.status in {"completed", "failed", "cancelled"}:
             merge_task.add_done_callback(
                 lambda _task, completed_thread_id=thread_id: self.schedule_queue_drain(completed_thread_id)
             )
+
+    def _schedule_merge_session(
+        self,
+        thread_id: str,
+        patch: JsonObject,
+        clear_fields: list[str] | None = None,
+    ) -> asyncio.Task[None]:
+        """Schedule a state merge, retaining the task so it cannot be garbage collected."""
+        task = asyncio.create_task(self.merge_session(thread_id, patch, clear_fields=clear_fields))
+        self._merge_session_tasks.add(task)
+        task.add_done_callback(self._merge_session_tasks.discard)
+        return task
 
     def ensure_turn(self, thread_id: str, turn_id: str) -> TurnState:
         key = turn_key(thread_id, turn_id)

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from .defaults import (
     default_super_agents_model,
     default_super_agents_reasoning_effort,
 )
+from .state import without_none
 
 JsonObject = dict[str, Any]
 Handler = Callable[[JsonObject], Awaitable[Any]]
@@ -435,25 +437,6 @@ def object_schema(properties: JsonObject, required: list[str] | None = None) -> 
     return schema
 
 
-def turn_start_properties() -> JsonObject:
-    return {
-        "threadId": {"type": "string"},
-        "prompt": {"type": "string"},
-        "cwd": {"type": "string"},
-        "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
-        "model": {
-            "type": "string",
-            "description": "Defaults to the model for the selected backend's Super Agents role.",
-        },
-        "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        "name": {"type": "string"},
-        "agentName": {
-            "type": "string",
-            "description": "Optional agent name/persona to store for this thread.",
-        },
-    }
-
-
 def name_query_properties(include_ids: bool = True, include_output_options: bool = True) -> JsonObject:
     properties: JsonObject = {
         "name": {"type": "string"},
@@ -501,9 +484,7 @@ def name_query_properties(include_ids: bool = True, include_output_options: bool
     return properties
 
 
-def permission_option_properties(
-    *, include_sandbox: bool = False, include_sandbox_type: bool = False
-) -> JsonObject:
+def permission_option_properties(*, include_sandbox: bool = False, include_sandbox_type: bool = False) -> JsonObject:
     properties: JsonObject = {
         "approvalPolicy": {
             "type": "string",
@@ -576,8 +557,7 @@ def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> J
             "prompt": prompt,
             "cwd": optional_string(input_data, "cwd"),
             "mode": optional_mode(input_data, "mode") or "default",
-            "model": optional_string(input_data, "model")
-            or default_super_agents_model(backend=backend),
+            "model": optional_string(input_data, "model") or default_super_agents_model(backend=backend),
             "reasoningEffort": optional_string(input_data, "reasoningEffort")
             or default_super_agents_reasoning_effort(),
             "serviceTier": optional_string(input_data, "serviceTier") or default_service_tier(),
@@ -739,10 +719,6 @@ def _cwd_basename(value: Any) -> str:
     return value.rstrip("/").rsplit("/", 1)[-1]
 
 
-def without_none(value: JsonObject) -> JsonObject:
-    return {key: item for key, item in value.items() if item is not None}
-
-
 async def run_stdio() -> None:
     server = create_server()
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -763,7 +739,7 @@ async def run_stdio() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    print("Super Agents MCP running on stdio.", file=__import__("sys").stderr)
+    print("Super Agents MCP running on stdio.", file=sys.stderr)
     asyncio.run(run_stdio())
 
 

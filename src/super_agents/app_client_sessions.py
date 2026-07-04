@@ -13,12 +13,6 @@ from .app_formatting import (
     without_none,
 )
 from .app_models import LabelQueryInput, PendingServerRequest, ResolvedSession, TurnState
-from .app_queue import (
-    complete_queued_turn,
-    queued_turn_summaries,
-    release_queued_turn,
-    reserve_next_queued_turn,
-)
 from .app_protocol import (
     extract_thread_cwd,
     extract_thread_id,
@@ -30,8 +24,22 @@ from .app_protocol import (
     normalize_thread_status,
     to_tracked_turn_status,
 )
-from .app_sessions import merge_turns, required_label, session_from_patch, session_from_thread, session_recency
+from .app_queue import (
+    complete_queued_turn,
+    queued_turn_summaries,
+    release_queued_turn,
+    reserve_next_queued_turn,
+)
+from .app_sessions import (
+    merge_turns,
+    required_label,
+    session_from_patch,
+    session_from_thread,
+    session_recency,
+    turn_patch,
+)
 from .app_time import age_ms, iso_from_thread_time, iso_now, parse_iso_ms, thread_recency, turn_key
+from .item_tags import thread_tags
 from .state import (
     JsonObject,
     SessionRecord,
@@ -42,7 +50,6 @@ from .state import (
     update_state_file,
 )
 from .thread_favorites import favorite_status, is_favorite
-from .item_tags import thread_tags
 
 logger = logging.getLogger(__name__)
 
@@ -177,11 +184,7 @@ class SessionClientMixin:
         return bool(session and is_active_status(self.session_status(session)))
 
     def tracked_turn_is_active(self, turn: TurnState) -> bool:
-        return (
-            is_active_status(turn.status)
-            and not turn.finished_at
-            and not _is_queue_item_id(turn.turn_id)
-        )
+        return is_active_status(turn.status) and not turn.finished_at and not _is_queue_item_id(turn.turn_id)
 
     async def resolve_thread_name(self, name: str, input_data: LabelQueryInput) -> JsonObject:
         try:
@@ -298,7 +301,8 @@ class SessionClientMixin:
                 "lastEventAt": session.last_event_at,
                 "lastEventAgeMs": age_ms(session.last_event_at),
                 "ageSinceUpdateMs": age_ms(session.updated_at),
-                "isLikelyStale": bool(status_warning) or is_likely_stale(status, session.last_event_at or session.updated_at),
+                "isLikelyStale": bool(status_warning)
+                or is_likely_stale(status, session.last_event_at or session.updated_at),
                 "statusWarning": status_warning,
                 "lastUsefulMessage": session.last_useful_message,
                 "pendingRequestCount": self.pending_request_count(session.thread_id, running_turn_id),
@@ -405,8 +409,10 @@ class SessionClientMixin:
             return None
         if self._turns.get(turn_key(session.thread_id, active_turn_id)) is not None:
             return None
-        if session.last_status and is_active_status(session.last_status) and self.persisted_active_turn_is_stale(
-            session, active_turn_id
+        if (
+            session.last_status
+            and is_active_status(session.last_status)
+            and self.persisted_active_turn_is_stale(session, active_turn_id)
         ):
             return STALE_ACTIVE_TURN_WARNING
         return None
@@ -472,17 +478,17 @@ class SessionClientMixin:
                 "lastFinishedAt": finished_at,
                 "lastUsefulMessage": text_preview(persisted_turn),
                 "turns": {
-                    turn_id: {
-                        "turnId": turn_id,
-                        "status": "running" if tracked_status == "unknown" else tracked_status,
-                        "reasoningEffort": reasoning_effort,
-                        "startedAt": tracked_turn.started_at if tracked_turn else iso_now(),
-                        "updatedAt": iso_now(),
-                        "finishedAt": finished_at,
-                        "lastUsefulMessage": text_preview(persisted_turn),
-                        "pendingRequestIds": [request.id for request in pending_requests],
-                        "eventCount": len(tracked_turn.events) if tracked_turn else 0,
-                    }
+                    turn_id: turn_patch(
+                        turn_id,
+                        "running" if tracked_status == "unknown" else tracked_status,
+                        reasoning_effort=reasoning_effort,
+                        started_at=tracked_turn.started_at if tracked_turn else iso_now(),
+                        updated_at=iso_now(),
+                        finished_at=finished_at,
+                        last_useful_message=text_preview(persisted_turn),
+                        pending_request_ids=[request.id for request in pending_requests],
+                        event_count=len(tracked_turn.events) if tracked_turn else 0,
+                    )
                 },
             },
             clear_fields=[] if is_active_status(tracked_status) else ["activeTurnId"],

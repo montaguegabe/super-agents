@@ -1,14 +1,18 @@
+"""Super Agents backend client for the Claude Agent SDK.
+
+Option building lives in claude_options, prompt templating in claude_prompts,
+and log serialization in claude_logs; this module keeps the client itself.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import importlib
-import json
-import os
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
+from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import LabelQueryInput
 from super_agents.app_protocol import (
@@ -17,7 +21,39 @@ from super_agents.app_protocol import (
     with_super_agent_identity_instructions,
 )
 from super_agents.app_sessions import required_label
-from super_agents.agent_store import Session, Store, iso_now
+from super_agents.claude_logs import (
+    append_log,
+)
+from super_agents.claude_logs import (
+    message_preview as _message_preview,
+)
+from super_agents.claude_logs import (
+    message_session_id as _message_session_id,
+)
+from super_agents.claude_logs import (
+    message_to_log as _message_to_log,
+)
+from super_agents.claude_options import (  # noqa: F401  (constants re-exported for compatibility)
+    CLAUDE_CONFIG_DIR_ENV,
+    CLAUDE_CONFIG_FILENAME,
+    CLAUDE_INSTRUCTIONS_FILENAME,
+    CLAUDE_PERMISSION_MODE,
+    CLAUDE_SDK_ENV_OVERRIDES,
+    CLAUDE_SERVICE_TIER_EFFORTS,
+    CLAUDE_SETTINGS_FILENAME,
+)
+from super_agents.claude_options import (
+    agent_options as _agent_options,
+)
+from super_agents.claude_options import (
+    claude_effort as _claude_effort,
+)
+from super_agents.claude_prompts import (
+    combine_developer_instructions as _combine_developer_instructions,
+)
+from super_agents.claude_prompts import (
+    with_claude_turn_context as _with_claude_turn_context,
+)
 from super_agents.defaults import (
     default_super_agents_model,
     default_super_agents_reasoning_effort,
@@ -25,16 +61,6 @@ from super_agents.defaults import (
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
-CLAUDE_PERMISSION_MODE = "bypassPermissions"
-CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
-CLAUDE_CONFIG_FILENAME = ".claude.json"
-CLAUDE_SETTINGS_FILENAME = "settings.json"
-CLAUDE_INSTRUCTIONS_FILENAME = "CLAUDE.md"
-CLAUDE_SERVICE_TIER_EFFORTS = {
-    "fast": "low",
-    "standard": "high",
-    "slow": "high",
-}
 
 SDK_IMPORT_ERROR = (
     "Claude Code backend requires the claude-agent-sdk package. "
@@ -54,6 +80,7 @@ class ClaudeAgentSdkClient:
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
+        self._turn_tasks: set[asyncio.Task[None]] = set()
 
     async def status(self) -> JsonObject:
         sessions = self.store.list_sessions(include_inactive=True)
@@ -122,9 +149,7 @@ class ClaudeAgentSdkClient:
         if developer_instructions:
             effective_developer_instructions = with_super_agent_identity_instructions(
                 _combine_developer_instructions(
-                    _without_super_agent_identity_lines(
-                        session.developer_instructions
-                    ),
+                    _without_super_agent_identity_lines(session.developer_instructions),
                     developer_instructions,
                 ),
                 session.name,
@@ -244,38 +269,10 @@ class ClaudeAgentSdkClient:
                 session,
                 reason="steered by follow-up",
             )
-            sdk = self._require_sdk()
-            prompt = str(turn_input["prompt"])
-            sdk_prompt = self._prompt_for_session(session, turn_input)
-            model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
-            reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
-            service_tier = _optional_str(turn_input.get("serviceTier"))
-            turn = self.store.create_turn(
-                session.id,
-                prompt,
-                status="running",
-                mode=_optional_str(turn_input.get("mode")),
-                model=model,
-                reasoning_effort=reasoning_effort,
-                service_tier=service_tier,
-            )
-            self.store.update_session(
-                session.id,
-                status="running",
-                active_turn_id=turn.id,
-                last_turn_id=turn.id,
+            turn = self._launch_turn(
+                session,
+                turn_input,
                 last_observed_state="steering active turn via Claude Code",
-            )
-            asyncio.create_task(
-                self._run_turn(
-                    session.id,
-                    turn.id,
-                    sdk_prompt,
-                    model,
-                    reasoning_effort,
-                    service_tier,
-                    sdk,
-                )
             )
             return {
                 "backend": self.backend,
@@ -289,38 +286,10 @@ class ClaudeAgentSdkClient:
                 "startedImmediately": False,
                 "drain": "steered_active_turn",
             }
-        sdk = self._require_sdk()
-        prompt = str(turn_input["prompt"])
-        sdk_prompt = self._prompt_for_session(session, turn_input)
-        model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
-        reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
-        service_tier = _optional_str(turn_input.get("serviceTier"))
-        turn = self.store.create_turn(
-            session.id,
-            prompt,
-            status="running",
-            mode=_optional_str(turn_input.get("mode")),
-            model=model,
-            reasoning_effort=reasoning_effort,
-            service_tier=service_tier,
-        )
-        self.store.update_session(
-            session.id,
-            status="running",
-            active_turn_id=turn.id,
-            last_turn_id=turn.id,
+        turn = self._launch_turn(
+            session,
+            turn_input,
             last_observed_state="running via Claude Code",
-        )
-        asyncio.create_task(
-            self._run_turn(
-                session.id,
-                turn.id,
-                sdk_prompt,
-                model,
-                reasoning_effort,
-                service_tier,
-                sdk,
-            )
         )
         return {
             "backend": self.backend,
@@ -378,6 +347,49 @@ class ClaudeAgentSdkClient:
     def _default_reasoning_effort(self) -> str:
         return default_super_agents_reasoning_effort()
 
+    def _launch_turn(self, session: Session, turn_input: JsonObject, *, last_observed_state: str) -> Turn:
+        sdk = self._require_sdk()
+        prompt = str(turn_input["prompt"])
+        sdk_prompt = self._prompt_for_session(session, turn_input)
+        model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
+        reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
+        service_tier = _optional_str(turn_input.get("serviceTier"))
+        turn = self.store.create_turn(
+            session.id,
+            prompt,
+            status="running",
+            mode=_optional_str(turn_input.get("mode")),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
+        )
+        self.store.update_session(
+            session.id,
+            status="running",
+            active_turn_id=turn.id,
+            last_turn_id=turn.id,
+            last_observed_state=last_observed_state,
+        )
+        self._spawn_turn_task(session.id, turn.id, sdk_prompt, model, reasoning_effort, service_tier, sdk)
+        return turn
+
+    def _spawn_turn_task(
+        self,
+        session_id: str,
+        turn_id: str,
+        prompt: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        service_tier: str | None,
+        sdk: Any,
+    ) -> None:
+        """Run a turn in the background, retaining the task so it cannot be garbage collected."""
+        task = asyncio.create_task(
+            self._run_turn(session_id, turn_id, prompt, model, reasoning_effort, service_tier, sdk)
+        )
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+
     async def _run_turn(
         self,
         session_id: str,
@@ -403,15 +415,14 @@ class ClaudeAgentSdkClient:
                     sdk,
                 )
                 last_useful_message = ""
-                with _without_unsupported_anthropic_api_keys():
-                    await sdk_client.query(prompt)
-                    async for message in sdk_client.receive_response():
-                        append_log(session.log_path, _message_to_log(message))
-                        if claude_session_id := _message_session_id(message):
-                            self.store.update_session(session_id, backend_session_id=claude_session_id)
-                        if useful := _message_preview(message):
-                            last_useful_message = useful
-                            self.store.update_turn(turn_id, last_useful_message=last_useful_message)
+                await sdk_client.query(prompt)
+                async for message in sdk_client.receive_response():
+                    append_log(session.log_path, _message_to_log(message))
+                    if claude_session_id := _message_session_id(message):
+                        self.store.update_session(session_id, backend_session_id=claude_session_id)
+                    if useful := _message_preview(message):
+                        last_useful_message = useful
+                        self.store.update_turn(turn_id, last_useful_message=last_useful_message)
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
@@ -509,9 +520,8 @@ class ClaudeAgentSdkClient:
             effective_effort,
             resume=session.backend_session_id,
         )
-        with _without_unsupported_anthropic_api_keys():
-            client = sdk.ClaudeSDKClient(options=options)
-            await client.connect()
+        client = sdk.ClaudeSDKClient(options=options)
+        await client.connect()
         self._sdk_clients[session.id] = client
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
         return client
@@ -544,16 +554,14 @@ class ClaudeAgentSdkClient:
                 last_turn_id=turn.id,
                 last_observed_state="running queued turn via Claude Code",
             )
-            asyncio.create_task(
-                self._run_turn(
-                    session_id,
-                    turn.id,
-                    self._prompt_for_session(session, {"prompt": turn.prompt}),
-                    turn.model,
-                    turn.reasoning_effort,
-                    turn.service_tier,
-                    sdk,
-                )
+            self._spawn_turn_task(
+                session_id,
+                turn.id,
+                self._prompt_for_session(session, {"prompt": turn.prompt}),
+                turn.model,
+                turn.reasoning_effort,
+                turn.service_tier,
+                sdk,
             )
             return
 
@@ -629,18 +637,13 @@ class ClaudeAgentSdkClient:
 
     def _turn_view(self, session: Session, turn: Any) -> JsonObject:
         data = turn.to_json()
-        if (
-            "lastUsefulMessage" not in data
-            and turn.id == session.last_turn_id
-            and session.last_useful_message
-        ):
+        if "lastUsefulMessage" not in data and turn.id == session.last_turn_id and session.last_useful_message:
             data["lastUsefulMessage"] = session.last_useful_message
         return data
 
     def _sdk_ready(self) -> tuple[bool, str | None]:
         try:
-            with _without_unsupported_anthropic_api_keys():
-                self._sdk_loader()
+            self._sdk_loader()
         except Exception as exc:
             return False, f"{SDK_IMPORT_ERROR} ({type(exc).__name__}: {exc})"
         return True, None
@@ -668,8 +671,7 @@ class ClaudeAgentSdkClient:
 
     def _require_sdk(self) -> Any:
         try:
-            with _without_unsupported_anthropic_api_keys():
-                return self._sdk_loader()
+            return self._sdk_loader()
         except Exception as exc:
             raise RuntimeError(SDK_IMPORT_ERROR) from exc
 
@@ -687,169 +689,5 @@ def _load_sdk() -> Any:
     return importlib.import_module("claude_agent_sdk")
 
 
-@contextlib.contextmanager
-def _without_unsupported_anthropic_api_keys() -> Iterator[None]:
-    previous = os.environ.pop("ANTHROPIC_API_KEY", None)
-    try:
-        yield
-    finally:
-        if previous is not None:
-            os.environ["ANTHROPIC_API_KEY"] = previous
-
-
-def _agent_options(
-    sdk: Any,
-    cwd: str,
-    model: str | None,
-    reasoning_effort: str | None,
-    *,
-    resume: str | None,
-) -> Any:
-    kwargs: JsonObject = {
-        "cwd": cwd,
-        "permission_mode": CLAUDE_PERMISSION_MODE,
-        **_managed_claude_config_options(),
-    }
-    if model:
-        kwargs["model"] = model
-    if reasoning_effort:
-        kwargs["effort"] = reasoning_effort
-    if resume:
-        kwargs["resume"] = resume
-    return sdk.ClaudeAgentOptions(**kwargs)
-
-
-def _claude_effort(reasoning_effort: str | None, service_tier: str | None) -> str | None:
-    if reasoning_effort and reasoning_effort != "high":
-        return reasoning_effort
-    tier_effort = CLAUDE_SERVICE_TIER_EFFORTS.get((service_tier or "").strip().lower())
-    return tier_effort or reasoning_effort
-
-
-def _with_claude_turn_context(
-    prompt: str,
-    *,
-    cwd: str,
-    developer_instructions: str | None,
-) -> str:
-    context_parts = [
-        "<openbase-claude-code-context>",
-        f"Current working directory: {cwd}",
-        (
-            "When the user asks you to create or edit files in the current working directory, "
-            "interpret that as this directory and prefer relative paths or paths under it."
-        ),
-    ]
-    if developer_instructions:
-        context_parts.extend(
-            [
-                "",
-                "Developer instructions for this Openbase thread:",
-                developer_instructions.strip(),
-            ]
-        )
-    context_parts.append("</openbase-claude-code-context>")
-    return "\n".join(context_parts) + "\n\n" + prompt
-
-
-def _managed_claude_config_options() -> JsonObject:
-    config_dir_value = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
-    if not config_dir_value:
-        return {}
-
-    config_dir = Path(config_dir_value).expanduser()
-    options: JsonObject = {
-        "env": {CLAUDE_CONFIG_DIR_ENV: str(config_dir)},
-        "setting_sources": ["project"],
-    }
-
-    settings_path = config_dir / CLAUDE_SETTINGS_FILENAME
-    if settings_path.exists():
-        options["settings"] = str(settings_path)
-
-    instructions_path = config_dir / CLAUDE_INSTRUCTIONS_FILENAME
-    if instructions_path.exists():
-        options["system_prompt"] = {
-            "type": "file",
-            "path": str(instructions_path),
-        }
-
-    mcp_servers = _managed_claude_mcp_servers(config_dir)
-    if mcp_servers:
-        options["mcp_servers"] = mcp_servers
-
-    return options
-
-
-def _managed_claude_mcp_servers(config_dir: Path) -> JsonObject | None:
-    config_path = config_dir / CLAUDE_CONFIG_FILENAME
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    mcp_servers = payload.get("mcpServers")
-    return mcp_servers if isinstance(mcp_servers, dict) and mcp_servers else None
-
-
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def _combine_developer_instructions(base: str | None, overlay: str | None) -> str | None:
-    parts = [part.strip() for part in (base, overlay) if part and part.strip()]
-    if not parts:
-        return None
-    if len(parts) == 2 and parts[1] in parts[0]:
-        return parts[0]
-    return "\n\n".join(parts)
-
-
-def append_log(path_value: str | None, text: str) -> None:
-    if not path_value:
-        return
-    path = Path(path_value)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(text)
-
-
-def _message_to_log(message: Any) -> str:
-    payload = _jsonable_message(message)
-    return f"[{iso_now()}] {json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)}\n"
-
-
-def _jsonable_message(message: Any) -> Any:
-    if dataclasses.is_dataclass(message):
-        return dataclasses.asdict(message)
-    if isinstance(message, dict):
-        return message
-    data = {
-        key: value
-        for key in ("type", "subtype", "result", "session_id", "content")
-        if (value := getattr(message, key, None)) is not None
-    }
-    return data or repr(message)
-
-
-def _message_preview(message: Any) -> str:
-    result = getattr(message, "result", None)
-    if isinstance(result, str) and result.strip():
-        return result.strip()
-    content = getattr(message, "content", None)
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            text = getattr(block, "text", None)
-            if isinstance(text, str) and text:
-                parts.append(text)
-        return "\n".join(parts).strip()
-    return ""
-
-
-def _message_session_id(message: Any) -> str | None:
-    session_id = getattr(message, "session_id", None)
-    return session_id if isinstance(session_id, str) and session_id else None

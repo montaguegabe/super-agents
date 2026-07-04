@@ -8,7 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-
+from .app_client_routines import RoutineClientMixin
+from .app_client_sessions import SessionClientMixin
+from .app_client_transport import TransportClientMixin
 from .app_environment import (
     LOGIN_ENV_TIMEOUT_SECONDS,
     login_shell_environment,
@@ -49,7 +51,6 @@ from .app_permissions import (
     write_permission_store,
     write_shared_permission_decision,
 )
-from .app_queue import append_queued_turn, new_queued_turn
 from .app_protocol import (
     SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX,
     collaboration_mode,
@@ -73,6 +74,7 @@ from .app_protocol import (
     to_tracked_turn_status,
     with_super_agent_identity_instructions,
 )
+from .app_queue import append_queued_turn, new_queued_turn
 from .app_routines import (
     DEFAULT_ROUTINE_INTERVAL_SECONDS,
     DEFAULT_ROUTINE_POLL_SECONDS,
@@ -93,7 +95,14 @@ from .app_routines import (
     routine_with_next_run,
     safe_routine_next_run_at,
 )
-from .app_sessions import merge_turns, required_label, session_from_patch, session_from_thread, session_recency
+from .app_sessions import (
+    merge_turns,
+    required_label,
+    session_from_patch,
+    session_from_thread,
+    session_recency,
+    turn_patch,
+)
 from .app_time import (
     age_ms,
     iso_from_thread_time,
@@ -104,16 +113,7 @@ from .app_time import (
     turn_key,
     turn_recency,
 )
-from .app_client_routines import RoutineClientMixin
-from .app_client_sessions import SessionClientMixin
-from .app_client_transport import TransportClientMixin
 from .defaults import default_super_agents_model
-from .state import (
-    JsonObject,
-    TrackedStatus,
-    get_string,
-)
-from .thread_favorites import favorite_status
 from .item_tags import (
     report_tags,
     set_report_tags,
@@ -121,6 +121,12 @@ from .item_tags import (
     tag_options,
     thread_tags,
 )
+from .state import (
+    JsonObject,
+    TrackedStatus,
+    get_string,
+)
+from .thread_favorites import favorite_status
 
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
 DEFAULT_MODEL = "gpt-5.4"
@@ -222,13 +228,7 @@ __all__ = [
 ]
 
 
-async def login_shell_config_override(
-    *,
-    thread_id: str | None = None,
-    label: str | None = None,
-    agent_name: str | None = None,
-    include_super_agent_identity: bool = True,
-) -> JsonObject:
+async def login_shell_config_override() -> JsonObject:
     env = await login_shell_environment()
     set_values = {key: value for key in ["PATH", "SHELL", "HOME", "USER", "LOGNAME"] if (value := env.get(key))}
     return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
@@ -276,6 +276,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         self._permission_callback = permission_callback
         self._permission_callback_tasks: set[asyncio.Task[None]] = set()
         self._permission_decision_tasks: set[asyncio.Task[None]] = set()
+        self._merge_session_tasks: set[asyncio.Task[None]] = set()
 
     async def status(self) -> JsonObject:
         ready = await self.check_ready()
@@ -350,7 +351,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         agent_name = super_agent_label(input_data.get("agentName"))
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
-            "config": await login_shell_config_override(include_super_agent_identity=False),
+            "config": await login_shell_config_override(),
             **self.permission_overrides(input_data),
         }
         if developer_instructions := with_super_agent_identity_instructions(
@@ -410,11 +411,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         await self.ensure_connected()
         params: JsonObject = {
             "threadId": thread_id,
-            "config": await login_shell_config_override(
-                thread_id=thread_id,
-                label=label,
-                agent_name=agent_name,
-            ),
+            "config": await login_shell_config_override(),
         }
         if identity_instructions := with_super_agent_identity_instructions(
             developer_instructions,
@@ -530,11 +527,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "cwd": input_data.get("cwd") or (session.cwd if session else None) or str(Path.home()),
             "serviceTier": input_data.get("serviceTier") or "standard",
             **self.permission_overrides(input_data),
-            "config": await login_shell_config_override(
-                thread_id=thread_id,
-                label=label,
-                agent_name=agent_name,
-            ),
+            "config": await login_shell_config_override(),
             "collaborationMode": collaboration_mode(
                 mode,
                 str(model),
@@ -613,19 +606,16 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 "lastStatus": status,
                 "lastUsefulMessage": text_preview(result),
                 "turns": {
-                    turn_id: {
-                        "turnId": turn_id,
-                        "status": status,
-                        "mode": mode,
-                        "reasoningEffort": reasoning_effort,
-                        "startedAt": turn.started_at,
-                        "updatedAt": now,
-                        "finishedAt": turn.finished_at,
-                        "promptPreview": preview_text(str(input_data["prompt"])),
-                        "lastUsefulMessage": text_preview(result),
-                        "pendingRequestIds": [request.id for request in turn.pending_requests],
-                        "eventCount": len(turn.events),
-                    }
+                    turn_id: turn_patch(
+                        turn_id,
+                        status,
+                        turn=turn,
+                        mode=mode,
+                        reasoning_effort=reasoning_effort,
+                        updated_at=now,
+                        prompt_preview=preview_text(str(input_data["prompt"])),
+                        last_useful_message=text_preview(result),
+                    )
                 },
             },
             clear_fields=clear_fields,
@@ -745,16 +735,13 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 "lastStatus": "cancelled",
                 "lastFinishedAt": turn.finished_at,
                 "turns": {
-                    turn_id: {
-                        "turnId": turn_id,
-                        "status": "cancelled",
-                        "reasoningEffort": turn.reasoning_effort,
-                        "startedAt": turn.started_at,
-                        "updatedAt": turn.finished_at,
-                        "finishedAt": turn.finished_at,
-                        "eventCount": len(turn.events),
-                        "pendingRequestIds": [],
-                    }
+                    turn_id: turn_patch(
+                        turn_id,
+                        "cancelled",
+                        turn=turn,
+                        updated_at=turn.finished_at,
+                        pending_request_ids=[],
+                    )
                 },
             },
             clear_fields=["activeTurnId"],
@@ -905,31 +892,29 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             resolved = await self.resolve_session(required_label(input_data), input_data)
         except ValueError:
             target = await self.resolve_queue_target(input_data)
-            return await self.start_or_queue_turn(
-                target,
-                without_none(
-                    {
-                        "label": target.session.label,
-                        "agentName": target.session.agent_name,
-                        **extras,
-                        "prompt": prompt,
-                    }
-                ),
-            )
+            return await self._start_or_queue_prompt(target, prompt, extras)
         turn_id = input_data.turn_id or resolved.turn_id
         if not turn_id or not is_active_status(resolved.status):
-            return await self.start_or_queue_turn(
-                resolved,
-                without_none(
-                    {
-                        "label": resolved.session.label,
-                        "agentName": resolved.session.agent_name,
-                        **extras,
-                        "prompt": prompt,
-                    }
-                ),
-            )
+            return await self._start_or_queue_prompt(resolved, prompt, extras)
         return await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
+
+    async def _start_or_queue_prompt(
+        self,
+        target: ResolvedSession,
+        prompt: str,
+        extras: JsonObject,
+    ) -> JsonObject:
+        return await self.start_or_queue_turn(
+            target,
+            without_none(
+                {
+                    "label": target.session.label,
+                    "agentName": target.session.agent_name,
+                    **extras,
+                    "prompt": prompt,
+                }
+            ),
+        )
 
     async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         resolved = await self.resolve_session(required_label(input_data), input_data)
@@ -959,9 +944,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             int((time.monotonic() - started) * 1000),
         )
         turn_id = input_data.turn_id or resolved.turn_id
-        thread_is_active = is_active_status(resolved.status) or self.thread_has_active_turn(
-            resolved.session.thread_id
-        )
+        thread_is_active = is_active_status(resolved.status) or self.thread_has_active_turn(resolved.session.thread_id)
         if turn_id and not turn_id.startswith("q_") and thread_is_active:
             prompt = str(turn_input.get("prompt") or "")
             try:
@@ -976,15 +959,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                     turn_id,
                     resolved.status,
                 )
-                result = await self.start_turn(
-                    {"cwd": resolved.session.cwd, **turn_input, "threadId": resolved.session.thread_id}
-                )
-                return {
-                    **result,
-                    "queued": False,
-                    "startedImmediately": True,
-                    "drain": "started_after_stale_steer",
-                }
+                return await self._start_turn_immediately(resolved, turn_input, drain="started_after_stale_steer")
             return {
                 **result,
                 "queued": False,
@@ -1000,15 +975,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 turn_id,
                 resolved.status,
             )
-            result = await self.start_turn(
-                {"cwd": resolved.session.cwd, **turn_input, "threadId": resolved.session.thread_id}
-            )
-            return {
-                **result,
-                "queued": False,
-                "startedImmediately": True,
-                "drain": "started_without_active_turn_id",
-            }
+            return await self._start_turn_immediately(resolved, turn_input, drain="started_without_active_turn_id")
         return await self.start_or_queue_turn(resolved, turn_input)
 
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
@@ -1018,8 +985,17 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
     async def start_or_queue_turn(self, target: ResolvedSession, turn_input: JsonObject) -> JsonObject:
         if is_active_status(target.status) or self.thread_has_active_turn(target.session.thread_id):
             return await self.enqueue_turn(target, turn_input)
+        return await self._start_turn_immediately(target, turn_input, drain="started_immediately")
+
+    async def _start_turn_immediately(
+        self,
+        target: ResolvedSession,
+        turn_input: JsonObject,
+        *,
+        drain: str,
+    ) -> JsonObject:
         result = await self.start_turn({"cwd": target.session.cwd, **turn_input, "threadId": target.session.thread_id})
-        return {**result, "queued": False, "startedImmediately": True, "drain": "started_immediately"}
+        return {**result, "queued": False, "startedImmediately": True, "drain": drain}
 
     async def enqueue_turn(self, target: ResolvedSession, turn_input: JsonObject) -> JsonObject:
         queued, position = append_queued_turn(
