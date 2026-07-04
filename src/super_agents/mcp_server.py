@@ -738,6 +738,11 @@ async def run_stdio() -> None:
 
 
 def main() -> None:
+    if "--version" in sys.argv[1:]:
+        from ._package_version import package_version
+
+        print(f"super-agents {package_version()}")
+        return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     print("Super Agents MCP running on stdio.", file=sys.stderr)
     asyncio.run(run_stdio())

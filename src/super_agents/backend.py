@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._package_version import package_version
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     BACKEND_ALIASES,
     BACKENDS,
@@ -83,6 +84,9 @@ def _format_env_value(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="super-agents-backend")
+    parser.add_argument(
+        "--version", action="version", version=f"super-agents {package_version()}"
+    )
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
