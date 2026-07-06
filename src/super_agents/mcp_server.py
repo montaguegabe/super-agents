@@ -108,8 +108,51 @@ def create_server(client: SuperAgentsClient | None = None) -> Server:
     return server
 
 
+async def _team_activity_handler(input_data: dict[str, Any]) -> dict[str, Any]:
+    from super_agents.local_coder_api import fetch_team_activity, filter_team_activity
+
+    data = await fetch_team_activity()
+    if not data.get("supported", True):
+        return {
+            "available": False,
+            "note": (
+                "Team activity is not available right now "
+                f"({data.get('error', 'unknown reason')}). Proceed normally."
+            ),
+        }
+    return filter_team_activity(
+        data,
+        repo=input_data.get("repo"),
+        include_offline=bool(input_data.get("includeOffline")),
+    )
+
+
 def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
     return [
+        ToolDefinition(
+            name="team_activity",
+            title="Teammate Agent Activity",
+            description=(
+                "See what your teammates' coding agents are working on right now: "
+                "thread names/statuses and which repos + file paths they currently "
+                "have modified. Check this before editing shared files to avoid "
+                "conflicts. Read-only."
+            ),
+            input_schema=object_schema(
+                {
+                    "repo": {
+                        "type": "string",
+                        "description": "Only show activity touching this repo name.",
+                    },
+                    "includeOffline": {
+                        "type": "boolean",
+                        "description": "Include teammates not seen in the last two minutes.",
+                    },
+                }
+            ),
+            annotations={"readOnlyHint": True, "idempotentHint": True},
+            handler=_team_activity_handler,
+        ),
         ToolDefinition(
             name="codex_app_server_status",
             title="Super Agents Backend Status",

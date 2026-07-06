@@ -2331,6 +2331,7 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     tools = build_tools(CodexAppServerClient("ws://127.0.0.1:1"))
     names = [tool.name for tool in tools]
     assert names == [
+        "team_activity",
         "codex_app_server_status",
         "super_agents_start",
         "super_agents_resume",
