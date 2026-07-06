@@ -134,7 +134,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             title="Teammate Agent Activity",
             description=(
                 "See what your teammates' coding agents are working on right now: "
-                "thread names/statuses and which repos + file paths they currently "
+                "thread names/statuses, a short task summary, and which repos + file paths they currently "
                 "have modified. Check this before editing shared files to avoid "
                 "conflicts. Read-only."
             ),
