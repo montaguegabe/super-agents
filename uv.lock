@@ -764,6 +764,7 @@ name = "super-agents"
 version = "0.1.5"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "mcp" },
     { name = "websockets" },
 ]
@@ -781,6 +782,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.12.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
