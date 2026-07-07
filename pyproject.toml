@@ -11,7 +11,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "mcp>=1.12.4",
-  "openapprovals>=0.1.0",
+  "open-approvals>=0.1.0",
   "websockets>=12.0",
 ]
 
@@ -56,4 +56,4 @@ exclude-newer = "10 days"
 index-strategy = "first-index"
 
 [tool.uv.sources]
-openapprovals = { path = "../openapprovals", editable = true }
+open-approvals = { path = "../open-approvals", editable = true }

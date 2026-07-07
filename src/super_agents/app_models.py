@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from openapprovals import ApprovalRequest
+from open_approvals import ApprovalRequest
 
 from .app_formatting import preview_text, without_none
 from .state import JsonObject, SessionRecord, StoredStatus, TrackedStatus
@@ -12,7 +12,7 @@ from .state import JsonObject, SessionRecord, StoredStatus, TrackedStatus
 LabelResolutionPrefer = Literal["latest_active", "latest_any"]
 Mode = Literal["default", "plan"]
 
-# A pending app-server request is exactly an openapprovals request; the alias
+# A pending app-server request is exactly an open-approvals request; the alias
 # keeps the historical name for existing imports.
 PendingServerRequest = ApprovalRequest
 
