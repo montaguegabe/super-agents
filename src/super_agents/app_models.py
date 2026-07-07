@@ -4,27 +4,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
+from openapprovals import ApprovalRequest
+
 from .app_formatting import preview_text, without_none
 from .state import JsonObject, SessionRecord, StoredStatus, TrackedStatus
 
 LabelResolutionPrefer = Literal["latest_active", "latest_any"]
 Mode = Literal["default", "plan"]
 
-
-@dataclass(slots=True)
-class PendingServerRequest:
-    id: str | int
-    method: str
-    params: JsonObject
-    received_at: str
-
-    def to_json(self) -> JsonObject:
-        return {
-            "id": self.id,
-            "method": self.method,
-            "params": self.params,
-            "receivedAt": self.received_at,
-        }
+# A pending app-server request is exactly an openapprovals request; the alias
+# keeps the historical name for existing imports.
+PendingServerRequest = ApprovalRequest
 
 
 PermissionRequestCallback = Callable[[PendingServerRequest], JsonObject | Awaitable[JsonObject | None] | None]

@@ -331,6 +331,19 @@ wheels = [
 ]
 
 [[package]]
+name = "openapprovals"
+source = { editable = "../openapprovals" }
+
+[package.metadata]
+requires-dist = [
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.5" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.1.1" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.10" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "packaging"
 version = "26.2"
 source = { registry = "https://pypi.org/simple" }
@@ -765,6 +778,7 @@ version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "openapprovals" },
     { name = "websockets" },
 ]
 
@@ -782,6 +796,7 @@ dev = [
 requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.1.0" },
     { name = "mcp", specifier = ">=1.12.4" },
+    { name = "openapprovals", editable = "../openapprovals" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
