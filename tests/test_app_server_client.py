@@ -1858,6 +1858,71 @@ async def test_permission_callback_can_answer_mcp_elicitation_request(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_permission_callback_normalizes_elicitation_decision(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    server_request_id = "elicitation-1"
+
+    async def after_message(message: dict[str, Any], websocket: Any) -> None:
+        if message.get("method") == "turn/start":
+            await websocket.send(
+                json.dumps(
+                    {
+                        "id": server_request_id,
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "threadId": "thread-elicitation",
+                            "turnId": "turn-elicitation",
+                            "serverName": "super_agents",
+                        },
+                    }
+                )
+            )
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {
+                "threadId": "thread-elicitation",
+                "cwd": message["params"]["cwd"],
+                "model": "gpt-test",
+            }
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-elicitation"}
+        return {"ok": True}
+
+    async def permission_callback(
+        _request: app_server_client.PendingServerRequest,
+    ) -> dict[str, Any]:
+        return {"decision": "accept"}
+
+    server = await start_fake_app_server(captured, handler, after_message)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    client.register_permission_callback(permission_callback)
+    try:
+        await client.start_thread({"label": "elicitation"})
+        await client.start_turn(
+            {
+                "threadId": "thread-elicitation",
+                "label": "elicitation",
+                "prompt": "work",
+            }
+        )
+
+        expected = {
+            "id": server_request_id,
+            "result": {"action": "accept", "content": None, "_meta": None},
+        }
+        for _ in range(20):
+            if expected in captured:
+                break
+            await asyncio.sleep(0.01)
+
+        assert expected in captured
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_permission_callback_ignores_non_approval_requests(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
     received: list[dict[str, Any]] = []

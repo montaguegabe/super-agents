@@ -45,6 +45,7 @@ from .app_permissions import (
     DEFAULT_APPROVAL_REQUESTS_FILE,
     clear_shared_permission_request,
     is_permission_request,
+    normalize_permission_response,
     read_permission_store,
     record_shared_permission_request,
     shared_permission_requests,
@@ -753,7 +754,13 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         await self.ensure_connected()
         if request_id not in self._pending_server_requests:
             raise ValueError(f"No pending app-server request found for id {request_id}.")
-        await self.send({"id": request_id, "result": result})
+        request = self._pending_server_requests[request_id]
+        await self.send(
+            {
+                "id": request_id,
+                "result": normalize_permission_response(request, result),
+            }
+        )
         request = self._pending_server_requests.pop(request_id)
         self.remove_pending_request_from_turn(request_id)
         clear_shared_permission_request(request_id, self.approval_requests_file)
