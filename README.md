@@ -214,6 +214,14 @@ Super Agents does not silently approve app-server callbacks. If plan mode asks a
 question or a sandboxed turn asks for approval, inspect the pending request and
 answer it explicitly with `codex_answer_request`.
 
+The Claude Code backend supports the same approval flow. By default Claude
+sessions run with the `bypassPermissions` permission mode; set
+`SUPER_AGENTS_CLAUDE_PERMISSION_MODE` to a gated mode (for example
+`acceptEdits` or `default`) and the SDK's permission prompts are recorded as
+`claudeCode/requestApproval` requests in the shared open-approvals queue,
+reported by `codex_app_server_status`, and answerable with
+`codex_answer_request` or any open-approvals approver surface.
+
 ## Tools
 
 The MCP server exposes these tools:

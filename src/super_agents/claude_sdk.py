@@ -48,6 +48,11 @@ from super_agents.claude_options import (
 from super_agents.claude_options import (
     claude_effort as _claude_effort,
 )
+from super_agents.claude_permissions import (
+    ClaudePermissionGate,
+    can_use_tool_handler,
+    decision_from_answer,
+)
 from super_agents.claude_prompts import (
     combine_developer_instructions as _combine_developer_instructions,
 )
@@ -81,6 +86,7 @@ class ClaudeAgentSdkClient:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
+        self._permission_gate = ClaudePermissionGate()
 
     async def status(self) -> JsonObject:
         sessions = self.store.list_sessions(include_inactive=True)
@@ -94,7 +100,9 @@ class ClaudeAgentSdkClient:
                 "sdkError": error,
                 "dataStore": str(self.store.path),
                 "pendingRequests": [],
-                "pendingPermissionRequests": [],
+                "pendingPermissionRequests": [
+                    request.to_json() for request in self._permission_gate.pending_requests()
+                ],
                 "queuedTurns": [turn.to_json() for session in sessions for turn in self.store.queued_turns(session.id)],
                 "activeTurns": [self._status_item(session) for session in sessions if is_active_status(session.status)],
             }
@@ -194,8 +202,21 @@ class ClaudeAgentSdkClient:
             "threadId": renamed.id,
         }
 
+    async def ensure_connected(self) -> None:
+        """SDK sessions connect lazily per thread; nothing to do eagerly."""
+        return None
+
+    def pending_permission_requests(self) -> list[Any]:
+        return self._permission_gate.pending_requests()
+
     async def answer_request(self, request_id: str | int, result: JsonObject) -> JsonObject:
-        return self._unsupported("codex_answer_request", requestId=request_id, result=result)
+        decision = decision_from_answer(result)
+        if decision is None:
+            raise ValueError(f"Unsupported approval answer for request {request_id}: {result}")
+        request = self._permission_gate.resolve(request_id, decision)
+        if request is None:
+            raise ValueError(f"No pending permission request found for id {request_id}.")
+        return {"answered": True, "backend": self.backend, "request": request.to_json()}
 
     async def sessions(self) -> list[JsonObject]:
         return [self._session_view(session) for session in self.store.list_sessions(include_inactive=True)]
@@ -519,6 +540,12 @@ class ClaudeAgentSdkClient:
             model,
             effective_effort,
             resume=session.backend_session_id,
+            can_use_tool=can_use_tool_handler(
+                sdk,
+                self._permission_gate,
+                session.id,
+                lambda session_id=session.id: self._active_turn_id(session_id),
+            ),
         )
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
@@ -650,6 +677,12 @@ class ClaudeAgentSdkClient:
 
     def _session_is_busy(self, session: Session) -> bool:
         return bool(session.active_turn_id or session.status == "running")
+
+    def _active_turn_id(self, session_id: str) -> str | None:
+        try:
+            return self.store.get_session(session_id).active_turn_id
+        except KeyError:
+            return None
 
     def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
         prompt = str(turn_input["prompt"])
