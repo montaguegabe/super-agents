@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from .app_formatting import as_object
 from .app_models import PendingServerRequest
@@ -70,8 +70,47 @@ def write_shared_permission_decision(
     return True
 
 
+def permission_response_for_request(
+    request: JsonObject | PendingServerRequest | Any,
+    decision: Literal["accept", "decline", "cancel"],
+) -> JsonObject:
+    method = _permission_request_method(request)
+    if method == "mcpServer/elicitation/request":
+        return {"action": decision, "content": None, "_meta": None}
+    return {"decision": decision}
+
+
+def normalize_permission_response(
+    request: JsonObject | PendingServerRequest | Any,
+    result: JsonObject,
+) -> JsonObject:
+    method = _permission_request_method(request)
+    decision = result.get("decision")
+    if (
+        method == "mcpServer/elicitation/request"
+        and "action" not in result
+        and decision in {"accept", "decline", "cancel"}
+    ):
+        return permission_response_for_request(
+            request,
+            cast(Literal["accept", "decline", "cancel"], decision),
+        )
+    return result
+
+
+def _permission_request_method(request: JsonObject | PendingServerRequest | Any) -> str:
+    if isinstance(request, PendingServerRequest):
+        return request.method
+    if isinstance(request, dict):
+        return str(request.get("method") or "")
+    return str(getattr(request, "method", "") or "")
+
+
 def pop_shared_permission_decision(request_id: str | int, path: str | Path | None = None) -> JsonObject | None:
     store = read_permission_store(path)
+    requests = as_object(store.get("requests"))
+    request = requests.get(str(request_id))
+    method = str(request.get("method") or "") if isinstance(request, dict) else ""
     decisions = as_object(store.get("decisions"))
     raw_decision = decisions.pop(str(request_id), None)
     if not isinstance(raw_decision, dict):
@@ -79,10 +118,13 @@ def pop_shared_permission_decision(request_id: str | int, path: str | Path | Non
     decision = raw_decision.get("decision")
     if decision not in {"accept", "decline", "cancel"}:
         return None
-    store["requests"] = as_object(store.get("requests"))
+    store["requests"] = requests
     store["decisions"] = decisions
     write_permission_store(path, store)
-    return {"decision": decision}
+    return permission_response_for_request(
+        request if isinstance(request, dict) else {"method": method},
+        decision,
+    )
 
 
 def read_permission_store(path: str | Path | None = None) -> JsonObject:

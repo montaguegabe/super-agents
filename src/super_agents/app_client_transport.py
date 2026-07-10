@@ -15,6 +15,7 @@ from .app_formatting import as_object, text_preview
 from .app_models import PendingServerRequest, TurnState
 from .app_permissions import (
     is_permission_request,
+    normalize_permission_response,
     pop_shared_permission_decision,
     record_shared_permission_request,
 )
@@ -245,7 +246,10 @@ class TransportClientMixin:
                 return
             if pending_request.id not in self._pending_server_requests:
                 return
-            await self.answer_request(pending_request.id, result)
+            await self.answer_request(
+                pending_request.id,
+                normalize_permission_response(pending_request, result),
+            )
         except Exception:
             logger.exception(
                 "Super Agents permission callback failed request_id=%s method=%s.",
