@@ -82,7 +82,7 @@ class ClaudeAgentSdkClient:
         self.store = store or Store()
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
-        self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
+        self._sdk_client_efforts: dict[str, tuple[str | None, str | None, str | None]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
@@ -118,6 +118,7 @@ class ClaudeAgentSdkClient:
             name,
             agent_name=agent_name,
         )
+        permission_mode = _optional_str(input_data.get("permissionMode"))
         existing = self.store.get_by_name(name)
         if existing is not None:
             effective_agent_name = agent_name or existing.agent_name
@@ -132,6 +133,7 @@ class ClaudeAgentSdkClient:
                 agent_name=effective_agent_name,
                 developer_instructions=effective_developer_instructions,
                 model=_optional_str(input_data.get("model")) or existing.model or self._default_model(),
+                permission_mode=permission_mode or existing.permission_mode,
                 status="waiting",
                 active_turn_id=None,
                 last_observed_state="Claude Code thread refreshed",
@@ -144,6 +146,7 @@ class ClaudeAgentSdkClient:
             developer_instructions=developer_instructions,
             model=_optional_str(input_data.get("model")) or self._default_model(),
             command=["claude-agent-sdk"],
+            permission_mode=permission_mode,
         )
         return {"backend": self.backend, "threadId": session.id, "session": session.to_json()}
 
@@ -375,6 +378,7 @@ class ClaudeAgentSdkClient:
         model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
         reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
         service_tier = _optional_str(turn_input.get("serviceTier"))
+        permission_mode = _optional_str(turn_input.get("permissionMode")) or session.permission_mode
         turn = self.store.create_turn(
             session.id,
             prompt,
@@ -391,7 +395,9 @@ class ClaudeAgentSdkClient:
             last_turn_id=turn.id,
             last_observed_state=last_observed_state,
         )
-        self._spawn_turn_task(session.id, turn.id, sdk_prompt, model, reasoning_effort, service_tier, sdk)
+        self._spawn_turn_task(
+            session.id, turn.id, sdk_prompt, model, reasoning_effort, service_tier, sdk, permission_mode
+        )
         return turn
 
     def _spawn_turn_task(
@@ -403,10 +409,11 @@ class ClaudeAgentSdkClient:
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
+        permission_mode: str | None = None,
     ) -> None:
         """Run a turn in the background, retaining the task so it cannot be garbage collected."""
         task = asyncio.create_task(
-            self._run_turn(session_id, turn_id, prompt, model, reasoning_effort, service_tier, sdk)
+            self._run_turn(session_id, turn_id, prompt, model, reasoning_effort, service_tier, sdk, permission_mode)
         )
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
@@ -420,6 +427,7 @@ class ClaudeAgentSdkClient:
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
+        permission_mode: str | None = None,
     ) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock:
@@ -434,6 +442,7 @@ class ClaudeAgentSdkClient:
                     reasoning_effort,
                     service_tier,
                     sdk,
+                    permission_mode,
                 )
                 last_useful_message = ""
                 await sdk_client.query(prompt)
@@ -527,10 +536,15 @@ class ClaudeAgentSdkClient:
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
+        permission_mode: str | None = None,
     ) -> Any:
         effective_effort = _claude_effort(reasoning_effort, service_tier)
         existing = self._sdk_clients.get(session.id)
-        if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
+        if existing is not None and self._sdk_client_efforts.get(session.id) == (
+            effective_effort,
+            service_tier,
+            permission_mode,
+        ):
             if model and hasattr(existing, "set_model"):
                 await existing.set_model(model)
             return existing
@@ -546,11 +560,12 @@ class ClaudeAgentSdkClient:
                 session.id,
                 lambda session_id=session.id: self._active_turn_id(session_id),
             ),
+            permission_mode=permission_mode,
         )
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
         self._sdk_clients[session.id] = client
-        self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
+        self._sdk_client_efforts[session.id] = (effective_effort, service_tier, permission_mode)
         return client
 
     def _schedule_queue_drain(self, session_id: str) -> None:
@@ -589,6 +604,7 @@ class ClaudeAgentSdkClient:
                 turn.reasoning_effort,
                 turn.service_tier,
                 sdk,
+                session.permission_mode,
             )
             return
 

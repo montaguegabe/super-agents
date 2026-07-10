@@ -27,12 +27,16 @@ CLAUDE_SERVICE_TIER_EFFORTS = {
 CLAUDE_SDK_ENV_OVERRIDES = {"ANTHROPIC_API_KEY": ""}
 
 
-def resolve_permission_mode() -> str:
-    """Permission mode for Claude sessions, overridable via the environment.
+def resolve_permission_mode(explicit: str | None = None) -> str:
+    """Permission mode for Claude sessions.
 
-    Gated modes (anything other than ``bypassPermissions``) route the SDK's
-    permission prompts through the shared open-approvals queue.
+    A per-launch explicit mode wins, then the environment override, then the
+    package default. Gated modes (anything other than ``bypassPermissions``)
+    route the SDK's permission prompts through the shared open-approvals
+    queue.
     """
+    if explicit and explicit.strip():
+        return explicit.strip()
     return os.environ.get(CLAUDE_PERMISSION_MODE_ENV, "").strip() or CLAUDE_PERMISSION_MODE
 
 
@@ -44,9 +48,10 @@ def agent_options(
     *,
     resume: str | None,
     can_use_tool: Any | None = None,
+    permission_mode: str | None = None,
 ) -> Any:
     managed_options = managed_claude_config_options()
-    permission_mode = resolve_permission_mode()
+    permission_mode = resolve_permission_mode(permission_mode)
     kwargs: JsonObject = {
         "cwd": cwd,
         "permission_mode": permission_mode,

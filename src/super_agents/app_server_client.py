@@ -115,6 +115,7 @@ from .app_time import (
     turn_key,
     turn_recency,
 )
+from .backend_config import CODEX_BACKEND
 from .defaults import default_super_agents_model
 from .item_tags import (
     report_tags,
@@ -245,6 +246,8 @@ def default_model_from_environment() -> str:
 
 
 class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClientMixin):
+    backend = CODEX_BACKEND
+
     def __init__(
         self,
         ws_url: str | None = None,

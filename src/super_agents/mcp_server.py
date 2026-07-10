@@ -17,12 +17,14 @@ from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
 from .app_server_client import LabelQueryInput
-from .backend_clients import SuperAgentsClient, client_from_environment
+from .backend_clients import SuperAgentsClient
+from .backend_config import normalize_backend
 from .defaults import (
     default_service_tier,
     default_super_agents_model,
     default_super_agents_reasoning_effort,
 )
+from .multi_backend import MultiBackendClient
 from .state import without_none
 
 JsonObject = dict[str, Any]
@@ -30,10 +32,12 @@ Handler = Callable[[JsonObject], Awaitable[Any]]
 logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
-    "Control Openbase Super Agents threads asynchronously. A Super Agents thread may run on the configured "
-    "backend, including Codex-compatible app-server sessions or Claude Code Agent SDK sessions. Tools start, "
-    "inspect, steer, cancel, and answer callbacks; they do not wait for turns to finish. Do not silently approve "
-    "app-server callbacks; use codex_answer_request when a callback is pending."
+    "Control Openbase Super Agents threads asynchronously. Each thread launch may pick its coding backend — "
+    "Codex-compatible app-server sessions or Claude Code Agent SDK sessions — via the optional backend "
+    "parameter on super_agents_start; without it the configured default backend is used, and threads on "
+    "different backends can run side by side. Tools start, inspect, steer, cancel, and answer callbacks; they "
+    "do not wait for turns to finish. Do not silently approve app-server callbacks; use codex_answer_request "
+    "when a callback is pending."
 )
 
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
@@ -61,7 +65,7 @@ class ToolDefinition:
 
 
 def create_server(client: SuperAgentsClient | None = None) -> Server:
-    app_client = client or client_from_environment()
+    app_client = client or MultiBackendClient()
     server = Server("super-agents", instructions=INSTRUCTIONS)
     tool_by_name = {tool.name: tool for tool in build_tools(app_client)}
 
@@ -124,7 +128,10 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_start",
             title="Start Super Agents Thread",
-            description="Create a named Super Agents thread on the configured backend.",
+            description=(
+                "Create a named Super Agents thread. Each launch may pick its own coding backend via the "
+                "backend parameter; the configured default backend is used when omitted."
+            ),
             input_schema=object_schema(
                 {
                     "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
@@ -136,6 +143,13 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                     "agentName": {
                         "type": "string",
                         "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
+                    },
+                    "backend": {
+                        "type": "string",
+                        "description": (
+                            'Coding backend for this launch: "codex", "openbase_cloud", or "claude_code". '
+                            "Defaults to the configured backend; launches may mix backends freely."
+                        ),
                     },
                     **permission_option_properties(include_sandbox=True),
                 },
@@ -381,7 +395,9 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             ),
             handler=lambda input_data: client.start_turn_by_label(
                 clean_name_query_input(input_data),
-                clean_start_turn_by_name_input(input_data, backend=client_backend(client)),
+                clean_start_turn_by_name_input(
+                    input_data, backend=optional_backend(input_data) or client_backend(client)
+                ),
             ),
         ),
         ToolDefinition(
@@ -412,7 +428,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             ),
             handler=lambda input_data: client.queue_turn_by_label(
                 clean_name_query_input(input_data),
-                clean_queue_turn_input(input_data, backend=client_backend(client)),
+                clean_queue_turn_input(input_data, backend=optional_backend(input_data) or client_backend(client)),
             ),
         ),
         ToolDefinition(
@@ -440,6 +456,13 @@ def object_schema(properties: JsonObject, required: list[str] | None = None) -> 
 def name_query_properties(include_ids: bool = True, include_output_options: bool = True) -> JsonObject:
     properties: JsonObject = {
         "name": {"type": "string"},
+        "backend": {
+            "type": "string",
+            "description": (
+                'Pin the operation to one coding backend ("codex", "openbase_cloud", or "claude_code"). '
+                "When omitted, the owning backend is found automatically."
+            ),
+        },
         "cwd": {"type": "string"},
         "status": {"type": "string", "enum": ["running", "waiting", "completed", "failed", "cancelled", "unknown"]},
         "favorite": {
@@ -494,6 +517,13 @@ def permission_option_properties(*, include_sandbox: bool = False, include_sandb
             "type": "string",
             "description": 'Codex sandbox policy override, e.g. "danger-full-access".',
         },
+        "permissionMode": {
+            "type": "string",
+            "description": (
+                'Claude Code permission mode override, e.g. "bypassPermissions" (full access) or '
+                '"default" (tool permissions gated through the shared approval queue).'
+            ),
+        },
     }
     if include_sandbox:
         properties["sandbox"] = {
@@ -533,9 +563,11 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
             "agentName": optional_string(input_data, "agentName"),
+            "backend": optional_backend(input_data),
             "approvalPolicy": optional_string(input_data, "approvalPolicy"),
             "sandbox": optional_string(input_data, "sandbox"),
             "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
+            "permissionMode": optional_string(input_data, "permissionMode"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
@@ -568,6 +600,7 @@ def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> J
             "approvalPolicy": optional_string(input_data, "approvalPolicy"),
             "sandboxType": optional_string(input_data, "sandboxType"),
             "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
+            "permissionMode": optional_string(input_data, "permissionMode"),
             "_mcpCallId": optional_string(input_data, "_mcpCallId"),
         }
     )
@@ -610,6 +643,7 @@ def default_super_agent_instructions_path() -> Path:
 def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:
     return LabelQueryInput(
         label=optional_string(input_data, "name") or optional_string(input_data, "label"),
+        backend=optional_backend(input_data),
         cwd=optional_string(input_data, "cwd"),
         status=optional_string(input_data, "status"),
         favorite=optional_boolean_or_none(input_data, "favorite"),
@@ -677,6 +711,11 @@ def required_request_id(value: JsonObject) -> str | int:
 def optional_string(value: JsonObject, key: str) -> str | None:
     result = value.get(key)
     return result if isinstance(result, str) and result else None
+
+
+def optional_backend(value: JsonObject, key: str = "backend") -> str | None:
+    result = optional_string(value, key)
+    return normalize_backend(result) if result else None
 
 
 def optional_boolean_or_none(value: JsonObject, key: str) -> bool | None:

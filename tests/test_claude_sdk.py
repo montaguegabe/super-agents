@@ -696,6 +696,31 @@ async def test_claude_sdk_queue_on_idle_session_starts_immediately(
     assert store.queued_turns(result["threadId"]) == []
 
 
+@pytest.mark.asyncio
+async def test_claude_sdk_applies_per_launch_permission_mode(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "locked", "cwd": str(tmp_path), "permissionMode": "default"})
+
+    result = await client.start_turn_by_label(LabelQueryInput(label="locked"), {"prompt": "gated"})
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    assert store.get_session(started["threadId"]).permission_mode == "default"
+    kwargs = FakeClaudeSDKClient.options_seen[-1].kwargs
+    assert kwargs["permission_mode"] == "default"
+    assert "can_use_tool" in kwargs
+
+    # An explicit per-turn mode overrides the session-level mode.
+    result = await client.start_turn_by_label(
+        LabelQueryInput(label="locked"),
+        {"prompt": "unlocked", "permissionMode": "bypassPermissions"},
+    )
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    kwargs = FakeClaudeSDKClient.options_seen[-1].kwargs
+    assert kwargs["permission_mode"] == "bypassPermissions"
+    assert "can_use_tool" not in kwargs
+
+
 async def wait_for(predicate, timeout: float = 2.0) -> None:  # type: ignore[no-untyped-def]
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
