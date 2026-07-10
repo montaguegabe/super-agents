@@ -65,7 +65,12 @@ def managed_claude_config_options() -> JsonObject:
     config_dir = Path(config_dir_value).expanduser()
     options: JsonObject = {
         "env": {CLAUDE_CONFIG_DIR_ENV: str(config_dir)},
-        "setting_sources": ["project"],
+        # "user" scope resolves against CLAUDE_CONFIG_DIR (exported in "env"
+        # above), not the host's ~/.claude, so including it loads the managed
+        # config dir's skills/ and agents/ without leaking the host's personal
+        # settings into the session. Omitting "user" silently hides everything
+        # installed under CLAUDE_CONFIG_DIR that is user-scoped.
+        "setting_sources": ["user", "project"],
     }
 
     settings_path = config_dir / CLAUDE_SETTINGS_FILENAME

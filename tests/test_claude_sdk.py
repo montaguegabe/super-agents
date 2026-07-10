@@ -495,7 +495,7 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
         "effort": "high",
         "env": {"CLAUDE_CONFIG_DIR": str(config_dir), "ANTHROPIC_API_KEY": ""},
         "settings": str(settings_path),
-        "setting_sources": ["project"],
+        "setting_sources": ["user", "project"],
         "system_prompt": {"type": "file", "path": str(instructions_path)},
         "mcp_servers": mcp_servers,
     }
