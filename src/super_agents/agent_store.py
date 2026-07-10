@@ -31,6 +31,7 @@ class Session:
     last_observed_state: str | None = None
     last_useful_message: str | None = None
     backend_session_id: str | None = None
+    permission_mode: str | None = None
     last_exit_code: int | None = None
     log_path: str | None = None
     raw_log_path: str | None = None
@@ -51,6 +52,7 @@ class Session:
             "lastObservedState": self.last_observed_state,
             "lastUsefulMessage": self.last_useful_message,
             "backendSessionId": self.backend_session_id,
+            "permissionMode": self.permission_mode,
             "lastExitCode": self.last_exit_code,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
@@ -157,22 +159,20 @@ class Store:
                 create index if not exists turns_session_idx on turns(session_id, created_at);
                 """
             )
-            columns = {
-                row["name"] for row in conn.execute("pragma table_info(turns)").fetchall()
-            }
+            columns = {row["name"] for row in conn.execute("pragma table_info(turns)").fetchall()}
             if "reasoning_effort" not in columns:
                 conn.execute("alter table turns add column reasoning_effort text")
             if "service_tier" not in columns:
                 conn.execute("alter table turns add column service_tier text")
             if "last_useful_message" not in columns:
                 conn.execute("alter table turns add column last_useful_message text")
-            session_columns = {
-                row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()
-            }
+            session_columns = {row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()}
             if "developer_instructions" not in session_columns:
                 conn.execute("alter table sessions add column developer_instructions text")
             if "backend_session_id" not in session_columns:
                 conn.execute("alter table sessions add column backend_session_id text")
+            if "permission_mode" not in session_columns:
+                conn.execute("alter table sessions add column permission_mode text")
 
     def create_session(
         self,
@@ -183,6 +183,7 @@ class Store:
         developer_instructions: str | None = None,
         model: str | None = None,
         command: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> Session:
         now = iso_now()
         session_id = f"s_{uuid.uuid4().hex}"
@@ -196,8 +197,8 @@ class Store:
                 """
                 insert into sessions (
                     id, name, agent_name, developer_instructions, cwd, command_json, model, status,
-                    log_path, raw_log_path, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    permission_mode, log_path, raw_log_path, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -208,6 +209,7 @@ class Store:
                     command_to_json(resolved_command),
                     model,
                     "unknown",
+                    permission_mode,
                     log_path,
                     raw_log_path,
                     now,
@@ -271,6 +273,7 @@ class Store:
             "last_observed_state",
             "last_useful_message",
             "backend_session_id",
+            "permission_mode",
             "last_exit_code",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
@@ -423,9 +426,9 @@ def row_to_session(row: sqlite3.Row) -> Session:
     return Session(
         id=row["id"],
         name=row["name"],
-            agent_name=row["agent_name"],
-            developer_instructions=row["developer_instructions"],
-            cwd=row["cwd"],
+        agent_name=row["agent_name"],
+        developer_instructions=row["developer_instructions"],
+        cwd=row["cwd"],
         command=command_from_json(row["command_json"]),
         model=row["model"],
         status=row["status"],
@@ -435,6 +438,7 @@ def row_to_session(row: sqlite3.Row) -> Session:
         last_observed_state=row["last_observed_state"],
         last_useful_message=row["last_useful_message"],
         backend_session_id=row["backend_session_id"],
+        permission_mode=row["permission_mode"],
         last_exit_code=row["last_exit_code"],
         log_path=row["log_path"],
         raw_log_path=row["raw_log_path"],

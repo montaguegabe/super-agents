@@ -80,6 +80,7 @@ class QueuedTurn:
 @dataclass(slots=True)
 class LabelQueryInput:
     label: str | None = None
+    backend: str | None = None
     cwd: str | None = None
     group: str | None = None
     status: str | None = None

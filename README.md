@@ -96,7 +96,13 @@ Super Agents supports three backend modes:
 - `openbase_cloud`: Codex-compatible sessions through Openbase Cloud.
 - `claude_code`: Claude Code sessions using local Claude auth/billing.
 
-Switch modes without MCP:
+The configured mode is only the default. Each `super_agents_start` call may
+pass a `backend` parameter to launch that thread on a different backend, and
+threads on different backends run side by side; name- and id-addressed tools
+find the owning backend automatically (pass `backend` to pin a lookup when
+the same name exists on more than one).
+
+Switch the default mode without MCP:
 
 ```bash
 super-agents-backend use codex
@@ -222,13 +228,21 @@ sessions run with the `bypassPermissions` permission mode; set
 reported by `codex_app_server_status`, and answerable with
 `codex_answer_request` or any open-approvals approver surface.
 
+Permission posture is also a per-launch decision: `super_agents_start` and
+the turn tools accept `approvalPolicy`/`sandboxPolicy` (Codex) and
+`permissionMode` (Claude Code) overrides, so one thread can run fully
+sandboxed and gated while another runs with full access. A Claude thread
+started with a gated `permissionMode` keeps that mode for later turns unless
+a turn passes an explicit override.
+
 ## Tools
 
 The MCP server exposes these tools:
 
 - `codex_app_server_status`: check app-server readiness, websocket connection,
   pending callbacks, and active turns.
-- `super_agents_start`: create a named Codex app-server thread.
+- `super_agents_start`: create a named thread on any backend (optional
+  `backend` parameter; defaults to the configured backend).
 - `super_agents_resume`: resume a named thread.
 - `super_agents_read`: read a named or id-addressed thread.
 - `super_agents_rename`: rename a Codex app-server thread.

@@ -61,3 +61,10 @@ def client_from_environment() -> SuperAgentsClient:
 
         return ClaudeAgentSdkClient()
     return CodexAppServerClient()
+
+
+def multi_client_from_environment() -> SuperAgentsClient:
+    """Client that defaults to the configured backend but can launch on any."""
+    from super_agents.multi_backend import MultiBackendClient
+
+    return MultiBackendClient()
