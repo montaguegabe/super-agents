@@ -10,6 +10,7 @@ from typing import Any
 JsonObject = dict[str, Any]
 
 CLAUDE_PERMISSION_MODE = "bypassPermissions"
+CLAUDE_PERMISSION_MODE_ENV = "SUPER_AGENTS_CLAUDE_PERMISSION_MODE"
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 CLAUDE_CONFIG_FILENAME = ".claude.json"
 CLAUDE_SETTINGS_FILENAME = "settings.json"
@@ -26,6 +27,15 @@ CLAUDE_SERVICE_TIER_EFFORTS = {
 CLAUDE_SDK_ENV_OVERRIDES = {"ANTHROPIC_API_KEY": ""}
 
 
+def resolve_permission_mode() -> str:
+    """Permission mode for Claude sessions, overridable via the environment.
+
+    Gated modes (anything other than ``bypassPermissions``) route the SDK's
+    permission prompts through the shared open-approvals queue.
+    """
+    return os.environ.get(CLAUDE_PERMISSION_MODE_ENV, "").strip() or CLAUDE_PERMISSION_MODE
+
+
 def agent_options(
     sdk: Any,
     cwd: str,
@@ -33,14 +43,18 @@ def agent_options(
     reasoning_effort: str | None,
     *,
     resume: str | None,
+    can_use_tool: Any | None = None,
 ) -> Any:
     managed_options = managed_claude_config_options()
+    permission_mode = resolve_permission_mode()
     kwargs: JsonObject = {
         "cwd": cwd,
-        "permission_mode": CLAUDE_PERMISSION_MODE,
+        "permission_mode": permission_mode,
         **managed_options,
         "env": {**managed_options.get("env", {}), **CLAUDE_SDK_ENV_OVERRIDES},
     }
+    if can_use_tool is not None and permission_mode != "bypassPermissions":
+        kwargs["can_use_tool"] = can_use_tool
     if model:
         kwargs["model"] = model
     if reasoning_effort:
