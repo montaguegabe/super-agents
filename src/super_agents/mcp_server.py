@@ -25,6 +25,7 @@ from .defaults import (
     default_super_agents_reasoning_effort,
 )
 from .multi_backend import MultiBackendClient
+from .permission_guard import apply_permission_guard
 from .state import without_none
 
 JsonObject = dict[str, Any]
@@ -557,19 +558,21 @@ def client_backend(client: SuperAgentsClient) -> str | None:
 def clean_thread_input(input_data: JsonObject) -> JsonObject:
     cwd = optional_string(input_data, "cwd")
     validate_thread_cwd(cwd)
-    return without_none(
-        {
-            "cwd": cwd,
-            "developerInstructions": developer_instructions_or_default(input_data),
-            "name": optional_string(input_data, "name"),
-            "agentName": optional_string(input_data, "agentName"),
-            "backend": optional_backend(input_data),
-            "approvalPolicy": optional_string(input_data, "approvalPolicy"),
-            "sandbox": optional_string(input_data, "sandbox"),
-            "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
-            "permissionMode": optional_string(input_data, "permissionMode"),
-            "_mcpCallId": optional_string(input_data, "_mcpCallId"),
-        }
+    return apply_permission_guard(
+        without_none(
+            {
+                "cwd": cwd,
+                "developerInstructions": developer_instructions_or_default(input_data),
+                "name": optional_string(input_data, "name"),
+                "agentName": optional_string(input_data, "agentName"),
+                "backend": optional_backend(input_data),
+                "approvalPolicy": optional_string(input_data, "approvalPolicy"),
+                "sandbox": optional_string(input_data, "sandbox"),
+                "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
+                "permissionMode": optional_string(input_data, "permissionMode"),
+                "_mcpCallId": optional_string(input_data, "_mcpCallId"),
+            }
+        )
     )
 
 
@@ -583,26 +586,28 @@ def validate_thread_cwd(cwd: str | None) -> None:
 
 def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> JsonObject:
     prompt = required_string(input_data, "prompt")
-    return without_none(
-        {
-            "threadId": required_string(input_data, "threadId"),
-            "prompt": prompt,
-            "cwd": optional_string(input_data, "cwd"),
-            "mode": optional_mode(input_data, "mode") or "default",
-            "model": optional_string(input_data, "model") or default_super_agents_model(backend=backend),
-            "reasoningEffort": optional_string(input_data, "reasoningEffort")
-            or default_super_agents_reasoning_effort(),
-            "serviceTier": optional_string(input_data, "serviceTier") or default_service_tier(),
-            "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
-            "name": optional_string(input_data, "name"),
-            "label": optional_string(input_data, "name") or optional_string(input_data, "label"),
-            "agentName": optional_string(input_data, "agentName"),
-            "approvalPolicy": optional_string(input_data, "approvalPolicy"),
-            "sandboxType": optional_string(input_data, "sandboxType"),
-            "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
-            "permissionMode": optional_string(input_data, "permissionMode"),
-            "_mcpCallId": optional_string(input_data, "_mcpCallId"),
-        }
+    return apply_permission_guard(
+        without_none(
+            {
+                "threadId": required_string(input_data, "threadId"),
+                "prompt": prompt,
+                "cwd": optional_string(input_data, "cwd"),
+                "mode": optional_mode(input_data, "mode") or "default",
+                "model": optional_string(input_data, "model") or default_super_agents_model(backend=backend),
+                "reasoningEffort": optional_string(input_data, "reasoningEffort")
+                or default_super_agents_reasoning_effort(),
+                "serviceTier": optional_string(input_data, "serviceTier") or default_service_tier(),
+                "developerInstructions": developer_instructions_or_default(input_data, allow_explicit_null=True),
+                "name": optional_string(input_data, "name"),
+                "label": optional_string(input_data, "name") or optional_string(input_data, "label"),
+                "agentName": optional_string(input_data, "agentName"),
+                "approvalPolicy": optional_string(input_data, "approvalPolicy"),
+                "sandboxType": optional_string(input_data, "sandboxType"),
+                "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
+                "permissionMode": optional_string(input_data, "permissionMode"),
+                "_mcpCallId": optional_string(input_data, "_mcpCallId"),
+            }
+        )
     )
 
 

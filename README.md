@@ -235,6 +235,16 @@ sandboxed and gated while another runs with full access. A Claude thread
 started with a gated `permissionMode` keeps that mode for later turns unless
 a turn passes an explicit override.
 
+A supervising process can also impose a machine-wide **permission guard**: a
+JSON file (default `~/.super-agents/permission-guard.json`, overridable via
+`SUPER_AGENTS_PERMISSION_GUARD_FILE`) with `{"restricted": true}`. While
+restricted, launches through the MCP server cannot use permission bypasses —
+never-ask approval policies, full-access sandboxes, and `bypassPermissions`
+are downgraded to gated equivalents (explicitly stricter values are kept).
+The supervisor controls the file, so a prompt-injected agent cannot talk its
+way into a bypass. See `permission_guard.py` for the file shape and
+per-backend override fields.
+
 ## Tools
 
 The MCP server exposes these tools:
