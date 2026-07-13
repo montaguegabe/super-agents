@@ -102,6 +102,13 @@ threads on different backends run side by side; name- and id-addressed tools
 find the owning backend automatically (pass `backend` to pin a lookup when
 the same name exists on more than one).
 
+A host can also pin the launch default for one `super-agents-mcp` process
+without changing the machine-wide configuration: set
+`SUPER_AGENTS_DEFAULT_BACKEND` in that process's environment (for example in
+the MCP server registration's `env`). Explicit per-launch `backend`
+parameters still win. This lets each MCP host default new threads to its own
+backend type while other hosts on the same machine default differently.
+
 Switch the default mode without MCP:
 
 ```bash
@@ -206,6 +213,7 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | `SUPER_AGENTS_WS_URL` | `ws://127.0.0.1:4500` | Codex app-server websocket URL |
 | `OPENBASE_CODING_BACKEND` | unset | Backend mode: `codex`, `openbase_cloud`, or `claude_code` |
 | `OPENBASE_CODEX_BACKEND` | unset | Legacy fallback for `OPENBASE_CODING_BACKEND` |
+| `SUPER_AGENTS_DEFAULT_BACKEND` | unset | Per-process launch-default override; per-launch `backend` parameters still win |
 | `SUPER_AGENTS_STATE_FILE` | `~/.super-agents/state.json` | Local session metadata file |
 
 Openbase-specific defaults:
@@ -252,7 +260,7 @@ The MCP server exposes these tools:
 - `codex_app_server_status`: check app-server readiness, websocket connection,
   pending callbacks, and active turns.
 - `super_agents_start`: create a named thread on any backend (optional
-  `backend` parameter; defaults to the configured backend).
+  `backend` parameter; defaults to the process's default backend).
 - `super_agents_resume`: resume a named thread.
 - `super_agents_read`: read a named or id-addressed thread.
 - `super_agents_rename`: rename a Codex app-server thread.

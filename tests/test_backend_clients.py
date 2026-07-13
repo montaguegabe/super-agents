@@ -12,9 +12,11 @@ from super_agents.backend_clients import (
     backend_from_environment,
     client_from_environment,
     configured_backend_from_environment,
+    default_backend_from_environment,
     normalize_backend,
 )
 from super_agents.claude_sdk import ClaudeAgentSdkClient
+from super_agents.multi_backend import MultiBackendClient
 
 
 def test_backend_normalization_supports_three_canonical_modes() -> None:
@@ -40,3 +42,47 @@ def test_client_factory_reads_backend_from_env_file(monkeypatch: pytest.MonkeyPa
 
     assert configured_backend_from_environment() == "openbase_cloud"
     assert backend_from_environment() == "codex"
+
+
+def test_default_backend_override_wins_over_configured_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_BACKEND", "claude-code")
+
+    assert default_backend_from_environment() == CLAUDE_CODE_BACKEND
+
+
+def test_default_backend_falls_back_to_configured_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+    monkeypatch.delenv("SUPER_AGENTS_DEFAULT_BACKEND", raising=False)
+
+    assert default_backend_from_environment() == CLAUDE_CODE_BACKEND
+
+
+def test_multi_backend_client_default_follows_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_BACKEND", "claude_code")
+
+    client = MultiBackendClient(clients={"codex": object(), "claude_code": object()})
+
+    assert client.backend == CLAUDE_CODE_BACKEND
+
+
+def test_multi_backend_client_constructor_default_wins_over_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_BACKEND", "claude_code")
+
+    client = MultiBackendClient(default_backend="codex", clients={"codex": object(), "claude_code": object()})
+
+    assert client.backend == CODEX_BACKEND
+
+
+def test_multi_backend_client_collapses_openbase_cloud_override_to_codex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_BACKEND", "openbase-cloud")
+
+    client = MultiBackendClient(clients={"codex": object(), "claude_code": object()})
+
+    assert client.backend == CODEX_BACKEND

@@ -16,6 +16,7 @@ CLAUDE_CODE_BACKEND = "claude_code"
 BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND, CLAUDE_CODE_BACKEND}
 CODEX_COMPATIBLE_BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND}
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
+DEFAULT_BACKEND_ENV_KEY = "SUPER_AGENTS_DEFAULT_BACKEND"
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
 BACKEND_ALIASES = {
     "": CODEX_BACKEND,
@@ -40,10 +41,22 @@ def execution_backend(backend: str) -> str:
 
 def configured_backend_from_environment() -> str:
     env_values = read_env_values(DEFAULT_ENV_FILE)
-    return normalize_backend(
-        os.environ.get(CODING_BACKEND_ENV_KEY)
-        or env_values.get(CODING_BACKEND_ENV_KEY)
-    )
+    return normalize_backend(os.environ.get(CODING_BACKEND_ENV_KEY) or env_values.get(CODING_BACKEND_ENV_KEY))
+
+
+def default_backend_from_environment() -> str:
+    """Default backend for new launches in this process.
+
+    ``SUPER_AGENTS_DEFAULT_BACKEND`` overrides the configured backend for the
+    hosting process only — an MCP host can pin its launch default (for
+    example to its own backend type) without changing the machine-wide
+    ``OPENBASE_CODING_BACKEND`` configuration. Explicit per-launch ``backend``
+    parameters always win over this default.
+    """
+    override = (os.environ.get(DEFAULT_BACKEND_ENV_KEY) or "").strip()
+    if override:
+        return normalize_backend(override)
+    return configured_backend_from_environment()
 
 
 def backend_from_environment() -> str:
