@@ -10,10 +10,12 @@ from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     CODEX_BACKEND,
     CODEX_COMPATIBLE_BACKENDS,
     CODING_BACKEND_ENV_KEY,
+    DEFAULT_BACKEND_ENV_KEY,
     DEFAULT_ENV_FILE,
     OPENBASE_CLOUD_BACKEND,
     backend_from_environment,
     configured_backend_from_environment,
+    default_backend_from_environment,
     execution_backend,
     normalize_backend,
 )
@@ -64,7 +66,7 @@ def client_from_environment() -> SuperAgentsClient:
 
 
 def multi_client_from_environment() -> SuperAgentsClient:
-    """Client that defaults to the configured backend but can launch on any."""
+    """Client that defaults to the process's default backend but can launch on any."""
     from super_agents.multi_backend import MultiBackendClient
 
     return MultiBackendClient()

@@ -3,10 +3,12 @@
 ``MultiBackendClient`` implements the ``SuperAgentsClient`` protocol while
 letting each thread launch pick its own backend: ``super_agents_start`` may
 name ``codex``, ``openbase_cloud``, or ``claude_code`` and the thread runs
-there; everything else defaults to the configured backend. Name- and
-id-addressed operations route to the backend that owns the thread — an
-explicit ``backend`` on the query pins the route, otherwise engaged backends
-are tried in order (configured backend first).
+there; everything else defaults to the default backend — the
+``default_backend`` constructor argument, else ``SUPER_AGENTS_DEFAULT_BACKEND``
+in the environment, else the configured backend. Name- and id-addressed
+operations route to the backend that owns the thread — an explicit
+``backend`` on the query pins the route, otherwise engaged backends are
+tried in order (default backend first).
 
 A backend is "engaged" once this process has built a client for it or when
 its on-disk state shows it has been used before, so threads started on a
@@ -24,7 +26,7 @@ from .app_models import LabelQueryInput
 from .backend_config import (
     CLAUDE_CODE_BACKEND,
     CODEX_BACKEND,
-    configured_backend_from_environment,
+    default_backend_from_environment,
     execution_backend,
     normalize_backend,
 )
@@ -52,7 +54,7 @@ class MultiBackendClient:
         clients: dict[str, Any] | None = None,
     ) -> None:
         configured = (
-            normalize_backend(default_backend) if default_backend is not None else configured_backend_from_environment()
+            normalize_backend(default_backend) if default_backend is not None else default_backend_from_environment()
         )
         self._default_backend = execution_backend(configured)
         self._clients: dict[str, Any] = dict(clients or {})
