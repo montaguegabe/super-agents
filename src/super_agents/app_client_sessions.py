@@ -204,6 +204,26 @@ class SessionClientMixin:
         matches.sort(key=thread_recency, reverse=True)
         return matches[0]
 
+    # thread/list pages arrive in thread-creation order, so a "recent" view
+    # must fetch a wider window before ranking by update time, or a thread
+    # created long ago but touched today never surfaces.
+    RECENT_WINDOW_THREADS = 200
+    LIST_FETCH_PAGE_SIZE = 100
+
+    async def _recent_thread_window(self, cwd: str | None) -> list[JsonObject]:
+        threads: list[JsonObject] = []
+        cursor: str | None = None
+        while len(threads) < self.RECENT_WINDOW_THREADS:
+            response = await self.list_threads(True, None, cwd, self.LIST_FETCH_PAGE_SIZE, cursor=cursor)
+            page = extract_threads(response)
+            if not page:
+                break
+            threads.extend(page)
+            cursor = response.get("nextCursor") if isinstance(response, dict) else None
+            if not isinstance(cursor, str) or not cursor:
+                break
+        return threads
+
     async def scan_threads_for_name(self, name: str, cwd: str | None = None) -> JsonObject:
         """Find a thread by exact name by paging through the full listing."""
         cursor: str | None = None
@@ -233,15 +253,18 @@ class SessionClientMixin:
                 return [self.session_view(session)]
             return []
         try:
-            response = await self.list_threads(
-                True,
-                input_data.label,
-                input_data.cwd,
-                input_data.limit or 50,
-            )
+            if input_data.label:
+                response = await self.list_threads(
+                    True,
+                    input_data.label,
+                    input_data.cwd,
+                    input_data.limit or 50,
+                )
+                threads = extract_threads(response)
+            else:
+                threads = await self._recent_thread_window(input_data.cwd)
         except Exception:
-            response = {}
-        threads = extract_threads(response)
+            threads = []
         if not threads:
             sessions = await self.filtered_sessions(input_data)
             if sessions or not input_data.label:

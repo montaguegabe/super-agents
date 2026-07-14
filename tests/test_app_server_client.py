@@ -2572,3 +2572,38 @@ async def test_name_scan_gives_up_after_thread_cap(tmp_path: Path) -> None:
     finally:
         await client.close()
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_ranks_across_creation_ordered_pages(tmp_path: Path) -> None:
+    """A thread created long ago but touched today must top the recent view."""
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") != "thread/list":
+            return {"ok": True}
+        params = message.get("params") or {}
+        if not params.get("cursor"):
+            return {
+                "data": [
+                    {"id": "thread-new", "name": "created-recently", "cwd": "/tmp/x", "updatedAt": 1_778_200_100}
+                ],
+                "nextCursor": "page-2",
+            }
+        return {
+            "data": [
+                {"id": "thread-old", "name": "old-but-active", "cwd": "/tmp/x", "updatedAt": 1_778_300_000}
+            ]
+        }
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        recent = await client.recent(type_query(include_inactive=True))
+        assert [agent["threadId"] for agent in recent["agents"]] == [
+            "thread-old",
+            "thread-new",
+        ]
+    finally:
+        await client.close()
+        await server.close()
