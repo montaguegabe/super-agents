@@ -447,6 +447,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         search_term: str | None = None,
         cwd: str | None = None,
         limit: int | None = None,
+        cursor: str | None = None,
     ) -> JsonObject:
         await self.ensure_connected()
         return await self.request(
@@ -457,6 +458,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                     "searchTerm": search_term,
                     "cwd": cwd,
                     "limit": limit,
+                    "cursor": cursor,
                 }
             ),
         )

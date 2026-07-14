@@ -2497,3 +2497,78 @@ def type_query(**kwargs: Any) -> Any:
     from super_agents.app_server_client import LabelQueryInput
 
     return LabelQueryInput(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_recent_finds_exact_name_missed_by_search_term(tmp_path: Path) -> None:
+    """searchTerm is fuzzy content search; exact-name lookups page the full list."""
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") != "thread/list":
+            return {"ok": True}
+        params = message.get("params") or {}
+        if params.get("searchTerm"):
+            # The app server's content search misses the exact-named thread.
+            return {"data": [{"id": "thread-noise", "name": "other-thread", "cwd": "/tmp/x", "updatedAt": 300}]}
+        if not params.get("cursor"):
+            return {
+                "data": [
+                    {"id": "thread-a", "name": "alpha", "cwd": "/tmp/x", "updatedAt": 900},
+                    {"id": "thread-b", "name": "beta", "cwd": "/tmp/x", "updatedAt": 800},
+                ],
+                "nextCursor": "page-2",
+            }
+        return {"data": [{"id": "thread-target", "name": "spirit-tech", "cwd": "/tmp/x", "updatedAt": 700}]}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        found = await client.scan_threads_for_name("spirit-tech")
+        assert found["id"] == "thread-target"
+        cursors = [
+            (message.get("params") or {}).get("cursor")
+            for message in captured
+            if message.get("method") == "thread/list"
+        ]
+        assert "page-2" in cursors
+
+        recent = await client.recent(type_query(label="spirit-tech", include_inactive=True))
+        assert recent["count"] == 1
+        assert recent["agents"][0]["threadId"] == "thread-target"
+
+        resolved = await client.resolve_thread_name("spirit-tech", type_query(label="spirit-tech"))
+        assert resolved["id"] == "thread-target"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_name_scan_gives_up_after_thread_cap(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    page_index = 0
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal page_index
+        if message.get("method") != "thread/list":
+            return {"ok": True}
+        page_index += 1
+        return {
+            "data": [
+                {"id": f"thread-{page_index}-{item}", "name": f"noise-{page_index}-{item}", "cwd": "/tmp/x"}
+                for item in range(50)
+            ],
+            "nextCursor": f"page-{page_index + 1}",
+        }
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        found = await client.scan_threads_for_name("never-present")
+        assert found == {}
+        list_calls = [message for message in captured if message.get("method") == "thread/list"]
+        assert len(list_calls) == 10
+    finally:
+        await client.close()
+        await server.close()

@@ -186,6 +186,12 @@ class SessionClientMixin:
     def tracked_turn_is_active(self, turn: TurnState) -> bool:
         return is_active_status(turn.status) and not turn.finished_at and not _is_queue_item_id(turn.turn_id)
 
+    # The app server's searchTerm is a fuzzy content search whose results can
+    # omit a thread whose name matches exactly, so exact-name resolution must
+    # never rely on it alone; the paged scan below is the reliable fallback.
+    NAME_SCAN_PAGE_SIZE = 50
+    NAME_SCAN_MAX_THREADS = 500
+
     async def resolve_thread_name(self, name: str, input_data: LabelQueryInput) -> JsonObject:
         try:
             response = await self.list_threads(True, name, input_data.cwd, input_data.limit or 50)
@@ -194,9 +200,31 @@ class SessionClientMixin:
         threads = extract_threads(response)
         matches = [thread for thread in threads if extract_thread_name(thread) == name]
         if not matches:
-            return {}
+            return await self.scan_threads_for_name(name, input_data.cwd)
         matches.sort(key=thread_recency, reverse=True)
         return matches[0]
+
+    async def scan_threads_for_name(self, name: str, cwd: str | None = None) -> JsonObject:
+        """Find a thread by exact name by paging through the full listing."""
+        cursor: str | None = None
+        seen = 0
+        while seen < self.NAME_SCAN_MAX_THREADS:
+            try:
+                response = await self.list_threads(True, None, cwd, self.NAME_SCAN_PAGE_SIZE, cursor=cursor)
+            except Exception:
+                return {}
+            threads = extract_threads(response)
+            if not threads:
+                return {}
+            matches = [thread for thread in threads if extract_thread_name(thread) == name]
+            if matches:
+                matches.sort(key=thread_recency, reverse=True)
+                return matches[0]
+            seen += len(threads)
+            cursor = response.get("nextCursor") if isinstance(response, dict) else None
+            if not isinstance(cursor, str) or not cursor:
+                return {}
+        return {}
 
     async def recent_items(self, input_data: LabelQueryInput) -> list[JsonObject]:
         if input_data.thread_id:
@@ -216,12 +244,17 @@ class SessionClientMixin:
         threads = extract_threads(response)
         if not threads:
             sessions = await self.filtered_sessions(input_data)
-            return [self.session_view(session) for session in sessions]
+            if sessions or not input_data.label:
+                return [self.session_view(session) for session in sessions]
         items = [
             self.thread_view(thread)
             for thread in threads
             if not input_data.label or extract_thread_name(thread) == input_data.label
         ]
+        if input_data.label and not items:
+            fallback = await self.scan_threads_for_name(input_data.label, input_data.cwd)
+            if fallback:
+                items = [self.thread_view(fallback)]
         if input_data.status:
             items = [item for item in items if item.get("status") == input_data.status]
         if input_data.favorite is not None:
