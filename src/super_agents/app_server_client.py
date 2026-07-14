@@ -353,6 +353,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         agent_name = super_agent_label(input_data.get("agentName"))
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
+            "model": input_data.get("model") or self.default_model,
             "config": await login_shell_config_override(),
             **self.permission_overrides(input_data),
         }
@@ -540,6 +541,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         params: JsonObject = {
             "threadId": thread_id,
             "cwd": input_data.get("cwd") or (session.cwd if session else None) or str(Path.home()),
+            "model": model,
             "serviceTier": input_data.get("serviceTier") or "standard",
             **self.permission_overrides(input_data),
             "config": await login_shell_config_override(),
@@ -908,6 +910,12 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         prompt: str,
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
+        if input_data.thread_id and input_data.turn_id:
+            return await self.steer_turn(
+                input_data.thread_id,
+                input_data.turn_id,
+                prompt,
+            )
         extras = dict(turn_input or {})
         try:
             resolved = await self.resolve_session(required_label(input_data), input_data)

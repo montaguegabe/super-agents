@@ -11,7 +11,7 @@ import websockets
 
 import super_agents.app_server_client as app_server_client
 from super_agents.app_client_transport import websocket_max_size
-from super_agents.app_models import TurnState
+from super_agents.app_models import LabelQueryInput, TurnState
 from super_agents.app_server_client import CodexAppServerClient
 from super_agents.app_time import turn_key
 from super_agents.mcp_server import (
@@ -404,8 +404,11 @@ async def test_python_client_uses_super_agents_model_and_reasoning_defaults(
         await client.start_thread({"label": "defaults", "cwd": "/tmp/defaults"})
         result = await client.start_turn({"threadId": "thread-defaults", "label": "defaults", "prompt": "work"})
 
+        thread_request = next(message for message in captured if message.get("method") == "thread/start")
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         settings = start_request["params"]["collaborationMode"]["settings"]
+        assert thread_request["params"]["model"] == "gpt-default"
+        assert start_request["params"]["model"] == "gpt-default"
         assert settings["model"] == "gpt-default"
         assert settings["reasoning_effort"] == "low"
         assert result["reasoningEffort"] == "low"
@@ -457,6 +460,7 @@ async def test_python_client_explicit_model_and_reasoning_override_defaults(
 
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         settings = start_request["params"]["collaborationMode"]["settings"]
+        assert start_request["params"]["model"] == "gpt-explicit"
         assert settings["model"] == "gpt-explicit"
         assert settings["reasoning_effort"] == "xhigh"
         assert result["reasoningEffort"] == "xhigh"
@@ -960,6 +964,40 @@ async def test_steer_and_cancel_by_label_call_existing_id_based_app_server_metho
 
         active = await client.active(type_query(label="control"))
         assert active["count"] == 0
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_id_addressed_steer_does_not_fall_back_to_queue(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/steer":
+            return {"turnId": "turn-strict"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        result = await client.steer_by_label(
+            LabelQueryInput(
+                thread_id="thread-strict",
+                turn_id="turn-strict",
+                prefer="latest_active",
+            ),
+            "adjust the active work",
+        )
+
+        assert result["turnId"] == "turn-strict"
+        steer_request = next(message for message in captured if message.get("method") == "turn/steer")
+        assert steer_request["params"] == {
+            "threadId": "thread-strict",
+            "expectedTurnId": "turn-strict",
+            "input": [{"type": "text", "text": "adjust the active work"}],
+        }
+        assert not list(client.queue_dir.glob("*.json"))
     finally:
         await client.close()
         await server.close()

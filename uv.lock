@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-06-30T17:43:55.447602Z"
+exclude-newer = "2026-07-04T22:10:43.828963Z"
 exclude-newer-span = "P10D"
 
 [[package]]
@@ -761,7 +761,7 @@ wheels = [
 
 [[package]]
 name = "super-agents"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
