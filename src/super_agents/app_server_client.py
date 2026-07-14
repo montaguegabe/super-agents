@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -448,8 +449,18 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         cwd: str | None = None,
         limit: int | None = None,
         cursor: str | None = None,
+        model_providers: Sequence[str] | None = (),
     ) -> JsonObject:
+        """List threads via thread/list.
+
+        ``model_providers`` defaults to an empty list, which disables the
+        app server's default filter to the active model provider — threads
+        belong to the user regardless of which provider ran them. Pass a
+        list of provider ids to scope, or ``None`` to keep the server's
+        active-provider default. Older servers ignore the parameter.
+        """
         await self.ensure_connected()
+        providers = list(model_providers) if model_providers is not None else None
         return await self.request(
             "thread/list",
             without_none(
@@ -459,6 +470,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                     "cwd": cwd,
                     "limit": limit,
                     "cursor": cursor,
+                    "modelProviders": providers,
                 }
             ),
         )

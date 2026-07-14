@@ -2585,16 +2585,10 @@ async def test_recent_ranks_across_creation_ordered_pages(tmp_path: Path) -> Non
         params = message.get("params") or {}
         if not params.get("cursor"):
             return {
-                "data": [
-                    {"id": "thread-new", "name": "created-recently", "cwd": "/tmp/x", "updatedAt": 1_778_200_100}
-                ],
+                "data": [{"id": "thread-new", "name": "created-recently", "cwd": "/tmp/x", "updatedAt": 1_778_200_100}],
                 "nextCursor": "page-2",
             }
-        return {
-            "data": [
-                {"id": "thread-old", "name": "old-but-active", "cwd": "/tmp/x", "updatedAt": 1_778_300_000}
-            ]
-        }
+        return {"data": [{"id": "thread-old", "name": "old-but-active", "cwd": "/tmp/x", "updatedAt": 1_778_300_000}]}
 
     server = await start_fake_app_server(captured, handler)
     client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
@@ -2604,6 +2598,10 @@ async def test_recent_ranks_across_creation_ordered_pages(tmp_path: Path) -> Non
             "thread-old",
             "thread-new",
         ]
+        list_params = [message.get("params") or {} for message in captured if message.get("method") == "thread/list"]
+        # Provider-agnostic by default: the empty list disables the app
+        # server's active-provider filter.
+        assert all(params.get("modelProviders") == [] for params in list_params)
     finally:
         await client.close()
         await server.close()
