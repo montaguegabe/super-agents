@@ -324,8 +324,9 @@ finally:
 ```
 
 The public modules are organized so applications can reuse the websocket client,
-session metadata helpers, routine state, and queue handling without starting the
-stdio MCP server.
+session metadata helpers, and queue handling without starting the stdio MCP
+server. Product schedulers, recurring jobs, and command automation belong in
+the integrating application, not in Super Agents.
 
 ## Development
 

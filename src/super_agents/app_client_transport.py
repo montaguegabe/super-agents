@@ -50,9 +50,6 @@ def websocket_max_size() -> int | None:
 
 class TransportClientMixin:
     async def close(self) -> None:
-        if self._routine_scheduler_task:
-            self._routine_scheduler_task.cancel()
-            self._routine_scheduler_task = None
         for task in self._permission_callback_tasks:
             task.cancel()
         self._permission_callback_tasks.clear()

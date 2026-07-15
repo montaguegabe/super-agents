@@ -95,84 +95,14 @@ class SessionRecord:
 
 
 @dataclass(slots=True)
-class RoutineRecord:
-    name: str
-    prompt: str
-    time: str
-    updated_at: str
-    kind: str = "agent"
-    schedule_type: str = "daily"
-    interval_seconds: int | None = None
-    timezone: str | None = None
-    enabled: bool = True
-    target_name: str | None = None
-    thread_id: str | None = None
-    fresh_thread_per_run: bool = False
-    cwd: str | None = None
-    approval_policy: str | None = None
-    sandbox_type: str | None = None
-    mode: Mode | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    service_tier: str | None = None
-    developer_instructions: str | None = None
-    command: str | None = None
-    command_timeout_seconds: int | None = None
-    created_at: str | None = None
-    last_run_date: str | None = None
-    last_run_at: str | None = None
-    last_started_at: str | None = None
-    last_thread_id: str | None = None
-    last_turn_id: str | None = None
-    last_status: str | None = None
-    last_error: str | None = None
-
-    def to_json(self) -> JsonObject:
-        return without_none(
-            {
-                "name": self.name,
-                "prompt": self.prompt,
-                "time": self.time,
-                "kind": self.kind,
-                "scheduleType": self.schedule_type,
-                "intervalSeconds": self.interval_seconds,
-                "timezone": self.timezone,
-                "enabled": self.enabled,
-                "targetName": self.target_name,
-                "threadId": self.thread_id,
-                "freshThreadPerRun": self.fresh_thread_per_run,
-                "cwd": self.cwd,
-                "approvalPolicy": self.approval_policy,
-                "sandboxType": self.sandbox_type,
-                "mode": self.mode,
-                "model": self.model,
-                "reasoningEffort": self.reasoning_effort,
-                "serviceTier": self.service_tier,
-                "developerInstructions": self.developer_instructions,
-                "command": self.command,
-                "commandTimeoutSeconds": self.command_timeout_seconds,
-                "createdAt": self.created_at,
-                "updatedAt": self.updated_at,
-                "lastRunDate": self.last_run_date,
-                "lastRunAt": self.last_run_at,
-                "lastStartedAt": self.last_started_at,
-                "lastThreadId": self.last_thread_id,
-                "lastTurnId": self.last_turn_id,
-                "lastStatus": self.last_status,
-                "lastError": self.last_error,
-            }
-        )
-
-
-@dataclass(slots=True)
 class StateFile:
     sessions: dict[str, SessionRecord] = field(default_factory=dict)
-    routines: dict[str, RoutineRecord] = field(default_factory=dict)
+    extra_fields: JsonObject = field(default_factory=dict)
 
     def to_json(self) -> JsonObject:
         return {
+            **self.extra_fields,
             "sessions": {key: value.to_json() for key, value in self.sessions.items()},
-            "routines": {key: value.to_json() for key, value in self.routines.items()},
         }
 
 
@@ -181,9 +111,13 @@ def read_state_file(path: Path) -> StateFile:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return StateFile()
-    sessions = as_session_record_map(raw.get("sessions") if isinstance(raw, dict) else None)
-    routines = as_routine_record_map(raw.get("routines") if isinstance(raw, dict) else None)
-    return StateFile(sessions=sessions, routines=routines)
+    if not isinstance(raw, dict):
+        return StateFile()
+    sessions = as_session_record_map(raw.get("sessions"))
+    return StateFile(
+        sessions=sessions,
+        extra_fields={key: value for key, value in raw.items() if key != "sessions"},
+    )
 
 
 def write_state_file(path: Path, state: StateFile) -> None:
@@ -291,98 +225,9 @@ def as_turn_summary_map(value: Any) -> dict[str, TurnSummary] | None:
     return turns or None
 
 
-def as_routine_record_map(value: Any) -> dict[str, RoutineRecord]:
-    if not isinstance(value, dict):
-        return {}
-    routines: dict[str, RoutineRecord] = {}
-    for name, raw_routine in value.items():
-        routine = routine_record_from_json(
-            raw_routine,
-            name_fallback=str(name),
-            require_prompt_time=True,
-        )
-        if routine is None:
-            continue
-        routines[routine.name] = routine
-    return routines
-
-
-def routine_record_from_json(
-    value: Any,
-    *,
-    name_fallback: str = "",
-    default_time: str = "09:00",
-    default_timezone: str | None = None,
-    default_updated_at: str = "1970-01-01T00:00:00.000Z",
-    require_prompt_time: bool = False,
-) -> RoutineRecord | None:
-    if not isinstance(value, dict):
-        return None
-
-    name = get_string(value, "name") or name_fallback
-    prompt = get_string(value, "prompt") or ""
-    kind = as_routine_kind(get_string(value, "kind"))
-    time_value = get_string(value, "time") or default_time
-    schedule_type = as_routine_schedule_type(get_string(value, "scheduleType"))
-    if require_prompt_time and kind != "command" and not prompt:
-        return None
-    if require_prompt_time and schedule_type != "interval" and not get_string(value, "time"):
-        return None
-
-    return RoutineRecord(
-        name=name,
-        prompt=prompt,
-        time=time_value,
-        kind=kind,
-        schedule_type=schedule_type,
-        interval_seconds=get_positive_int(value, "intervalSeconds"),
-        timezone=get_string(value, "timezone") or default_timezone,
-        enabled=value.get("enabled") if isinstance(value.get("enabled"), bool) else True,
-        target_name=get_string(value, "targetName"),
-        thread_id=get_string(value, "threadId"),
-        fresh_thread_per_run=bool(value.get("freshThreadPerRun")) if isinstance(value.get("freshThreadPerRun"), bool) else False,
-        cwd=get_string(value, "cwd"),
-        approval_policy=get_string(value, "approvalPolicy"),
-        sandbox_type=get_string(value, "sandboxType"),
-        mode=as_mode(get_string(value, "mode")),
-        model=get_string(value, "model"),
-        reasoning_effort=get_string(value, "reasoningEffort"),
-        service_tier=get_string(value, "serviceTier"),
-        developer_instructions=get_string(value, "developerInstructions"),
-        command=get_string(value, "command"),
-        command_timeout_seconds=get_positive_int(value, "commandTimeoutSeconds"),
-        created_at=get_string(value, "createdAt"),
-        updated_at=get_string(value, "updatedAt") or default_updated_at,
-        last_run_date=get_string(value, "lastRunDate"),
-        last_run_at=get_string(value, "lastRunAt"),
-        last_started_at=get_string(value, "lastStartedAt"),
-        last_thread_id=get_string(value, "lastThreadId"),
-        last_turn_id=get_string(value, "lastTurnId"),
-        last_status=get_string(value, "lastStatus"),
-        last_error=get_string(value, "lastError"),
-    )
-
-
 def get_string(value: JsonObject, key: str) -> str | None:
     result = value.get(key)
     return result if isinstance(result, str) else None
-
-
-def get_positive_int(value: JsonObject, key: str) -> int | None:
-    result = value.get(key)
-    if isinstance(result, bool):
-        return None
-    if isinstance(result, int) and result > 0:
-        return result
-    return None
-
-
-def as_routine_schedule_type(value: str | None) -> str:
-    return value if value in {"daily", "interval"} else "daily"
-
-
-def as_routine_kind(value: str | None) -> str:
-    return value if value in {"agent", "command"} else "agent"
 
 
 def as_stored_status(status: str | None) -> StoredStatus | None:

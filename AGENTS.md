@@ -15,6 +15,13 @@ flows directly here. Implement those in Openbase Coder repos (`cli`, `skills`,
 `console`, mobile/desktop apps) or in a narrow adapter layer that calls generic
 Super Agents primitives.
 
+Routines are an Openbase Coder product feature, not a generic Super Agents
+primitive. Routine definitions, schedules, polling loops, command execution,
+run history, health reporting, and persisted routine state belong in the
+Openbase Coder CLI. Super Agents may provide the generic thread, turn, queue,
+and session APIs that an external scheduler invokes, but it must not own a
+scheduler or recurring-job model.
+
 Openbase-aware conveniences may exist only when they preserve the standalone
 contract: they must be optional, documented as integration helpers, and must
 not make the core MCP tool surface require Openbase Coder.

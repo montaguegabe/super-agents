@@ -9,7 +9,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .app_client_routines import RoutineClientMixin
 from .app_client_sessions import SessionClientMixin
 from .app_client_transport import TransportClientMixin
 from .app_environment import (
@@ -77,26 +76,6 @@ from .app_protocol import (
     with_super_agent_identity_instructions,
 )
 from .app_queue import append_queued_turn, new_queued_turn
-from .app_routines import (
-    DEFAULT_ROUTINE_INTERVAL_SECONDS,
-    DEFAULT_ROUTINE_POLL_SECONDS,
-    DEFAULT_ROUTINE_TIMEZONE,
-    MIN_ROUTINE_INTERVAL_SECONDS,
-    parse_routine_interval_seconds,
-    parse_routine_time,
-    routine_from_patch,
-    routine_interval_next_run_at,
-    routine_is_due,
-    routine_local_date,
-    routine_next_run_at,
-    routine_next_run_sort_key,
-    routine_next_run_summary,
-    routine_now,
-    routine_poll_seconds,
-    routine_turn_input,
-    routine_with_next_run,
-    safe_routine_next_run_at,
-)
 from .app_sessions import (
     merge_turns,
     required_label,
@@ -142,13 +121,9 @@ __all__ = [
     "DEFAULT_APPROVAL_REQUESTS_FILE",
     "DEFAULT_MODEL",
     "DEFAULT_QUEUE_DIR",
-    "DEFAULT_ROUTINE_INTERVAL_SECONDS",
-    "DEFAULT_ROUTINE_POLL_SECONDS",
-    "DEFAULT_ROUTINE_TIMEZONE",
     "DEFAULT_STATE_FILE",
     "DEFAULT_WS_URL",
     "LOGIN_ENV_TIMEOUT_SECONDS",
-    "MIN_ROUTINE_INTERVAL_SECONDS",
     "LabelQueryInput",
     "LabelResolutionPrefer",
     "Mode",
@@ -192,26 +167,12 @@ __all__ = [
     "normalize_turn_status",
     "parse_iso_ms",
     "parse_null_separated_env",
-    "parse_routine_interval_seconds",
-    "parse_routine_time",
     "path_basename",
     "preview_text",
     "read_login_shell_environment",
     "read_permission_store",
     "record_shared_permission_request",
     "required_label",
-    "routine_from_patch",
-    "routine_interval_next_run_at",
-    "routine_is_due",
-    "routine_local_date",
-    "routine_next_run_at",
-    "routine_next_run_sort_key",
-    "routine_next_run_summary",
-    "routine_now",
-    "routine_poll_seconds",
-    "routine_turn_input",
-    "routine_with_next_run",
-    "safe_routine_next_run_at",
     "scalar_field",
     "session_from_patch",
     "session_from_thread",
@@ -245,7 +206,7 @@ def default_model_from_environment() -> str:
     return default_super_agents_model() or DEFAULT_MODEL
 
 
-class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClientMixin):
+class CodexAppServerClient(TransportClientMixin, SessionClientMixin):
     backend = CODEX_BACKEND
 
     def __init__(
@@ -277,7 +238,6 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         self._reader_task: asyncio.Task[None] | None = None
         self._state_lock = asyncio.Lock()
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
-        self._routine_scheduler_task: asyncio.Task[None] | None = None
         self._permission_callback = permission_callback
         self._permission_callback_tasks: set[asyncio.Task[None]] = set()
         self._permission_decision_tasks: set[asyncio.Task[None]] = set()
@@ -296,13 +256,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "activeTurns": [
                 self.compact_tracked_turn(turn) for turn in self._turns.values() if self.tracked_turn_is_active(turn)
             ],
-            "routines": await self.routine_status_summary(),
         }
-
-    def start_routine_scheduler(self) -> None:
-        if self._routine_scheduler_task and not self._routine_scheduler_task.done():
-            return
-        self._routine_scheduler_task = asyncio.create_task(self._routine_scheduler_loop())
 
     def register_permission_callback(
         self, callback: PermissionRequestCallback | None
@@ -321,16 +275,6 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
 
     def pending_permission_requests(self) -> list[PendingServerRequest]:
         return [request for request in self._pending_server_requests.values() if is_permission_request(request.method)]
-
-    async def _routine_scheduler_loop(self) -> None:
-        while True:
-            try:
-                await self.run_due_routines()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Failed to run due Super Agents routines.")
-            await asyncio.sleep(routine_poll_seconds())
 
     async def ensure_connected(self) -> None:
         if websocket_is_open(self._ws):
