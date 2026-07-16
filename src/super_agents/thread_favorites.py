@@ -1,4 +1,4 @@
-"""Read Openbase Coder's local thread favorite metadata."""
+"""Read Openbase's local thread favorite metadata."""
 
 from __future__ import annotations
 

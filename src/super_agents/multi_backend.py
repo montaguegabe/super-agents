@@ -233,9 +233,9 @@ class MultiBackendClient:
     async def compact_status(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         return await self._merged_agents("compact_status", input_data)
 
-    # -- local Openbase Coder metadata --------------------------------------
+    # -- local Openbase metadata --------------------------------------
 
-    # Favorites and tags read/write local Openbase Coder files; the Codex
+    # Favorites and tags read/write local Openbase files; the Codex
     # client implements them without needing a server connection, so they
     # work for threads from any backend.
 
