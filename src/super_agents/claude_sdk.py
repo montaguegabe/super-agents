@@ -111,6 +111,11 @@ class ClaudeAgentSdkClient:
             agent_name=agent_name,
         )
         existing = self.store.get_by_name(name)
+        if existing is not None and bool(input_data.get("fresh")):
+            # Retire the name-holder so the caller gets a brand-new session
+            # (and conversation) instead of the reuse-by-name refresh below.
+            self.store.rename_session(existing.id, f"{name} (retired {existing.id[-8:]})")
+            existing = None
         if existing is not None:
             effective_agent_name = agent_name or existing.agent_name
             effective_developer_instructions = with_super_agent_identity_instructions(

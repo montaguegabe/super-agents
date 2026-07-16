@@ -428,6 +428,20 @@ async def test_claude_sdk_start_thread_refreshes_existing_named_session(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_start_thread_fresh_retires_existing_named_session(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    first = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
+    fresh = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path), "fresh": True})
+
+    assert fresh["threadId"] != first["threadId"]
+    assert store.get_by_name("dispatcher").id == fresh["threadId"]
+    retired = store.get_session(first["threadId"])
+    assert retired.name == f"dispatcher (retired {first['threadId'][-8:]})"
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_start_thread_refresh_preserves_existing_agent_name(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)

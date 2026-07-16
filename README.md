@@ -135,6 +135,12 @@ this backend. `OPENBASE_CODEX_BACKEND` is still read as a legacy fallback.
 Follow-up turns preserve live SDK conversation context while the MCP process
 remains running; persisted metadata and logs survive restarts.
 
+On this backend, `start_thread` reuses an existing session with the same
+`name` (refreshing its cwd, instructions, and model). Library callers that
+need a brand-new session and conversation under an existing name can pass
+`"fresh": true`, which retires the old session by renaming it aside before
+creating the new one.
+
 If the SDK package is not installed, the backend reports `ready=false` with an
 install hint.
 
