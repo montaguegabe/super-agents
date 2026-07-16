@@ -1,4 +1,4 @@
-"""Read and write Openbase Coder's local shared tag metadata."""
+"""Read and write Openbase's local shared tag metadata."""
 
 from __future__ import annotations
 

@@ -228,7 +228,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_thread_favorite",
             title="Super Agents Thread Favorite",
-            description="Query whether one local Openbase Coder thread is favorited.",
+            description="Query whether one local Openbase thread is favorited.",
             input_schema=object_schema(
                 {
                     "threadId": {
@@ -244,7 +244,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
         ToolDefinition(
             name="super_agents_tags",
             title="Super Agents Tags",
-            description="List local Openbase Coder tag options shared by threads and reports.",
+            description="List local Openbase tag options shared by threads and reports.",
             input_schema=object_schema({}),
             annotations={"readOnlyHint": True, "idempotentHint": True},
             handler=lambda _input: client.tags(),
@@ -253,7 +253,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             name="super_agents_thread_tags",
             title="Super Agents Thread Tags",
             description=(
-                "Read or replace local Openbase Coder tags for one thread. Omit tags to read; "
+                "Read or replace local Openbase tags for one thread. Omit tags to read; "
                 "pass tags to apply shared tag options."
             ),
             input_schema=object_schema(
@@ -279,7 +279,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             name="super_agents_report_tags",
             title="Super Agents Report Tags",
             description=(
-                "Read or replace local Openbase Coder tags for one report file. Omit tags to read; "
+                "Read or replace local Openbase tags for one report file. Omit tags to read; "
                 "pass tags to apply shared tag options."
             ),
             input_schema=object_schema(
@@ -468,7 +468,7 @@ def name_query_properties(include_ids: bool = True, include_output_options: bool
         "status": {"type": "string", "enum": ["running", "waiting", "completed", "failed", "cancelled", "unknown"]},
         "favorite": {
             "type": "boolean",
-            "description": "Filter listed threads by local Openbase Coder favorite state.",
+            "description": "Filter listed threads by local Openbase favorite state.",
         },
         "limit": {"type": "number"},
         "includeInactive": {"type": "boolean", "default": False},

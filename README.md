@@ -8,7 +8,7 @@ It gives AI agents a compact tool surface for creating named Codex threads,
 starting turns, checking progress, steering active work, cancelling turns,
 answering app-server callbacks, and tracking lightweight local session state.
 
-Super Agents is used by Openbase Coder, but it can also be run directly by any
+Super Agents is used by Openbase, but it can also be run directly by any
 MCP client that needs to coordinate Codex app-server threads without blocking on
 long-running turns.
 
@@ -43,7 +43,7 @@ python -m pip install super-agents
 - Python 3.11+
 - A running local
   [`codex app-server`](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
-- An MCP-compatible client such as Codex, Claude Desktop, or Openbase Coder
+- An MCP-compatible client such as Codex, Claude Desktop, or Openbase
 
 By default, Super Agents connects to Codex at `ws://127.0.0.1:4500`.
 
@@ -85,7 +85,7 @@ MCP tools:
 codex app-server --listen ws://127.0.0.1:4500
 ```
 
-Openbase Coder users usually do not need to run this by hand; the
+Openbase users usually do not need to run this by hand; the
 `codex-app-server` background service owns that process.
 
 ## Backends
@@ -266,9 +266,9 @@ The MCP server exposes these tools:
 - `super_agents_rename`: rename a Codex app-server thread.
 - `codex_answer_request`: answer a pending app-server callback.
 - `super_agents_sessions`: list named Codex app-server threads.
-- `super_agents_thread_favorite`: check whether one local Openbase Coder thread
+- `super_agents_thread_favorite`: check whether one local Openbase thread
   is favorited.
-- `super_agents_tags`: list local Openbase Coder tag options shared by threads
+- `super_agents_tags`: list local Openbase tag options shared by threads
   and reports.
 - `super_agents_thread_tags`: read or replace local tags for one thread.
 - `super_agents_report_tags`: read or replace local tags for one report file.
@@ -285,15 +285,15 @@ The MCP server exposes these tools:
 - `super_agents_recent`: list recent named Codex app-server threads.
 
 List-style tools accept `favorite=true` or `favorite=false` to filter by
-Openbase Coder's local per-machine favorite metadata.
+Openbase's local per-machine favorite metadata.
 
 Default responses are intentionally compact. Full turns, tracked event
 transcripts, diffs, and large previews are opt-in through each tool's detail
 flags.
 
-## Openbase Coder Report Tags
+## Openbase Report Tags
 
-Openbase Coder stores thread and report tags in the same local tag registry.
+Openbase stores thread and report tags in the same local tag registry.
 When an agent writes a report under a project's `.reports` directory, it can
 tag that report by calling `super_agents_report_tags` with:
 
@@ -306,11 +306,11 @@ For example, after creating `/workspace/app/.reports/audit.md`, call
 `super_agents_report_tags` with `projectPath=/workspace/app`,
 `path=audit.md`, and `tags=["Needs Review", "Security"]`. Omitting `tags`
 reads the current assignment. New tag labels are added to the shared options
-and can then be reused by thread and report tag pickers in Openbase Coder.
+and can then be reused by thread and report tag pickers in Openbase.
 
 ## Python API
 
-Openbase Coder and other Python applications can use the app-server client
+Openbase and other Python applications can use the app-server client
 directly:
 
 ```python
