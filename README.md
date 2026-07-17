@@ -118,6 +118,11 @@ does not run a local Anthropic Messages API adapter, does not expose
 `ANTHROPIC_API_KEY`. Billing/auth comes from the local Claude setup on the
 computer.
 
+Set `SUPER_AGENTS_CLAUDE_EXTRA_ARGS` to a JSON object to pass extra Claude
+Code CLI flags to every session, e.g. `{"chrome": null}` to enable the Claude
+in Chrome browser tools (`null` means a bare flag; string values are passed as
+the flag's argument).
+
 ```bash
 uv tool install 'super-agents[claude]'
 super-agents-backend use claude-code

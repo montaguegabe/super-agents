@@ -11,6 +11,9 @@ JsonObject = dict[str, Any]
 
 CLAUDE_PERMISSION_MODE = "bypassPermissions"
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+# JSON object of extra Claude Code CLI flags, e.g. {"chrome": null} for
+# --chrome. Values map to flag arguments; null means a bare flag.
+CLAUDE_EXTRA_ARGS_ENV = "SUPER_AGENTS_CLAUDE_EXTRA_ARGS"
 CLAUDE_CONFIG_FILENAME = ".claude.json"
 CLAUDE_SETTINGS_FILENAME = "settings.json"
 CLAUDE_INSTRUCTIONS_FILENAME = "CLAUDE.md"
@@ -47,7 +50,22 @@ def agent_options(
         kwargs["effort"] = reasoning_effort
     if resume:
         kwargs["resume"] = resume
+    if extra_args := claude_extra_args():
+        kwargs["extra_args"] = extra_args
     return sdk.ClaudeAgentOptions(**kwargs)
+
+
+def claude_extra_args() -> dict[str, str | None] | None:
+    raw = os.environ.get(CLAUDE_EXTRA_ARGS_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or not payload:
+        return None
+    return {str(flag): (None if value is None else str(value)) for flag, value in payload.items()}
 
 
 def claude_effort(reasoning_effort: str | None, service_tier: str | None) -> str | None:
