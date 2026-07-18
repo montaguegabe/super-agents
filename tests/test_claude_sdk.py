@@ -28,6 +28,7 @@ class FakeAssistantMessage:
 class FakeResultMessage:
     result: str
     session_id: str = "b01bd0f7-f1b0-485e-a47c-d831645174b9"
+    num_turns: int = 1
 
 
 class FakeClaudeAgentOptions:
@@ -42,12 +43,16 @@ class FakeClaudeSDKClient:
     blocked_prompts: set[str] = set()
     interrupted_prompts: list[str] = []
     disconnect_count: int = 0
+    # Each new client yields this many no-op (num_turns == 0) results before
+    # the real response, mimicking the CLI's resume handshake result.
+    handshake_results: int = 0
 
     def __init__(self, options: FakeClaudeAgentOptions) -> None:
         self.options = options
         self.connected = False
         self.prompt = ""
         self.interrupted = False
+        self.pending_handshake_results = FakeClaudeSDKClient.handshake_results
         FakeClaudeSDKClient.options_seen.append(options)
         FakeClaudeSDKClient.env_seen.append(("init", "ANTHROPIC_API_KEY" in os.environ))
 
@@ -62,6 +67,10 @@ class FakeClaudeSDKClient:
 
     async def receive_response(self):
         FakeClaudeSDKClient.env_seen.append(("receive", "ANTHROPIC_API_KEY" in os.environ))
+        if self.pending_handshake_results > 0:
+            self.pending_handshake_results -= 1
+            yield FakeResultMessage("", num_turns=0)
+            return
         while _user_prompt(self.prompt) in FakeClaudeSDKClient.blocked_prompts and not self.interrupted:
             await asyncio.sleep(0.01)
         yield FakeAssistantMessage([FakeTextBlock(f"reply:{self.prompt}")])
@@ -111,6 +120,7 @@ def reset_fake_claude_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     FakeClaudeSDKClient.blocked_prompts = set()
     FakeClaudeSDKClient.interrupted_prompts = []
     FakeClaudeSDKClient.disconnect_count = 0
+    FakeClaudeSDKClient.handshake_results = 0
 
 
 @pytest.mark.asyncio
@@ -661,6 +671,56 @@ async def test_claude_sdk_steer_by_label_preserves_reasoning_effort(
         "env": {"ANTHROPIC_API_KEY": ""},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_turn_skips_noop_handshake_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A resume-handshake result (num_turns == 0) must not complete the turn.
+
+    Accepting it records an empty turn while the real answer buffers unread,
+    after which every turn returns the previous prompt's answer.
+    """
+    FakeClaudeSDKClient.handshake_results = 1
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
+
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    turn = store.get_turn(result["turnId"])
+    assert turn.last_useful_message is not None
+    assert "hello" in turn.last_useful_message
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_steer_reconnects_client_for_clean_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Steering drops the cached client so the new turn cannot read the
+    interrupted turn's leftover response from a reused stream."""
+    FakeClaudeSDKClient.blocked_prompts = {"first"}
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "first"})
+    await wait_for(lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["first"])
+    clients_before_steer = len(FakeClaudeSDKClient.options_seen)
+    second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "second"})
+
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "cancelled")
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+
+    assert FakeClaudeSDKClient.disconnect_count >= 1
+    assert len(FakeClaudeSDKClient.options_seen) > clients_before_steer
+    turn = store.get_turn(second["turnId"])
+    assert turn.last_useful_message is not None
+    assert "second" in turn.last_useful_message
 
 
 @pytest.mark.asyncio

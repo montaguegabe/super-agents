@@ -435,13 +435,29 @@ class ClaudeAgentSdkClient:
                 )
                 last_useful_message = ""
                 await sdk_client.query(prompt)
-                async for message in sdk_client.receive_response():
-                    append_log(session.log_path, _message_to_log(message))
-                    if claude_session_id := _message_session_id(message):
-                        self.store.update_session(session_id, backend_session_id=claude_session_id)
-                    if useful := _message_preview(message):
-                        last_useful_message = useful
-                        self.store.update_turn(turn_id, last_useful_message=last_useful_message)
+                # A freshly resumed CLI can emit a no-op ResultMessage
+                # (num_turns == 0) from the resume handshake before this
+                # query's response. receive_response() stops at any result,
+                # so accepting that no-op would mark the turn completed with
+                # no output while the real answer buffers unread — and every
+                # later turn would then read the previous prompt's answer
+                # (off-by-one responses). Keep reading until a result that
+                # actually ran model turns.
+                while True:
+                    result_message: Any = None
+                    async for message in sdk_client.receive_response():
+                        append_log(session.log_path, _message_to_log(message))
+                        if claude_session_id := _message_session_id(message):
+                            self.store.update_session(session_id, backend_session_id=claude_session_id)
+                        if useful := _message_preview(message):
+                            last_useful_message = useful
+                            self.store.update_turn(turn_id, last_useful_message=last_useful_message)
+                        if getattr(message, "num_turns", None) is not None:
+                            result_message = message
+                    if result_message is None or not _is_noop_result(result_message):
+                        break
+                    if self._turn_was_cancelled(turn_id):
+                        break
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
@@ -461,6 +477,11 @@ class ClaudeAgentSdkClient:
                     )
             except Exception as exc:
                 append_log(session.log_path, f"[{iso_now()}] ERROR {type(exc).__name__}: {exc}\n")
+                # The stream may hold unread messages from this turn; a
+                # reused client would hand them to the next turn's
+                # receive_response(). Drop the client so the next turn
+                # resumes from the transcript tip on a clean stream.
+                await self._disconnect_sdk_client(session_id)
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
@@ -487,7 +508,14 @@ class ClaudeAgentSdkClient:
 
         sdk_client = self._sdk_clients.get(session.id)
         if sdk_client is not None and hasattr(sdk_client, "interrupt"):
-            await sdk_client.interrupt()
+            with contextlib.suppress(Exception):
+                await sdk_client.interrupt()
+        # The interrupted turn's reader may no longer be consuming (crashed
+        # task, other process), leaving its unread response in this client's
+        # stream; a reused stream hands that stale response to the next turn
+        # and every answer shifts one prompt behind. Drop the client so the
+        # steered turn reconnects from the transcript tip on a clean stream.
+        await self._disconnect_sdk_client(session.id)
 
         self.store.update_session(
             session.id,
@@ -777,6 +805,11 @@ class ClaudeAgentSdkClient:
             "error": f"{tool} is only available through the Codex app-server backend.",
             **{key: value for key, value in extra.items() if value is not None},
         }
+
+
+def _is_noop_result(message: Any) -> bool:
+    """A ResultMessage that ran no model turns (e.g. a resume handshake)."""
+    return getattr(message, "num_turns", None) == 0
 
 
 def _load_sdk() -> Any:
