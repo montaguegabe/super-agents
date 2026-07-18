@@ -31,6 +31,7 @@ class Session:
     last_observed_state: str | None = None
     last_useful_message: str | None = None
     backend_session_id: str | None = None
+    last_client_instance: str | None = None
     last_exit_code: int | None = None
     log_path: str | None = None
     raw_log_path: str | None = None
@@ -51,6 +52,7 @@ class Session:
             "lastObservedState": self.last_observed_state,
             "lastUsefulMessage": self.last_useful_message,
             "backendSessionId": self.backend_session_id,
+            "lastClientInstance": self.last_client_instance,
             "lastExitCode": self.last_exit_code,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
@@ -132,6 +134,7 @@ class Store:
                     last_observed_state text,
                     last_useful_message text,
                     backend_session_id text,
+                    last_client_instance text,
                     last_exit_code integer,
                     log_path text,
                     raw_log_path text,
@@ -157,22 +160,20 @@ class Store:
                 create index if not exists turns_session_idx on turns(session_id, created_at);
                 """
             )
-            columns = {
-                row["name"] for row in conn.execute("pragma table_info(turns)").fetchall()
-            }
+            columns = {row["name"] for row in conn.execute("pragma table_info(turns)").fetchall()}
             if "reasoning_effort" not in columns:
                 conn.execute("alter table turns add column reasoning_effort text")
             if "service_tier" not in columns:
                 conn.execute("alter table turns add column service_tier text")
             if "last_useful_message" not in columns:
                 conn.execute("alter table turns add column last_useful_message text")
-            session_columns = {
-                row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()
-            }
+            session_columns = {row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()}
             if "developer_instructions" not in session_columns:
                 conn.execute("alter table sessions add column developer_instructions text")
             if "backend_session_id" not in session_columns:
                 conn.execute("alter table sessions add column backend_session_id text")
+            if "last_client_instance" not in session_columns:
+                conn.execute("alter table sessions add column last_client_instance text")
 
     def create_session(
         self,
@@ -271,6 +272,7 @@ class Store:
             "last_observed_state",
             "last_useful_message",
             "backend_session_id",
+            "last_client_instance",
             "last_exit_code",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
@@ -423,9 +425,9 @@ def row_to_session(row: sqlite3.Row) -> Session:
     return Session(
         id=row["id"],
         name=row["name"],
-            agent_name=row["agent_name"],
-            developer_instructions=row["developer_instructions"],
-            cwd=row["cwd"],
+        agent_name=row["agent_name"],
+        developer_instructions=row["developer_instructions"],
+        cwd=row["cwd"],
         command=command_from_json(row["command_json"]),
         model=row["model"],
         status=row["status"],
@@ -435,6 +437,7 @@ def row_to_session(row: sqlite3.Row) -> Session:
         last_observed_state=row["last_observed_state"],
         last_useful_message=row["last_useful_message"],
         backend_session_id=row["backend_session_id"],
+        last_client_instance=row["last_client_instance"],
         last_exit_code=row["last_exit_code"],
         log_path=row["log_path"],
         raw_log_path=row["raw_log_path"],

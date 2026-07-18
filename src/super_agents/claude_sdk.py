@@ -9,8 +9,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import os
+import uuid
 from pathlib import Path
 from typing import Any, Callable
+
+try:  # POSIX advisory locking; unavailable on Windows.
+    import fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    fcntl = None  # type: ignore[assignment]
 
 from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
@@ -81,6 +88,11 @@ class ClaudeAgentSdkClient:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
+        # Identifies this client instance in the shared store so instances in
+        # other processes can tell their cached CLI's conversation leaf is
+        # stale (see _sdk_client_for).
+        self._instance_id = f"ci_{uuid.uuid4().hex}"
+        self._closed = False
 
     async def status(self) -> JsonObject:
         sessions = self.store.list_sessions(include_inactive=True)
@@ -406,7 +418,9 @@ class ClaudeAgentSdkClient:
         sdk: Any,
     ) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with lock, self._cross_process_session_lock(session_id):
+            # Re-read after acquiring the locks: another process may have run
+            # turns (advancing the conversation) while this one waited.
             session = self.store.get_session(session_id)
             try:
                 if self._turn_was_cancelled(turn_id):
@@ -459,6 +473,8 @@ class ClaudeAgentSdkClient:
                         last_observed_state=str(exc),
                     )
             finally:
+                if self._closed:
+                    await self._disconnect_sdk_client(session_id)
                 self._schedule_queue_drain(session_id)
 
     async def _interrupt_active_turn(self, session: Session, *, reason: str) -> str | None:
@@ -514,10 +530,20 @@ class ClaudeAgentSdkClient:
     ) -> Any:
         effective_effort = _claude_effort(reasoning_effort, service_tier)
         existing = self._sdk_clients.get(session.id)
+        if existing is not None and not self._owns_session_leaf(session):
+            # A client instance in another process ran the last turn, so this
+            # cached CLI's in-memory conversation no longer matches the
+            # session transcript tip. Reusing it would fork the conversation
+            # from a stale leaf and orphan the other process's turns;
+            # reconnect so the resume adopts the new tip.
+            await self._disconnect_sdk_client(session.id)
+            existing = None
         if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
             if model and hasattr(existing, "set_model"):
                 await existing.set_model(model)
+            self._record_session_leaf_owner(session.id)
             return existing
+        await self._disconnect_sdk_client(session.id)
         options = _agent_options(
             sdk,
             session.cwd,
@@ -529,7 +555,70 @@ class ClaudeAgentSdkClient:
         await client.connect()
         self._sdk_clients[session.id] = client
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
+        self._record_session_leaf_owner(session.id)
         return client
+
+    def _owns_session_leaf(self, session: Session) -> bool:
+        return session.last_client_instance in (None, self._instance_id)
+
+    def _record_session_leaf_owner(self, session_id: str) -> None:
+        self.store.update_session(session_id, last_client_instance=self._instance_id)
+
+    async def _disconnect_sdk_client(self, session_id: str) -> None:
+        client = self._sdk_clients.pop(session_id, None)
+        self._sdk_client_efforts.pop(session_id, None)
+        if client is None:
+            return
+        disconnect = getattr(client, "disconnect", None)
+        if disconnect is None:
+            return
+        with contextlib.suppress(Exception):
+            await disconnect()
+
+    @contextlib.asynccontextmanager
+    async def _cross_process_session_lock(self, session_id: str):
+        """Serialize a session's turns across processes.
+
+        Several processes can hold client instances for the same store (a
+        pool of voice workers plus long-lived MCP servers). Each keeps its
+        own Claude CLI subprocess, and every CLI appends conversation entries
+        to the one shared session transcript; unserialized turns interleave
+        parent chains, and the next resume then forks from a stale leaf and
+        silently drops the other writer's turns from the visible
+        conversation. flock releases on process death, so a crashed worker
+        cannot wedge the session.
+        """
+        if fcntl is None:
+            yield
+            return
+        lock_dir = self.store.path.parent / "session-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_dir / f"{session_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    async def close(self) -> None:
+        """Disconnect cached Claude CLI clients, flushing their transcripts.
+
+        A live CLI subprocess can buffer transcript entries until it exits;
+        a client left connected past its owner's lifetime flushes those
+        entries after other processes' turns, corrupting the leaf the next
+        resume picks. Sessions with an in-flight turn are left to disconnect
+        when that turn finishes (see _run_turn) rather than being killed
+        mid-answer here.
+        """
+        self._closed = True
+        for session_id in list(self._sdk_clients):
+            lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+            if lock.locked():
+                continue
+            async with lock:
+                await self._disconnect_sdk_client(session_id)
 
     def _schedule_queue_drain(self, session_id: str) -> None:
         task = self._queue_tasks.get(session_id)

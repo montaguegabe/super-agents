@@ -41,6 +41,7 @@ class FakeClaudeSDKClient:
     env_seen: list[tuple[str, bool]] = []
     blocked_prompts: set[str] = set()
     interrupted_prompts: list[str] = []
+    disconnect_count: int = 0
 
     def __init__(self, options: FakeClaudeAgentOptions) -> None:
         self.options = options
@@ -72,6 +73,10 @@ class FakeClaudeSDKClient:
     async def interrupt(self) -> None:
         self.interrupted = True
         FakeClaudeSDKClient.interrupted_prompts.append(_user_prompt(self.prompt))
+
+    async def disconnect(self) -> None:
+        self.connected = False
+        FakeClaudeSDKClient.disconnect_count += 1
 
 
 class FakeSdk:
@@ -105,6 +110,7 @@ def reset_fake_claude_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     FakeClaudeSDKClient.env_seen = []
     FakeClaudeSDKClient.blocked_prompts = set()
     FakeClaudeSDKClient.interrupted_prompts = []
+    FakeClaudeSDKClient.disconnect_count = 0
 
 
 @pytest.mark.asyncio
@@ -708,6 +714,70 @@ async def test_claude_sdk_queue_on_idle_session_starts_immediately(
     assert result["startedImmediately"] is True
     assert [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["queued while idle"]
     assert store.queued_turns(result["threadId"]) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_reuses_cached_client_for_consecutive_turns(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "one"})
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+    second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "two"})
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+
+    assert len(FakeClaudeSDKClient.options_seen) == 1
+    assert FakeClaudeSDKClient.disconnect_count == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_close_disconnects_cached_clients(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    await client.close()
+
+    assert FakeClaudeSDKClient.disconnect_count == 1
+    assert client._sdk_clients == {}
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_reconnects_when_another_instance_ran_last_turn(tmp_path: Path) -> None:
+    """Two client instances sharing a store must not fork the conversation.
+
+    Reusing a cached CLI whose in-memory conversation predates another
+    instance's turns resumes from a stale leaf and orphans those turns —
+    the dispatcher "I never started Thandi" amnesia. The second instance's
+    write must force the first to disconnect and re-resume the session.
+    """
+    store = Store(tmp_path / "state.sqlite3")
+    first_instance = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await first_instance.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await first_instance.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "one"})
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+    assert len(FakeClaudeSDKClient.options_seen) == 1
+
+    second_instance = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    second = await second_instance.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "two"})
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+    assert len(FakeClaudeSDKClient.options_seen) == 2
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs["resume"] == "b01bd0f7-f1b0-485e-a47c-d831645174b9"
+
+    third = await first_instance.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "three"})
+    await wait_for(lambda: store.get_turn(third["turnId"]).status == "completed")
+
+    # The first instance saw the second instance's turn, dropped its stale
+    # cached client, and resumed the native session instead of replying on
+    # its outdated in-memory conversation.
+    assert FakeClaudeSDKClient.disconnect_count == 1
+    assert len(FakeClaudeSDKClient.options_seen) == 3
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs["resume"] == "b01bd0f7-f1b0-485e-a47c-d831645174b9"
+    assert store.get_session(first["threadId"]).last_client_instance == first_instance._instance_id
 
 
 async def wait_for(predicate, timeout: float = 2.0) -> None:  # type: ignore[no-untyped-def]
