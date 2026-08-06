@@ -69,10 +69,21 @@ from super_agents.defaults import (
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
 
+# How long an extra response-read (draining steered queries) waits for the
+# next response to start before concluding the CLI coalesced those queries
+# into an already-consumed response.
+_STEER_DRAIN_TIMEOUT_SECONDS = 5.0
+
 SDK_IMPORT_ERROR = (
     "Claude Code backend requires the claude-agent-sdk package. "
     "Install super-agents with the claude extra, or install claude-agent-sdk in this environment."
 )
+
+
+async def _chain_async(first: Any, rest: Any):
+    yield first
+    async for item in rest:
+        yield item
 
 
 class ClaudeAgentSdkClient:
@@ -92,7 +103,10 @@ class ClaudeAgentSdkClient:
         # been consumed from the SDK stream. Every query (turn prompt or
         # steer) must be matched by one consumed result, or the unread
         # response shifts every later turn's answer by one (off-by-one).
+        # The CLI may coalesce rapid queries into one response, so extra
+        # reads are bounded by this timeout instead of blocking forever.
         self._session_pending_results: dict[str, int] = {}
+        self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
         # Identifies this client instance in the shared store so instances in
         # other processes can tell their cached CLI's conversation leaf is
         # stale (see _sdk_client_for).
@@ -503,29 +517,60 @@ class ClaudeAgentSdkClient:
                 self._register_pending_result(session_id)
                 await sdk_client.query(prompt)
                 # Every query sent into this session (this turn's prompt plus
-                # any steers that joined while it ran) produces one response
-                # on the shared SDK stream. Consume a result per outstanding
-                # query, or the unread response is handed to the NEXT turn's
-                # receive_response() and every later answer shifts by one.
-                # A freshly resumed CLI can additionally emit a no-op
-                # ResultMessage (num_turns == 0) from the resume handshake;
-                # those don't count against any query.
+                # any steers that joined while it ran) produces a response on
+                # the shared SDK stream — except that the CLI can COALESCE
+                # rapid queries into a single response. Leaving a response
+                # unread hands it to the NEXT turn's receive_response() and
+                # every later answer shifts by one; waiting for responses
+                # that were coalesced away hangs the turn forever. So: the
+                # first response cycle blocks normally, extra cycles (for
+                # steers) wait only briefly for the next response to start,
+                # and on timeout the turn finishes on a fresh client so the
+                # stream cannot owe anything. A freshly resumed CLI can also
+                # emit a no-op ResultMessage (num_turns == 0) from the resume
+                # handshake; those don't count against any query.
+                consumed_any_result = False
                 while self._session_pending_results.get(session_id, 0) > 0:
                     result_message: Any = None
-                    async for message in sdk_client.receive_response():
-                        append_log(session.log_path, _message_to_log(message))
-                        if claude_session_id := _message_session_id(message):
-                            self.store.update_session(session_id, backend_session_id=claude_session_id)
-                        if useful := _message_preview(message):
-                            last_useful_message = useful
-                            self.store.update_turn(turn_id, last_useful_message=last_useful_message)
-                        if getattr(message, "num_turns", None) is not None:
-                            result_message = message
+                    stream = sdk_client.receive_response()
+                    try:
+                        if consumed_any_result:
+                            try:
+                                first_message = await asyncio.wait_for(
+                                    stream.__anext__(),
+                                    timeout=self._steer_drain_timeout_seconds,
+                                )
+                            except (TimeoutError, StopAsyncIteration):
+                                # No further response is coming: the
+                                # remaining queries were coalesced into an
+                                # already-consumed response. Reset on a
+                                # clean stream.
+                                self._clear_pending_results(session_id)
+                                await self._disconnect_sdk_client(session_id)
+                                break
+                            messages = _chain_async(first_message, stream)
+                        else:
+                            messages = stream
+                        async for message in messages:
+                            append_log(session.log_path, _message_to_log(message))
+                            if claude_session_id := _message_session_id(message):
+                                self.store.update_session(session_id, backend_session_id=claude_session_id)
+                            if useful := _message_preview(message):
+                                last_useful_message = useful
+                                self.store.update_turn(turn_id, last_useful_message=last_useful_message)
+                            if getattr(message, "num_turns", None) is not None:
+                                result_message = message
+                    finally:
+                        aclose = getattr(stream, "aclose", None)
+                        if aclose is not None:
+                            with contextlib.suppress(Exception):
+                                await aclose()
                     if result_message is None:
                         # Stream ended without a result; nothing more to read.
                         self._clear_pending_results(session_id)
                         break
                     if not _is_noop_result(result_message):
+                        consumed_any_result = True
                         self._consume_pending_result(session_id)
                     if self._turn_was_cancelled(turn_id):
                         break

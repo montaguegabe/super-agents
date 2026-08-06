@@ -1000,3 +1000,60 @@ async def test_claude_sdk_steered_response_does_not_shift_next_turn(
     assert "how are you" in (first_turn.last_useful_message or "")
     assert "summarize" in (second_turn.last_useful_message or "")
     assert "how are you" not in (second_turn.last_useful_message or "")
+
+
+class CoalescingClaudeSDKClient(FakeClaudeSDKClient):
+    """Models CLI coalescing: all queued queries produce a single response."""
+
+    queue: list[str] = []
+    hold: bool = False
+
+    async def query(self, prompt: str) -> None:
+        await super().query(prompt)
+        CoalescingClaudeSDKClient.queue.append(prompt)
+
+    async def receive_response(self):
+        while CoalescingClaudeSDKClient.hold or not CoalescingClaudeSDKClient.queue:
+            await asyncio.sleep(0.01)
+        prompts = [_user_prompt(item) for item in CoalescingClaudeSDKClient.queue]
+        CoalescingClaudeSDKClient.queue.clear()
+        yield FakeAssistantMessage([FakeTextBlock(f"reply:{prompts[-1]}")])
+        yield FakeResultMessage(f"done:{prompts[-1]}")
+
+
+class CoalescingSdk:
+    ClaudeAgentOptions = FakeClaudeAgentOptions
+    ClaudeSDKClient = CoalescingClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_coalesced_steers_do_not_hang_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The CLI can merge rapid queries into one response; the turn must not
+    wait forever for responses that were coalesced away."""
+    CoalescingClaudeSDKClient.queue = []
+    CoalescingClaudeSDKClient.hold = True
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: CoalescingSdk())
+    client._steer_drain_timeout_seconds = 0.05
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
+    await wait_for(
+        lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["hello"]
+    )
+    steered = await client.steer_by_label(LabelQueryInput(label="sdk"), "and also this", {})
+    assert steered["turnId"] == first["turnId"]
+
+    CoalescingClaudeSDKClient.hold = False
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+
+    first_turn = store.get_turn(first["turnId"])
+    assert "and also this" in (first_turn.last_useful_message or "")
+
+    second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "next question"})
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+    second_turn = store.get_turn(second["turnId"])
+    assert "next question" in (second_turn.last_useful_message or "")
