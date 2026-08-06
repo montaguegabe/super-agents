@@ -163,7 +163,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
     assert store.get_turn(result["turnId"]).status == "completed"
     assert store.get_turn(result["turnId"]).last_useful_message.endswith("\n\nhello")
     assert store.get_session(started["threadId"]).backend_session_id == "b01bd0f7-f1b0-485e-a47c-d831645174b9"
-    assert session.status == "waiting"
+    assert session.status == "completed"
     assert "reply:" in log
     assert "done:" in log
 
@@ -445,7 +445,7 @@ async def test_claude_sdk_start_thread_refreshes_existing_named_session(tmp_path
     assert session.cwd == str(tmp_path)
     assert session.agent_name == "Dottie"
     assert session.developer_instructions == ("new fruit\n\nSuper Agent thread name: dispatcher\nYour name is Dottie.")
-    assert session.status == "waiting"
+    assert session.status == "completed"
 
 
 @pytest.mark.asyncio
@@ -939,3 +939,64 @@ async def wait_for(predicate, timeout: float = 2.0) -> None:  # type: ignore[no-
             return
         await asyncio.sleep(0.05)
     raise AssertionError("timed out waiting for predicate")
+
+
+class FifoStreamClaudeSDKClient(FakeClaudeSDKClient):
+    """Models the real SDK stream: responses return in query order (FIFO)."""
+
+    queue: list[str] = []
+    hold: bool = False
+
+    async def query(self, prompt: str) -> None:
+        await super().query(prompt)
+        FifoStreamClaudeSDKClient.queue.append(prompt)
+
+    async def receive_response(self):
+        while FifoStreamClaudeSDKClient.hold or not FifoStreamClaudeSDKClient.queue:
+            await asyncio.sleep(0.01)
+        prompt = _user_prompt(FifoStreamClaudeSDKClient.queue.pop(0))
+        yield FakeAssistantMessage([FakeTextBlock(f"reply:{prompt}")])
+        yield FakeResultMessage(f"done:{prompt}")
+
+
+class FifoStreamSdk:
+    ClaudeAgentOptions = FakeClaudeAgentOptions
+    ClaudeSDKClient = FifoStreamClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_steered_response_does_not_shift_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A steer's response must be consumed by the steered turn.
+
+    Regression for the voice off-by-one: a follow-up steered into a finishing
+    turn produced an extra response on the shared stream; the next turn's
+    reader consumed that stale response as its own answer, and every later
+    turn answered the previous prompt.
+    """
+    FifoStreamClaudeSDKClient.queue = []
+    FifoStreamClaudeSDKClient.hold = True
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: FifoStreamSdk())
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
+    await wait_for(
+        lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["hello"]
+    )
+    steered = await client.steer_by_label(LabelQueryInput(label="sdk"), "how are you", {})
+    assert steered["turnId"] == first["turnId"]
+
+    FifoStreamClaudeSDKClient.hold = False
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+
+    second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "summarize"})
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+
+    first_turn = store.get_turn(first["turnId"])
+    second_turn = store.get_turn(second["turnId"])
+    assert "how are you" in (first_turn.last_useful_message or "")
+    assert "summarize" in (second_turn.last_useful_message or "")
+    assert "how are you" not in (second_turn.last_useful_message or "")

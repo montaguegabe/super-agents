@@ -88,6 +88,11 @@ class ClaudeAgentSdkClient:
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
+        # Outstanding query() calls per session whose responses have not yet
+        # been consumed from the SDK stream. Every query (turn prompt or
+        # steer) must be matched by one consumed result, or the unread
+        # response shifts every later turn's answer by one (off-by-one).
+        self._session_pending_results: dict[str, int] = {}
         # Identifies this client instance in the shared store so instances in
         # other processes can tell their cached CLI's conversation leaf is
         # stale (see _sdk_client_for).
@@ -141,7 +146,7 @@ class ClaudeAgentSdkClient:
                 agent_name=effective_agent_name,
                 developer_instructions=effective_developer_instructions,
                 model=_optional_str(input_data.get("model")) or existing.model or self._default_model(),
-                status="waiting",
+                status="completed",
                 active_turn_id=None,
                 last_observed_state="Claude Code thread refreshed",
             )
@@ -252,13 +257,9 @@ class ClaudeAgentSdkClient:
             try:
                 turn = self.store.get_turn(input_data.turn_id)
             except KeyError as exc:
-                raise ValueError(
-                    f"No turn {input_data.turn_id} is known for thread {session.id}."
-                ) from exc
+                raise ValueError(f"No turn {input_data.turn_id} is known for thread {session.id}.") from exc
             if turn.session_id != session.id:
-                raise ValueError(
-                    f"Turn {input_data.turn_id} does not belong to thread {session.id}."
-                )
+                raise ValueError(f"Turn {input_data.turn_id} does not belong to thread {session.id}.")
             payload["turnId"] = turn.id
             payload["status"] = turn.status
             turn_view = self._turn_view(session, turn)
@@ -370,7 +371,9 @@ class ClaudeAgentSdkClient:
             try:
                 turn = self.store.get_turn(input_data.queue_item_id)
             except KeyError as exc:
-                raise ValueError(f"No queued Super Agents turn found for queueItemId {input_data.queue_item_id}.") from exc
+                raise ValueError(
+                    f"No queued Super Agents turn found for queueItemId {input_data.queue_item_id}."
+                ) from exc
             if session and turn.session_id != session.id:
                 raise ValueError(f"No queued Super Agents turn found for queueItemId {input_data.queue_item_id}.")
             session = session or self.store.get_session(turn.session_id)
@@ -497,16 +500,17 @@ class ClaudeAgentSdkClient:
                     sdk,
                 )
                 last_useful_message = ""
+                self._register_pending_result(session_id)
                 await sdk_client.query(prompt)
-                # A freshly resumed CLI can emit a no-op ResultMessage
-                # (num_turns == 0) from the resume handshake before this
-                # query's response. receive_response() stops at any result,
-                # so accepting that no-op would mark the turn completed with
-                # no output while the real answer buffers unread — and every
-                # later turn would then read the previous prompt's answer
-                # (off-by-one responses). Keep reading until a result that
-                # actually ran model turns.
-                while True:
+                # Every query sent into this session (this turn's prompt plus
+                # any steers that joined while it ran) produces one response
+                # on the shared SDK stream. Consume a result per outstanding
+                # query, or the unread response is handed to the NEXT turn's
+                # receive_response() and every later answer shifts by one.
+                # A freshly resumed CLI can additionally emit a no-op
+                # ResultMessage (num_turns == 0) from the resume handshake;
+                # those don't count against any query.
+                while self._session_pending_results.get(session_id, 0) > 0:
                     result_message: Any = None
                     async for message in sdk_client.receive_response():
                         append_log(session.log_path, _message_to_log(message))
@@ -517,11 +521,21 @@ class ClaudeAgentSdkClient:
                             self.store.update_turn(turn_id, last_useful_message=last_useful_message)
                         if getattr(message, "num_turns", None) is not None:
                             result_message = message
-                    if result_message is None or not _is_noop_result(result_message):
+                    if result_message is None:
+                        # Stream ended without a result; nothing more to read.
+                        self._clear_pending_results(session_id)
                         break
+                    if not _is_noop_result(result_message):
+                        self._consume_pending_result(session_id)
                     if self._turn_was_cancelled(turn_id):
                         break
                 if self._turn_was_cancelled(turn_id):
+                    # The cancelled query's response may still be unread on
+                    # the stream (cancellation can be flagged from another
+                    # process without a local interrupt). Drop the client so
+                    # the next turn starts on a clean stream instead of
+                    # inheriting a stale response.
+                    await self._disconnect_sdk_client(session_id)
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
                     self.store.update_turn(
@@ -530,10 +544,14 @@ class ClaudeAgentSdkClient:
                         finished_at=iso_now(),
                         last_useful_message=last_useful_message or None,
                     )
+                    # "completed", not "waiting": waiting means blocked on
+                    # user input (pending approval/callback) and counts as
+                    # active. A finished turn left every thread looking
+                    # active/unfinished to status consumers.
                     self._finish_session_turn(
                         session_id,
                         turn_id,
-                        status="waiting",
+                        status="completed",
                         active_turn_id=None,
                         last_observed_state="Claude Code response completed",
                         last_useful_message=last_useful_message or None,
@@ -577,9 +595,7 @@ class ClaudeAgentSdkClient:
             )
 
         if requested_turn_id and requested_turn_id != active_turn_id:
-            raise RuntimeError(
-                f"Expected active turn id `{requested_turn_id}` but found `{active_turn_id}`."
-            )
+            raise RuntimeError(f"Expected active turn id `{requested_turn_id}` but found `{active_turn_id}`.")
 
         sdk_client = await self._wait_for_active_sdk_client(session.id)
         refreshed = self.store.get_session(session.id)
@@ -591,7 +607,15 @@ class ClaudeAgentSdkClient:
         if sdk_client is None:
             raise RuntimeError("Active Claude Code turn cannot accept steering before its SDK client is ready.")
 
-        await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
+        # The steered query produces its own response on the shared stream;
+        # register it so the active turn's reader consumes it instead of
+        # leaving it to shift the next turn's answer (off-by-one).
+        self._register_pending_result(session.id)
+        try:
+            await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
+        except BaseException:
+            self._consume_pending_result(session.id)
+            raise
         self._record_session_leaf_owner(session.id)
         current_turn = self.store.get_turn(active_turn_id)
         self.store.update_session(
@@ -716,7 +740,23 @@ class ClaudeAgentSdkClient:
     def _record_session_leaf_owner(self, session_id: str) -> None:
         self.store.update_session(session_id, last_client_instance=self._instance_id)
 
+    def _register_pending_result(self, session_id: str) -> None:
+        self._session_pending_results[session_id] = self._session_pending_results.get(session_id, 0) + 1
+
+    def _consume_pending_result(self, session_id: str) -> None:
+        pending = self._session_pending_results.get(session_id, 0)
+        if pending > 1:
+            self._session_pending_results[session_id] = pending - 1
+        else:
+            self._session_pending_results.pop(session_id, None)
+
+    def _clear_pending_results(self, session_id: str) -> None:
+        self._session_pending_results.pop(session_id, None)
+
     async def _disconnect_sdk_client(self, session_id: str) -> None:
+        # A dropped client means a fresh stream on the next connect; any
+        # unconsumed responses died with the old stream.
+        self._clear_pending_results(session_id)
         client = self._sdk_clients.pop(session_id, None)
         self._sdk_client_efforts.pop(session_id, None)
         if client is None:
