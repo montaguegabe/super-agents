@@ -180,14 +180,27 @@ class ClaudeAgentSdkClient:
         input_data: LabelQueryInput,
         *,
         developer_instructions: str | None = None,
+        replace_developer_instructions: bool = False,
     ) -> JsonObject:
+        """Resume a session, optionally updating its developer instructions.
+
+        By default provided instructions are overlaid onto the session's
+        existing ones (idempotent for identical text). With
+        ``replace_developer_instructions=True`` they become the session's
+        instructions outright — for callers that manage instructions from a
+        single source of truth and must not accumulate stale text.
+        """
         session = self._resolve_session(input_data)
         if developer_instructions:
-            effective_developer_instructions = with_super_agent_identity_instructions(
-                _combine_developer_instructions(
+            if replace_developer_instructions:
+                combined = developer_instructions
+            else:
+                combined = _combine_developer_instructions(
                     _without_super_agent_identity_lines(session.developer_instructions),
                     developer_instructions,
-                ),
+                )
+            effective_developer_instructions = with_super_agent_identity_instructions(
+                combined,
                 session.name,
                 session.id,
                 session.agent_name,

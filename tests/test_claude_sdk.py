@@ -1057,3 +1057,37 @@ async def test_claude_sdk_coalesced_steers_do_not_hang_the_turn(
     await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
     second_turn = store.get_turn(second["turnId"])
     assert "next question" in (second_turn.last_useful_message or "")
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_resume_can_replace_developer_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """replace_developer_instructions swaps stale instructions for current
+    ones instead of appending, so template updates propagate on resume."""
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread(
+        {"name": "sdk", "cwd": str(tmp_path), "developerInstructions": "Old stale rules."}
+    )
+
+    resumed = await client.resume_by_label(
+        LabelQueryInput(label="sdk"),
+        developer_instructions="New current rules.",
+        replace_developer_instructions=True,
+    )
+
+    session = store.get_session(started["threadId"])
+    assert resumed["threadId"] == started["threadId"]
+    assert "New current rules." in (session.developer_instructions or "")
+    assert "Old stale rules." not in (session.developer_instructions or "")
+    assert "Super Agent thread name: sdk" in (session.developer_instructions or "")
+
+    overlaid = await client.resume_by_label(
+        LabelQueryInput(label="sdk"),
+        developer_instructions="Additional overlay.",
+    )
+    session = store.get_session(overlaid["threadId"])
+    assert "New current rules." in (session.developer_instructions or "")
+    assert "Additional overlay." in (session.developer_instructions or "")
