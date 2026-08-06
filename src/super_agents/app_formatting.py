@@ -4,6 +4,33 @@ from typing import Any
 
 from .state import JsonObject, get_string, without_none  # noqa: F401  (without_none re-exported)
 
+USEFUL_TEXT_KEYS = ("text", "message", "content", "summary", "output", "preview")
+ASSISTANT_ROLE_VALUES = {"agent", "agentmessage", "assistant", "assistantmessage"}
+USER_ROLE_VALUES = {"user", "usermessage"}
+METADATA_TEXT_KEYS = {
+    "id",
+    "itemid",
+    "clientid",
+    "turnid",
+    "threadid",
+    "requestid",
+    "callid",
+    "sessionid",
+    "type",
+    "role",
+    "phase",
+    "status",
+    "subtype",
+    "kind",
+    "reasoningeffort",
+    "createdat",
+    "startedat",
+    "completedat",
+    "updatedat",
+    "finishedat",
+    "lasteventat",
+}
+
 
 def preview_text(value: str, max_length: int = 240) -> str:
     normalized = " ".join(value.split())
@@ -13,6 +40,18 @@ def preview_text(value: str, max_length: int = 240) -> str:
 def text_preview(value: Any) -> str | None:
     text = find_useful_text(value)
     return preview_text(text) if text else None
+
+
+def turn_text_preview(value: Any) -> str | None:
+    text = find_turn_useful_text(value)
+    return preview_text(text) if text else None
+
+
+def find_turn_useful_text(value: Any) -> str | None:
+    text = _find_role_text(value, ASSISTANT_ROLE_VALUES)
+    if text:
+        return text
+    return _find_non_user_text(value)
 
 
 def find_useful_text(value: Any, depth: int = 0) -> str | None:
@@ -29,15 +68,116 @@ def find_useful_text(value: Any, depth: int = 0) -> str | None:
         return None
     if not isinstance(value, dict):
         return None
-    for key in ["text", "message", "content", "summary", "output", "preview"]:
+    for key in USEFUL_TEXT_KEYS:
         result = find_useful_text(value.get(key), depth + 1)
         if result:
             return result
-    for item in value.values():
+    for key, item in value.items():
+        if _is_metadata_text_key(key):
+            continue
         result = find_useful_text(item, depth + 1)
         if result:
             return result
     return None
+
+
+def _is_metadata_text_key(key: Any) -> bool:
+    normalized = "".join(char for char in str(key).lower() if char.isalnum())
+    return normalized in METADATA_TEXT_KEYS or normalized.endswith("id")
+
+
+def _find_role_text(value: Any, role_values: set[str], depth: int = 0) -> str | None:
+    if depth > 8 or value is None:
+        return None
+    if isinstance(value, list):
+        for item in reversed(value):
+            result = _find_role_text(item, role_values, depth + 1)
+            if result:
+                return result
+        return None
+    if not isinstance(value, dict):
+        return None
+    if _message_role(value) in role_values:
+        return _find_message_text(value)
+    for key in ("payload", "item", "message", "turn", "items", "events", "messages", "content"):
+        result = _find_role_text(value.get(key), role_values, depth + 1)
+        if result:
+            return result
+    return None
+
+
+def _find_non_user_text(value: Any, depth: int = 0) -> str | None:
+    if depth > 8 or value is None:
+        return None
+    if isinstance(value, list):
+        for item in reversed(value):
+            result = _find_non_user_text(item, depth + 1)
+            if result:
+                return result
+        return None
+    if not isinstance(value, dict):
+        return None
+    role = _message_role(value)
+    if role in USER_ROLE_VALUES:
+        return None
+    if role:
+        return _find_message_text(value)
+    for key in ("payload", "item", "message", "turn", "items", "events", "messages", "content"):
+        result = _find_non_user_text(value.get(key), depth + 1)
+        if result:
+            return result
+    if _find_role_text(value, USER_ROLE_VALUES):
+        return None
+    if text := find_useful_text(value):
+        return text
+    return None
+
+
+def _message_role(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    role = _role_value(value.get("role"))
+    if role in ASSISTANT_ROLE_VALUES | USER_ROLE_VALUES:
+        return role
+    item_type = _role_value(value.get("type"))
+    if item_type in ASSISTANT_ROLE_VALUES | USER_ROLE_VALUES:
+        return item_type
+    payload = value.get("payload")
+    if isinstance(payload, dict):
+        return _message_role(payload)
+    return role or item_type
+
+
+def _find_message_text(value: Any, depth: int = 0) -> str | None:
+    if depth > 6 or value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, list):
+        for item in value:
+            result = _find_message_text(item, depth + 1)
+            if result:
+                return result
+        return None
+    if not isinstance(value, dict):
+        return None
+    for key in USEFUL_TEXT_KEYS:
+        result = _find_message_text(value.get(key), depth + 1)
+        if result:
+            return result
+    for key, item in value.items():
+        if _is_metadata_text_key(key):
+            continue
+        result = _find_message_text(item, depth + 1)
+        if result:
+            return result
+    return None
+
+
+def _role_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return "".join(char for char in value.lower() if char.isalnum()) or None
 
 
 def as_object(value: Any) -> JsonObject:
@@ -63,7 +203,7 @@ def compact_turn_summary(
             "reasoningEffort": tracked_turn.reasoning_effort if tracked_turn else None,
             "startedAt": scalar_field(persisted_turn, "startedAt"),
             "completedAt": scalar_field(persisted_turn, "completedAt"),
-            "lastUsefulMessage": text_preview(persisted_turn),
+            "lastUsefulMessage": turn_text_preview(persisted_turn),
             "eventCount": len(tracked_turn.events) if tracked_turn else None,
             "pendingRequestCount": len(tracked_turn.pending_requests) if tracked_turn else None,
         }

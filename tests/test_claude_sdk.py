@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from super_agents.agent_store import Store
-from super_agents.app_models import LabelQueryInput
+from super_agents.app_models import LabelQueryInput, QueueCancelInput
 from super_agents.claude_sdk import ClaudeAgentSdkClient
 
 
@@ -114,6 +114,11 @@ def reset_fake_claude_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         "SUPER_AGENTS_DEFAULT_CONFIG_PATH",
         str(tmp_path / "missing-dispatcher-config.json"),
     )
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("SUPER_AGENTS_CLAUDE_EXTRA_ARGS", raising=False)
+    monkeypatch.delenv("OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("OPENBASE_CLOUD_ANTHROPIC_BASE_URL", raising=False)
     FakeClaudeSDKClient.prompts = []
     FakeClaudeSDKClient.options_seen = []
     FakeClaudeSDKClient.env_seen = []
@@ -607,6 +612,40 @@ async def test_claude_sdk_read_backfills_latest_turn_message_from_session(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_progress_scopes_to_requested_turn(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    older = store.create_turn(
+        started["threadId"],
+        "older cancelled fragment",
+        status="cancelled",
+    )
+    target = store.create_turn(
+        started["threadId"],
+        "current follow-up",
+        status="completed",
+    )
+    store.update_turn(target.id, last_useful_message="The scoped turn answer.")
+    store.update_session(
+        started["threadId"],
+        status="waiting",
+        last_turn_id=target.id,
+        last_useful_message="The session preview answer.",
+    )
+
+    progress = await client.progress_by_label(
+        LabelQueryInput(label="sdk", turn_id=target.id, max_items=5)
+    )
+
+    assert progress["turnId"] == target.id
+    assert progress["status"] == "completed"
+    assert progress["turn"]["lastUsefulMessage"] == "The scoped turn answer."
+    assert progress["turns"] == [progress["turn"]]
+    assert older.id not in json.dumps(progress)
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_busy_session_start_steers_instead_of_queueing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -623,20 +662,21 @@ async def test_claude_sdk_busy_session_start_steers_instead_of_queueing(
     await wait_for(lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["first"])
     second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "second"})
 
-    await wait_for(lambda: store.get_turn(first["turnId"]).status == "cancelled")
-    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
 
     assert second["queued"] is False
     assert second["steered"] is True
+    assert second["nativeSteer"] is True
     assert second["drain"] == "steered_active_turn"
-    assert second["interruptedTurnId"] == first["turnId"]
-    assert FakeClaudeSDKClient.interrupted_prompts == ["first"]
+    assert second["turnId"] == first["turnId"]
+    assert FakeClaudeSDKClient.interrupted_prompts == []
     assert [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["first", "second"]
     assert store.queued_turns(second["threadId"]) == []
+    assert "second" in (store.get_turn(first["turnId"]).last_useful_message or "")
 
 
 @pytest.mark.asyncio
-async def test_claude_sdk_steer_by_label_preserves_reasoning_effort(
+async def test_claude_sdk_steer_by_label_uses_native_active_turn_steering(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -656,20 +696,19 @@ async def test_claude_sdk_steer_by_label_preserves_reasoning_effort(
         {"reasoningEffort": "low"},
     )
 
-    await wait_for(lambda: store.get_turn(first["turnId"]).status == "cancelled")
-    await wait_for(lambda: store.get_turn(steered["turnId"]).status == "completed")
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
 
     assert steered["steered"] is True
-    assert steered["interruptedTurnId"] == first["turnId"]
-    assert FakeClaudeSDKClient.interrupted_prompts == ["first"]
-    assert store.get_turn(steered["turnId"]).reasoning_effort == "low"
+    assert steered["nativeSteer"] is True
+    assert steered["turnId"] == first["turnId"]
+    assert FakeClaudeSDKClient.interrupted_prompts == []
+    assert store.get_turn(steered["turnId"]).reasoning_effort == "high"
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
-        "effort": "low",
+        "effort": "high",
         "env": {"ANTHROPIC_API_KEY": ""},
-        "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
 
 
@@ -697,12 +736,12 @@ async def test_claude_sdk_turn_skips_noop_handshake_result(
 
 
 @pytest.mark.asyncio
-async def test_claude_sdk_steer_reconnects_client_for_clean_stream(
+async def test_claude_sdk_native_steer_does_not_reconnect_or_read_stale_stream(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Steering drops the cached client so the new turn cannot read the
-    interrupted turn's leftover response from a reused stream."""
+    """Native steering keeps the active Claude Code stream and updates the
+    in-flight turn instead of creating a replacement turn."""
     FakeClaudeSDKClient.blocked_prompts = {"first"}
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
@@ -713,12 +752,12 @@ async def test_claude_sdk_steer_reconnects_client_for_clean_stream(
     clients_before_steer = len(FakeClaudeSDKClient.options_seen)
     second = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "second"})
 
-    await wait_for(lambda: store.get_turn(first["turnId"]).status == "cancelled")
-    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
 
-    assert FakeClaudeSDKClient.disconnect_count >= 1
-    assert len(FakeClaudeSDKClient.options_seen) > clients_before_steer
-    turn = store.get_turn(second["turnId"])
+    assert second["turnId"] == first["turnId"]
+    assert FakeClaudeSDKClient.disconnect_count == 0
+    assert len(FakeClaudeSDKClient.options_seen) == clients_before_steer
+    turn = store.get_turn(first["turnId"])
     assert turn.last_useful_message is not None
     assert "second" in turn.last_useful_message
 
@@ -753,6 +792,59 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
         "env": {"ANTHROPIC_API_KEY": ""},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_cancel_queued_turn_by_id_and_position(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    FakeClaudeSDKClient.blocked_prompts = {"first"}
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "first"})
+    await wait_for(lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["first"])
+    keep = await client.queue_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "keep"})
+    remove = await client.queue_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "remove"})
+
+    removed = await client.cancel_queued_turn(QueueCancelInput(queue_item_id=remove["turnId"]))
+
+    assert removed["cancelled"] is True
+    assert removed["queueItemId"] == remove["turnId"]
+    assert removed["position"] == 2
+    assert removed["queueDepth"] == 1
+    assert [turn.id for turn in store.queued_turns(first["threadId"])] == [keep["turnId"]]
+
+    removed_by_position = await client.cancel_queued_turn(QueueCancelInput(label="sdk", position=1))
+
+    assert removed_by_position["queueItemId"] == keep["turnId"]
+    assert removed_by_position["queueDepth"] == 0
+    assert store.queued_turns(first["threadId"]) == []
+
+    await client.cancel_by_label(LabelQueryInput(label="sdk"))
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "cancelled")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_cancel_queued_turn_rejects_missing_and_started_items(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    active = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "running"})
+
+    with pytest.raises(ValueError, match="No queued Super Agents turn found"):
+        await client.cancel_queued_turn(QueueCancelInput(queue_item_id="t_missing"))
+    with pytest.raises(ValueError, match="already started"):
+        await client.cancel_queued_turn(QueueCancelInput(queue_item_id=active["turnId"]))
+
+    await wait_for(lambda: store.get_turn(active["turnId"]).status == "completed")
+    await client.close()
 
 
 @pytest.mark.asyncio

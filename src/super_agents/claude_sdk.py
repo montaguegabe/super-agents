@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - platform dependent
 
 from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
-from super_agents.app_models import LabelQueryInput
+from super_agents.app_models import LabelQueryInput, QueueCancelInput
 from super_agents.app_protocol import (
     _without_super_agent_identity_lines,
     is_active_status,
@@ -247,8 +247,27 @@ class ClaudeAgentSdkClient:
 
     async def progress_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         session = self._resolve_session(input_data)
-        turns = self.store.list_turns(session.id, limit=input_data.max_items or 10)
         payload = self._status_item(session)
+        if input_data.turn_id:
+            try:
+                turn = self.store.get_turn(input_data.turn_id)
+            except KeyError as exc:
+                raise ValueError(
+                    f"No turn {input_data.turn_id} is known for thread {session.id}."
+                ) from exc
+            if turn.session_id != session.id:
+                raise ValueError(
+                    f"Turn {input_data.turn_id} does not belong to thread {session.id}."
+                )
+            payload["turnId"] = turn.id
+            payload["status"] = turn.status
+            turn_view = self._turn_view(session, turn)
+            payload["turn"] = turn_view
+            payload["turns"] = [turn_view]
+            payload["logTail"] = self.store.tail_log(session, lines=40)
+            return payload
+
+        turns = self.store.list_turns(session.id, limit=input_data.max_items or 10)
         payload["turns"] = [self._turn_view(session, turn) for turn in turns]
         payload["logTail"] = self.store.tail_log(session, lines=40)
         return payload
@@ -259,6 +278,14 @@ class ClaudeAgentSdkClient:
         prompt: str,
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
+        session = self._resolve_session(input_data)
+        if self._session_is_busy(session):
+            return await self._steer_active_turn(
+                session,
+                prompt,
+                turn_input or {},
+                requested_turn_id=input_data.turn_id,
+            )
         return await self.start_turn_by_label(
             input_data,
             {**(turn_input or {}), "prompt": prompt},
@@ -282,27 +309,12 @@ class ClaudeAgentSdkClient:
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         session = self._resolve_session(input_data)
         if self._session_is_busy(session):
-            interrupted_turn_id = await self._interrupt_active_turn(
+            return await self._steer_active_turn(
                 session,
-                reason="steered by follow-up",
-            )
-            turn = self._launch_turn(
-                session,
+                str(turn_input["prompt"]),
                 turn_input,
-                last_observed_state="steering active turn via Claude Code",
+                requested_turn_id=input_data.turn_id,
             )
-            return {
-                "backend": self.backend,
-                "threadId": session.id,
-                "name": session.name,
-                "turnId": turn.id,
-                "turn": turn.to_json(),
-                "queued": False,
-                "steered": True,
-                "interruptedTurnId": interrupted_turn_id,
-                "startedImmediately": False,
-                "drain": "steered_active_turn",
-            }
         turn = self._launch_turn(
             session,
             turn_input,
@@ -344,6 +356,57 @@ class ClaudeAgentSdkClient:
             "queueDepth": position,
             "item": turn.to_json(),
             "drain": "scheduled",
+        }
+
+    async def cancel_queued_turn(self, input_data: QueueCancelInput) -> JsonObject:
+        session = (
+            self._resolve_session(
+                LabelQueryInput(label=input_data.label, thread_id=input_data.thread_id, cwd=input_data.cwd)
+            )
+            if input_data.label or input_data.thread_id
+            else None
+        )
+        if input_data.queue_item_id:
+            try:
+                turn = self.store.get_turn(input_data.queue_item_id)
+            except KeyError as exc:
+                raise ValueError(f"No queued Super Agents turn found for queueItemId {input_data.queue_item_id}.") from exc
+            if session and turn.session_id != session.id:
+                raise ValueError(f"No queued Super Agents turn found for queueItemId {input_data.queue_item_id}.")
+            session = session or self.store.get_session(turn.session_id)
+            position = self._queued_turn_position(session.id, turn.id)
+        elif input_data.position is not None:
+            if input_data.position < 1:
+                raise ValueError("position must be a positive 1-based queue position.")
+            if session is None:
+                raise ValueError("threadId or name must be provided when canceling by position.")
+            queued = self.store.queued_turns(session.id)
+            if len(queued) < input_data.position:
+                raise ValueError(f"No queued Super Agents turn found at position {input_data.position}.")
+            turn = queued[input_data.position - 1]
+            position = input_data.position
+        else:
+            raise ValueError("queueItemId or position must be provided.")
+
+        if turn.status != "queued":
+            raise ValueError(f"Queued Super Agents turn {turn.id} has already started and cannot be cancelled.")
+        cancelled = self.store.update_turn(turn.id, status="cancelled", finished_at=iso_now())
+        queue_depth = len(self.store.queued_turns(session.id))
+        if queue_depth == 0:
+            task = self._cancel_queue_drain(session.id)
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
+        return {
+            "backend": self.backend,
+            "cancelled": True,
+            "removed": True,
+            "threadId": session.id,
+            "name": session.name,
+            "queueItemId": turn.id,
+            "turnId": turn.id,
+            "position": position,
+            "queueDepth": queue_depth,
+            "item": cancelled.to_json(),
         }
 
     async def thread_favorite(self, thread_id: str) -> JsonObject:
@@ -498,6 +561,67 @@ class ClaudeAgentSdkClient:
                     await self._disconnect_sdk_client(session_id)
                 self._schedule_queue_drain(session_id)
 
+    async def _steer_active_turn(
+        self,
+        session: Session,
+        prompt: str,
+        turn_input: JsonObject,
+        *,
+        requested_turn_id: str | None = None,
+    ) -> JsonObject:
+        active_turn_id = session.active_turn_id
+        if not active_turn_id:
+            return await self.start_turn_by_label(
+                LabelQueryInput(thread_id=session.id),
+                {**turn_input, "prompt": prompt},
+            )
+
+        if requested_turn_id and requested_turn_id != active_turn_id:
+            raise RuntimeError(
+                f"Expected active turn id `{requested_turn_id}` but found `{active_turn_id}`."
+            )
+
+        sdk_client = await self._wait_for_active_sdk_client(session.id)
+        refreshed = self.store.get_session(session.id)
+        if refreshed.active_turn_id != active_turn_id or not self._session_is_busy(refreshed):
+            return await self.start_turn_by_label(
+                LabelQueryInput(thread_id=session.id),
+                {**turn_input, "prompt": prompt},
+            )
+        if sdk_client is None:
+            raise RuntimeError("Active Claude Code turn cannot accept steering before its SDK client is ready.")
+
+        await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
+        self._record_session_leaf_owner(session.id)
+        current_turn = self.store.get_turn(active_turn_id)
+        self.store.update_session(
+            session.id,
+            status="running",
+            active_turn_id=active_turn_id,
+            last_turn_id=active_turn_id,
+            last_observed_state="steering active turn via Claude Code",
+        )
+        return {
+            "backend": self.backend,
+            "threadId": session.id,
+            "name": session.name,
+            "turnId": active_turn_id,
+            "turn": current_turn.to_json(),
+            "queued": False,
+            "steered": True,
+            "nativeSteer": True,
+            "startedImmediately": False,
+            "drain": "steered_active_turn",
+        }
+
+    async def _wait_for_active_sdk_client(self, session_id: str) -> Any | None:
+        for _ in range(100):
+            client = self._sdk_clients.get(session_id)
+            if client is not None:
+                return client
+            await asyncio.sleep(0.01)
+        return None
+
     async def _interrupt_active_turn(self, session: Session, *, reason: str) -> str | None:
         turn_id = session.active_turn_id
         if not turn_id:
@@ -641,6 +765,12 @@ class ClaudeAgentSdkClient:
         mid-answer here.
         """
         self._closed = True
+        queue_tasks = list(self._queue_tasks.values())
+        for task in queue_tasks:
+            task.cancel()
+        self._queue_tasks.clear()
+        if queue_tasks:
+            await asyncio.gather(*queue_tasks, return_exceptions=True)
         for session_id in list(self._sdk_clients):
             lock = self._session_locks.setdefault(session_id, asyncio.Lock())
             if lock.locked():
@@ -653,6 +783,13 @@ class ClaudeAgentSdkClient:
         if task and not task.done():
             return
         self._queue_tasks[session_id] = asyncio.create_task(self._queue_drain_loop(session_id))
+
+    def _cancel_queue_drain(self, session_id: str) -> asyncio.Task[None] | None:
+        task = self._queue_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+            return task
+        return None
 
     async def _queue_drain_loop(self, session_id: str) -> None:
         while True:
@@ -762,6 +899,12 @@ class ClaudeAgentSdkClient:
         if "lastUsefulMessage" not in data and turn.id == session.last_turn_id and session.last_useful_message:
             data["lastUsefulMessage"] = session.last_useful_message
         return data
+
+    def _queued_turn_position(self, session_id: str, turn_id: str) -> int:
+        for index, turn in enumerate(self.store.queued_turns(session_id), start=1):
+            if turn.id == turn_id:
+                return index
+        return 0
 
     def _sdk_ready(self) -> tuple[bool, str | None]:
         try:
