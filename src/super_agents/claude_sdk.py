@@ -229,6 +229,7 @@ class ClaudeAgentSdkClient:
         }
 
     async def read_by_label(self, input_data: LabelQueryInput, include_turns: bool = False) -> JsonObject:
+        self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
         turns = self.store.list_turns(session.id, limit=input_data.max_items or 20)
         payload: JsonObject = {
@@ -259,9 +260,11 @@ class ClaudeAgentSdkClient:
         return self._unsupported("codex_answer_request", requestId=request_id, result=result)
 
     async def sessions(self) -> list[JsonObject]:
+        self._reconcile_orphaned_turns_once()
         return [self._session_view(session) for session in self.store.list_sessions(include_inactive=True)]
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
+        self._reconcile_orphaned_turns_once()
         query = input_data or LabelQueryInput()
         items = [self._agent_item(session, query) for session in self._query_sessions(query, include_inactive=False)]
         return {"backend": self.backend, "count": len(items), "agents": items[: query.limit or 50]}
