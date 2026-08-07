@@ -274,9 +274,13 @@ class Store:
             "backend_session_id",
             "last_client_instance",
             "last_exit_code",
+            # Explicit updated_at lets administrative writes (for example
+            # orphan reconciliation) preserve the session's real last-activity
+            # time instead of bumping it to "now".
+            "updated_at",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
-        updates["updated_at"] = iso_now()
+        updates.setdefault("updated_at", iso_now())
         assignments = ", ".join(f"{key} = ?" for key in updates)
         values = list(updates.values()) + [session_id]
         with self.connect() as conn:

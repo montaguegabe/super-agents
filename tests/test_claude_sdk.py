@@ -1171,3 +1171,26 @@ async def test_claude_sdk_steer_reclaims_orphaned_turn_into_fresh_turn(
     await wait_for(lambda: store.get_turn(steered["turnId"]).status == "completed")
     assert "hello again" in (store.get_turn(steered["turnId"]).last_useful_message or "")
     assert store.get_turn(ghost_turn_id).status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_startup_sweep_preserves_last_activity_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reconciliation is bookkeeping, not activity: a ghost from weeks ago
+    must not jump to 'today' in activity-sorted thread lists."""
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    old = "2026-07-18T16:05:06.537Z"
+    _insert_ghost_turn(store, started["threadId"], updated_at=old)
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(store.path) as conn:
+        conn.execute("update sessions set updated_at=? where id=?", (old, started["threadId"]))
+
+    assert client.reconcile_orphaned_turns() == 1
+    session = store.get_session(started["threadId"])
+    assert session.status == "failed"
+    assert session.updated_at == old

@@ -899,11 +899,17 @@ class ClaudeAgentSdkClient:
                         finished_at=iso_now(),
                         last_error="interrupted: owning process exited mid-turn",
                     )
+        # Reconciliation is bookkeeping, not activity: keep the session's real
+        # last-activity time so UIs don't surface long-dead threads as recent.
+        previous_updated_at = None
+        with contextlib.suppress(KeyError):
+            previous_updated_at = self.store.get_session(session_id).updated_at
         self.store.update_session(
             session_id,
             status="failed",
             active_turn_id=None,
             last_observed_state="turn orphaned by process exit",
+            **({"updated_at": previous_updated_at} if previous_updated_at else {}),
         )
 
     def _reclaim_orphaned_turn(self, session_id: str, turn_id: str) -> bool:
