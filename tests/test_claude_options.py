@@ -61,6 +61,35 @@ def test_openbase_cloud_backend_sets_anthropic_proxy_env(monkeypatch) -> None:
     }
 
 
+def test_openbase_cloud_backend_pins_claude_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
+    monkeypatch.setenv(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "machine-token")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    options = agent_options(_FAKE_SDK, "/tmp", "fable", None, resume=None)
+
+    assert options.kwargs["model"] == "claude-fable-5"
+
+
+def test_openbase_cloud_backend_passes_public_models_through(monkeypatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
+    monkeypatch.setenv(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "machine-token")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    options = agent_options(_FAKE_SDK, "/tmp", "openbase-claude", None, resume=None)
+
+    assert options.kwargs["model"] == "openbase-claude"
+
+
+def test_local_claude_backend_keeps_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    options = agent_options(_FAKE_SDK, "/tmp", "fable", None, resume=None)
+
+    assert options.kwargs["model"] == "fable"
+
+
 def test_openbase_cloud_anthropic_base_url_strips_v1(monkeypatch) -> None:
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
     monkeypatch.setenv(

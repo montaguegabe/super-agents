@@ -30,6 +30,15 @@ CLAUDE_SERVICE_TIER_EFFORTS = {
 # environment, so an empty override keeps ANTHROPIC_API_KEY away from the
 # spawned CLI without mutating this process's environment.
 CLAUDE_SDK_ENV_OVERRIDES = {"ANTHROPIC_API_KEY": ""}
+# The Claude Code SDK expands family aliases to whatever ids are current
+# (including dated snapshots); the Cloud proxy allowlist is keyed by these
+# public ids, so pin aliases before they reach the SDK on the Cloud backend.
+OPENBASE_CLOUD_CLAUDE_MODEL_MAP = {
+    "fable": "claude-fable-5",
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+}
 OPENBASE_CLOUD_DEFAULT_BASE_URL = "https://app.openbase.cloud"
 OPENBASE_CLOUD_ANTHROPIC_PATH = "/api/openbase/llm/anthropic"
 OPENBASE_CLOUD_ANTHROPIC_BASE_URL_ENV = "OPENBASE_CLOUD_ANTHROPIC_BASE_URL"
@@ -57,7 +66,7 @@ def agent_options(
         },
     }
     if model:
-        kwargs["model"] = model
+        kwargs["model"] = openbase_cloud_claude_model(model)
     if reasoning_effort:
         kwargs["effort"] = reasoning_effort
     if resume:
@@ -65,6 +74,12 @@ def agent_options(
     if extra_args := claude_extra_args():
         kwargs["extra_args"] = extra_args
     return sdk.ClaudeAgentOptions(**kwargs)
+
+
+def openbase_cloud_claude_model(model: str) -> str:
+    if configured_backend_from_environment() != OPENBASE_CLOUD_BACKEND:
+        return model
+    return OPENBASE_CLOUD_CLAUDE_MODEL_MAP.get(model.strip().lower(), model)
 
 
 def openbase_cloud_claude_env() -> dict[str, str]:
