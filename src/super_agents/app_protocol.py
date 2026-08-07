@@ -164,6 +164,14 @@ def find_latest_turn(value: Any, active_only: bool) -> JsonObject | None:
     return max(turns, key=turn_recency)
 
 
+# Sessions/threads also carry id-and-status shapes in read payloads; these
+# keys only ever appear on session-shaped objects, never on turns. Without
+# the exclusion, a running session is mistaken for its own active turn (its
+# session id then fails turn-id checks, e.g. console steering on the Claude
+# backend).
+_SESSION_SHAPED_KEYS = ("cwd", "command", "activeTurnId", "developerInstructions")
+
+
 def collect_turns(value: Any) -> list[JsonObject]:
     if isinstance(value, list):
         turns: list[JsonObject] = []
@@ -172,7 +180,11 @@ def collect_turns(value: Any) -> list[JsonObject]:
         return turns
     if not isinstance(value, dict):
         return []
-    turns = [value] if get_string(value, "id") and get_string(value, "status") else []
+    turns: list[JsonObject] = []
+    # Raw app-server turns use "id"; tracked/store turns use "turnId".
+    turn_id = get_string(value, "id") or get_string(value, "turnId")
+    if turn_id and get_string(value, "status") and not any(key in value for key in _SESSION_SHAPED_KEYS):
+        turns = [value if get_string(value, "id") else {**value, "id": turn_id}]
     for item in value.values():
         turns.extend(collect_turns(item))
     return turns
