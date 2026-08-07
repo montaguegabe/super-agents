@@ -12,16 +12,27 @@ from pathlib import Path
 
 CODEX_BACKEND = "codex"
 OPENBASE_CLOUD_BACKEND = "openbase_cloud"
+OPENBASE_CLOUD_CODEX_BACKEND = "openbase_cloud_codex"
 CLAUDE_CODE_BACKEND = "claude_code"
-BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND, CLAUDE_CODE_BACKEND}
-CODEX_COMPATIBLE_BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND}
+BACKENDS = {
+    CODEX_BACKEND,
+    OPENBASE_CLOUD_BACKEND,
+    CLAUDE_CODE_BACKEND,
+    OPENBASE_CLOUD_CODEX_BACKEND,
+}
+CODEX_COMPATIBLE_BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_CODEX_BACKEND}
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
 BACKEND_ALIASES = {
     "": CODEX_BACKEND,
     "codex": CODEX_BACKEND,
+    "codecs": CODEX_BACKEND,
     "openbase cloud": OPENBASE_CLOUD_BACKEND,
     "claude code": CLAUDE_CODE_BACKEND,
+    "cloud code": CLAUDE_CODE_BACKEND,
+    "openbase cloud codex": OPENBASE_CLOUD_CODEX_BACKEND,
+    "openbase cloud codecs": OPENBASE_CLOUD_CODEX_BACKEND,
+    "codex via openbase cloud": OPENBASE_CLOUD_CODEX_BACKEND,
 }
 
 
@@ -35,15 +46,16 @@ def normalize_backend(value: str | None) -> str:
 
 
 def execution_backend(backend: str) -> str:
-    return CODEX_BACKEND if backend in CODEX_COMPATIBLE_BACKENDS else backend
+    if backend in CODEX_COMPATIBLE_BACKENDS:
+        return CODEX_BACKEND
+    if backend == OPENBASE_CLOUD_BACKEND:
+        return CLAUDE_CODE_BACKEND
+    return backend
 
 
 def configured_backend_from_environment() -> str:
     env_values = read_env_values(DEFAULT_ENV_FILE)
-    return normalize_backend(
-        os.environ.get(CODING_BACKEND_ENV_KEY)
-        or env_values.get(CODING_BACKEND_ENV_KEY)
-    )
+    return normalize_backend(os.environ.get(CODING_BACKEND_ENV_KEY) or env_values.get(CODING_BACKEND_ENV_KEY))
 
 
 def backend_from_environment() -> str:

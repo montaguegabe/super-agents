@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -10,16 +11,20 @@ import pytest
 import websockets
 
 import super_agents.app_server_client as app_server_client
+from super_agents.app_queue import append_queued_turn, cancel_queued_turn, new_queued_turn, reserve_next_queued_turn
 from super_agents.app_client_transport import websocket_max_size
-from super_agents.app_models import LabelQueryInput, TurnState
+from super_agents.app_models import LabelQueryInput, QueueCancelInput, TurnState
 from super_agents.app_server_client import CodexAppServerClient
-from super_agents.app_time import turn_key
+from super_agents.app_time import iso_now, turn_key
 from super_agents.mcp_server import (
+    CONTROL_PLANE_LOGGER_NAME,
     build_tools,
+    clean_cancel_queued_turn_input,
     clean_queue_turn_input,
     clean_start_turn_by_name_input,
     clean_thread_input,
     clean_turn_input,
+    configure_control_plane_diagnostic_logging,
     default_service_tier,
     default_super_agent_instructions_path,
     default_super_agents_model,
@@ -29,6 +34,23 @@ from super_agents.mcp_server import (
 class ReadyClient(CodexAppServerClient):
     async def check_ready(self) -> bool:
         return True
+
+
+class DelayedResponseClient(ReadyClient):
+    def __init__(self, *args: Any, response_delay: float, response: dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.response_delay = response_delay
+        self.response = response
+        self.sent_messages: list[dict[str, Any]] = []
+
+    async def send(self, message: dict[str, Any]) -> None:
+        self.sent_messages.append(message)
+
+        async def respond_later() -> None:
+            await asyncio.sleep(self.response_delay)
+            self.handle_rpc_response(message["id"], {"id": message["id"], "result": self.response})
+
+        asyncio.create_task(respond_later())
 
 
 def test_websocket_max_size_defaults_above_codex_default(monkeypatch) -> None:
@@ -53,6 +75,95 @@ def test_default_model_ignores_model_env(monkeypatch, tmp_path: Path) -> None:
     client = CodexAppServerClient(state_file=tmp_path / "state.json")
 
     assert client.default_model == app_server_client.DEFAULT_MODEL
+
+
+@pytest.mark.asyncio
+async def test_rpc_timeout_logs_context_and_optional_late_response(
+    monkeypatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CONTROL_PLANE_DIAGNOSTICS", "1")
+    client = DelayedResponseClient(
+        "ws://unused",
+        tmp_path / "state.json",
+        "gpt-test",
+        response_delay=0.02,
+        response={"turnId": "turn-late"},
+    )
+
+    with caplog.at_level(logging.INFO, logger="super_agents.app_client_transport"):
+        with pytest.raises(TimeoutError, match="Timed out waiting for app-server response to turn/steer"):
+            await client.request(
+                "turn/steer",
+                {"threadId": "thread-late", "expectedTurnId": "turn-late"},
+                timeout_seconds=0.001,
+            )
+        await asyncio.sleep(0.03)
+
+    assert "stage=app_server_rpc_timeout" in caplog.text
+    assert "method=turn/steer" in caplog.text
+    assert "thread_id=thread-late" in caplog.text
+    assert "turn_id=turn-late" in caplog.text
+    assert "stage=app_server_rpc_late_response" in caplog.text
+    status = await client.status()
+    timed_out = status["recentTimedOutRpcRequests"]
+    assert timed_out[0]["method"] == "turn/steer"
+    assert timed_out[0]["threadId"] == "thread-late"
+    assert timed_out[0]["turnId"] == "turn-late"
+    assert timed_out[0]["lateResponseElapsedMs"] is not None
+    assert timed_out[0]["lateResponseHasError"] is False
+
+
+@pytest.mark.asyncio
+async def test_thread_start_timeout_status_includes_dispatch_and_name(
+    tmp_path: Path,
+) -> None:
+    client = DelayedResponseClient(
+        "ws://unused",
+        tmp_path / "state.json",
+        "gpt-test",
+        response_delay=0.02,
+        response={"threadId": "thread-late-start"},
+    )
+
+    try:
+        with pytest.raises(TimeoutError, match="Timed out waiting for app-server response to thread/start"):
+            await client.request(
+                "thread/start",
+                {"cwd": str(tmp_path), "model": "gpt-test"},
+                timeout_seconds=0.001,
+                context={"dispatchId": "mcp-start-timeout", "name": "diagnose-timeouts"},
+            )
+
+        status = await client.status()
+        timed_out = status["recentTimedOutRpcRequests"]
+        assert timed_out[0]["method"] == "thread/start"
+        assert timed_out[0]["dispatchId"] == "mcp-start-timeout"
+        assert timed_out[0]["targetName"] == "diagnose-timeouts"
+    finally:
+        await asyncio.sleep(0.03)
+        await client.close()
+
+
+def test_control_plane_diagnostic_logging_writes_opt_in_file(monkeypatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "control-plane.log"
+    monkeypatch.setenv("SUPER_AGENTS_CONTROL_PLANE_LOG_FILE", str(log_path))
+    control_logger = logging.getLogger(CONTROL_PLANE_LOGGER_NAME)
+    before = set(control_logger.handlers)
+
+    try:
+        configured_path = configure_control_plane_diagnostic_logging()
+        logging.getLogger("super_agents.mcp_server").info("dispatch_timing stage=test_control_plane_file")
+        for handler in control_logger.handlers:
+            handler.flush()
+
+        assert configured_path == log_path
+        assert "stage=test_control_plane_file" in log_path.read_text(encoding="utf-8")
+    finally:
+        for handler in set(control_logger.handlers) - before:
+            control_logger.removeHandler(handler)
+            handler.close()
 
 
 @pytest.mark.asyncio
@@ -88,7 +199,12 @@ def test_tag_tools_are_registered(tmp_path: Path) -> None:
     }.issubset(tool_names)
 
 
-def test_turn_input_preserves_explicit_approval_and_sandbox() -> None:
+def test_turn_input_preserves_explicit_approval_and_sandbox(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv(
+        "SUPER_AGENTS_DEFAULT_CONFIG_PATH",
+        str(tmp_path / "missing-dispatcher-config.json"),
+    )
+    monkeypatch.delenv("CODEX_SERVICE_TIER", raising=False)
     cleaned = clean_turn_input(
         {
             "threadId": "thread-1",
@@ -259,14 +375,14 @@ def test_turn_input_uses_backend_specific_codex_model(monkeypatch, tmp_path: Pat
     assert default_super_agents_model() == "gpt-5.5"
 
 
-def test_openbase_cloud_uses_codex_model_defaults(monkeypatch, tmp_path: Path) -> None:
+def test_openbase_cloud_uses_cloud_claude_model_defaults(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(
         json.dumps(
             {
                 "backend_models": {
                     "codex": {"super_agents": "gpt-5.5"},
-                    "openbase_cloud": {"super_agents": "openbase-codex"},
+                    "openbase_cloud": {"super_agents": "openbase-claude"},
                 },
             }
         ),
@@ -277,8 +393,8 @@ def test_openbase_cloud_uses_codex_model_defaults(monkeypatch, tmp_path: Path) -
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 
-    assert cleaned["model"] == "gpt-5.5"
-    assert default_super_agents_model() == "gpt-5.5"
+    assert cleaned["model"] == "openbase-claude"
+    assert default_super_agents_model() == "openbase-claude"
 
 
 def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:
@@ -935,6 +1051,176 @@ async def test_progress_by_label_reuses_resolved_thread_and_turn_ids(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_interrupted_progress_clears_active_turn_before_follow_up(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+    now = iso_now()
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/list":
+            return {
+                "data": [
+                    {
+                        "id": "thread-interrupted",
+                        "name": "interrupted",
+                        "cwd": "/tmp/project",
+                        "status": "running",
+                        "updatedAt": now,
+                    }
+                ]
+            }
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-interrupted", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "thread/read":
+            return {
+                "threadId": message["params"]["threadId"],
+                "turns": [
+                    {
+                        "id": "turn-interrupted",
+                        "status": "interrupted",
+                        "message": "restart scheduled",
+                        "updatedAt": now,
+                    }
+                ],
+            }
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-new-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-interrupted",
+            {
+                "label": "interrupted",
+                "threadId": "thread-interrupted",
+                "cwd": "/tmp/project",
+                "activeTurnId": "turn-interrupted",
+                "lastTurnId": "turn-interrupted",
+                "lastStatus": "running",
+                "lastEventAt": now,
+                "turns": {
+                    "turn-interrupted": {
+                        "turnId": "turn-interrupted",
+                        "status": "running",
+                        "startedAt": now,
+                        "updatedAt": now,
+                    },
+                },
+            },
+        )
+
+        progress = await client.progress_by_label(type_query(label="interrupted", prefer="latest_any"))
+        session = await client.get_session("thread-interrupted")
+        status = await client.compact_status(type_query(label="interrupted"))
+        follow_up = await client.start_turn_by_label(
+            type_query(label="interrupted"),
+            {"label": "interrupted", "prompt": "continue after restart"},
+        )
+
+        assert progress["status"] == "cancelled"
+        assert session is not None
+        assert session.active_turn_id is None
+        assert session.last_status == "cancelled"
+        assert session.turns and session.turns["turn-interrupted"].status == "cancelled"
+        assert status["count"] == 0
+        assert follow_up["queued"] is False
+        assert follow_up["startedImmediately"] is True
+        assert follow_up["turnId"] == "turn-new-1"
+        assert not any(message.get("method") == "turn/steer" for message in captured)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["start_turn_by_label", "steer_by_label"])
+async def test_thread_not_found_steer_reconciles_interrupted_turn_and_starts_follow_up(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    now = iso_now()
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            return {
+                "data": [
+                    {
+                        "id": "thread-reconcile",
+                        "name": "reconcile",
+                        "cwd": "/tmp/project",
+                        "status": "running",
+                        "updatedAt": now,
+                    }
+                ]
+            }
+        if message.get("method") == "thread/read":
+            return {
+                "threadId": message["params"]["threadId"],
+                "turns": [{"id": "turn-reconcile", "status": "interrupted", "message": "restart scheduled"}],
+            }
+        if message.get("method") == "turn/steer":
+            return {"__error__": {"message": "thread not found: thread-reconcile"}}
+        if message.get("method") == "turn/start":
+            return {"turnId": f"turn-recovered-{entrypoint}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-reconcile",
+            {
+                "label": "reconcile",
+                "threadId": "thread-reconcile",
+                "cwd": "/tmp/project",
+                "activeTurnId": "turn-reconcile",
+                "lastTurnId": "turn-reconcile",
+                "lastStatus": "running",
+                "lastEventAt": now,
+                "turns": {
+                    "turn-reconcile": {
+                        "turnId": "turn-reconcile",
+                        "status": "running",
+                        "startedAt": now,
+                        "updatedAt": now,
+                    }
+                },
+            },
+        )
+
+        if entrypoint == "start_turn_by_label":
+            result = await client.start_turn_by_label(
+                type_query(label="reconcile"),
+                {"label": "reconcile", "prompt": "continue after restart"},
+            )
+        else:
+            result = await client.steer_by_label(type_query(label="reconcile"), "continue after restart")
+
+        session = await client.get_session("thread-reconcile")
+        steer_requests = [message for message in captured if message.get("method") == "turn/steer"]
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+
+        assert result["queued"] is False
+        assert result["startedImmediately"] is True
+        assert result["turnId"] == f"turn-recovered-{entrypoint}"
+        assert result["drain"] == "started_after_terminal_thread_not_found_steer"
+        assert len(steer_requests) == 1
+        assert len(start_requests) == 1
+        assert session is not None
+        assert session.last_status == "running"
+        assert session.active_turn_id == f"turn-recovered-{entrypoint}"
+        assert session.turns and session.turns["turn-reconcile"].status == "cancelled"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_steer_and_cancel_by_label_call_existing_id_based_app_server_methods(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
@@ -1284,6 +1570,149 @@ async def test_queue_turn_waits_for_active_turn_completion_then_starts_next_turn
     finally:
         await client.close()
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_turn_by_item_id_removes_before_drain(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-cancel-queue", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "cancel-queue", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-cancel-queue", "label": "cancel-queue", "prompt": "first"})
+        queued = await client.queue_turn_by_label(
+            type_query(label="cancel-queue"),
+            {"label": "cancel-queue", "prompt": "remove me"},
+        )
+
+        result = await client.cancel_queued_turn(QueueCancelInput(queue_item_id=queued["item"]["id"]))
+
+        assert result["cancelled"] is True
+        assert result["removed"] is True
+        assert result["queueItemId"] == queued["item"]["id"]
+        assert result["position"] == 1
+        assert result["queueDepth"] == 0
+        assert client.queued_turn_summary() == []
+
+        client.handle_notification("turn/completed", {"threadId": "thread-cancel-queue", "turnId": "turn-1"})
+        await asyncio.sleep(0.05)
+
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+        assert len(start_requests) == 1
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_turn_by_thread_position_keeps_other_items(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-position-queue", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "position-queue", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-position-queue", "label": "position-queue", "prompt": "first"})
+        first = await client.queue_turn_by_label(
+            type_query(label="position-queue"),
+            {"label": "position-queue", "prompt": "keep me"},
+        )
+        second = await client.queue_turn_by_label(
+            type_query(label="position-queue"),
+            {"label": "position-queue", "prompt": "remove me"},
+        )
+
+        result = await client.cancel_queued_turn(QueueCancelInput(label="position-queue", position=2))
+
+        assert result["queueItemId"] == second["item"]["id"]
+        assert result["queueDepth"] == 1
+        summary = client.queued_turn_summary()
+        assert summary[0]["queueDepth"] == 1
+        assert summary[0]["items"][0]["id"] == first["item"]["id"]
+
+        client.handle_notification("turn/completed", {"threadId": "thread-position-queue", "turnId": "turn-1"})
+        await asyncio.sleep(0.05)
+
+        start_requests = [message for message in captured if message.get("method") == "turn/start"]
+        assert len(start_requests) == 2
+        assert start_requests[-1]["params"]["input"] == [{"type": "text", "text": "keep me"}]
+        assert client.queued_turn_summary() == []
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_turn_rejects_active_turn_id(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-active-not-queued", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-active"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "active-not-queued", "cwd": "/tmp/project"})
+        await client.start_turn(
+            {"threadId": "thread-active-not-queued", "label": "active-not-queued", "prompt": "first"}
+        )
+
+        with pytest.raises(ValueError, match="No queued Super Agents turn found"):
+            await client.cancel_queued_turn(QueueCancelInput(queue_item_id="turn-active"))
+
+        assert not any(message.get("method") == "turn/interrupt" for message in captured)
+    finally:
+        await client.close()
+        await server.close()
+
+
+def test_cancel_queued_turn_requires_identifier_or_position() -> None:
+    with pytest.raises(ValueError, match="queueItemId, turnId, or position"):
+        clean_cancel_queued_turn_input({})
+    with pytest.raises(ValueError, match="name or threadId"):
+        clean_cancel_queued_turn_input({"position": 1})
+
+
+def test_cancel_queued_turn_rejects_starting_queue_item(tmp_path: Path) -> None:
+    queued, _position = append_queued_turn(
+        tmp_path,
+        new_queued_turn(
+            thread_id="thread-starting",
+            label="starting",
+            agent_name=None,
+            input_data={"prompt": "already starting"},
+        ),
+    )
+    reserved = reserve_next_queued_turn(tmp_path, "thread-starting", lambda: False)
+
+    assert reserved and reserved.id == queued.id
+    with pytest.raises(ValueError, match="already started"):
+        cancel_queued_turn(tmp_path, queue_item_id=queued.id)
 
 
 @pytest.mark.asyncio
@@ -2453,12 +2882,14 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
         "super_agents_cancel",
         "super_agents_start_turn",
         "super_agents_queue_turn",
+        "super_agents_cancel_queued_turn",
         "super_agents_recent",
     ]
     by_name = {tool.name: tool for tool in tools}
     assert by_name["super_agents_start"].input_schema["required"] == ["name"]
     assert by_name["super_agents_start_turn"].input_schema["required"] == ["name", "prompt"]
     assert by_name["super_agents_queue_turn"].input_schema["required"] == ["prompt"]
+    assert "required" not in by_name["super_agents_cancel_queued_turn"].input_schema
     assert by_name["super_agents_thread_favorite"].input_schema["required"] == ["threadId"]
     assert by_name["super_agents_thread_tags"].input_schema["required"] == ["threadId"]
     assert by_name["super_agents_report_tags"].input_schema["required"] == [
@@ -2472,7 +2903,10 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert "sandboxType" in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "approvalPolicy" in by_name["super_agents_queue_turn"].input_schema["properties"]
     assert "sandboxType" in by_name["super_agents_queue_turn"].input_schema["properties"]
+    assert "queueItemId" in by_name["super_agents_cancel_queued_turn"].input_schema["properties"]
+    assert "position" in by_name["super_agents_cancel_queued_turn"].input_schema["properties"]
     assert "per-thread filesystem queue" in by_name["super_agents_queue_turn"].description
+    assert "already-started turns" in by_name["super_agents_cancel_queued_turn"].description
     assert "steers the active turn" in by_name["super_agents_start_turn"].description
     assert "super_agents_queue_turn" in by_name["super_agents_start_turn"].description
     assert "threadId" not in by_name["super_agents_start_turn"].input_schema["properties"]

@@ -9,10 +9,10 @@ from dataclasses import replace
 from .app_formatting import (
     apply_field_selection,
     preview_text,
-    text_preview,
+    turn_text_preview,
     without_none,
 )
-from .app_models import LabelQueryInput, PendingServerRequest, ResolvedSession, TurnState
+from .app_models import LabelQueryInput, PendingServerRequest, QueueCancelInput, ResolvedSession, TurnState
 from .app_protocol import (
     extract_thread_cwd,
     extract_thread_id,
@@ -25,6 +25,7 @@ from .app_protocol import (
     to_tracked_turn_status,
 )
 from .app_queue import (
+    cancel_queued_turn as cancel_queued_turn_item,
     complete_queued_turn,
     queued_turn_summaries,
     release_queued_turn,
@@ -137,23 +138,85 @@ class SessionClientMixin:
     def queued_turn_summary(self) -> list[JsonObject]:
         return queued_turn_summaries(self.queue_dir)
 
+    async def cancel_queued_turn(self, input_data: QueueCancelInput) -> JsonObject:
+        thread_id = input_data.thread_id
+        if not thread_id and input_data.label:
+            target = await self.resolve_queue_target(
+                LabelQueryInput(label=input_data.label, cwd=input_data.cwd, prefer="latest_any")
+            )
+            thread_id = target.session.thread_id
+        item, position, queue_depth = cancel_queued_turn_item(
+            self.queue_dir,
+            queue_item_id=input_data.queue_item_id,
+            thread_id=thread_id,
+            position=input_data.position,
+        )
+        if queue_depth == 0:
+            task = self.cancel_queue_drain_task(item.thread_id)
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
+        return {
+            "cancelled": True,
+            "removed": True,
+            "threadId": item.thread_id,
+            "name": item.label,
+            "queueItemId": item.id,
+            "position": position,
+            "queueDepth": queue_depth,
+            "item": item.to_json(),
+        }
+
+    def cancel_queue_drain_task(self, thread_id: str) -> asyncio.Task[None] | None:
+        task = self._queue_tasks.pop(thread_id, None)
+        if task and not task.done():
+            task.cancel()
+            return task
+        return None
+
     def schedule_queue_drain(self, thread_id: str) -> None:
         existing = self._queue_tasks.get(thread_id)
         if existing and not existing.done():
+            logger.info(
+                "Super Agents queue drain already scheduled thread_id=%s task_done=%s",
+                thread_id,
+                existing.done(),
+            )
             return
+        logger.info("Super Agents queue drain scheduled thread_id=%s", thread_id)
         self._queue_tasks[thread_id] = asyncio.create_task(self._drain_queue(thread_id))
 
     async def _drain_queue(self, thread_id: str) -> None:
         await asyncio.sleep(0)
         while True:
+            session = self.session_from_memory(thread_id)
+            active_turn_id = session.active_turn_id if session else None
+            last_turn_id = session.last_turn_id if session else None
+            session_status = self.session_status(session) if session else None
+            has_active_turn = self.thread_has_active_turn(thread_id)
+            logger.info(
+                "Super Agents queue drain check thread_id=%s session_status=%s active_turn_id=%s "
+                "last_turn_id=%s has_active_turn=%s",
+                thread_id,
+                session_status,
+                active_turn_id,
+                last_turn_id,
+                has_active_turn,
+            )
             queued = reserve_next_queued_turn(
                 self.queue_dir,
                 thread_id,
-                lambda: self.thread_has_active_turn(thread_id),
+                lambda: has_active_turn,
             )
             if queued is None:
+                logger.info("Super Agents queue drain stopped thread_id=%s decision=no_reserved_item", thread_id)
                 return
             try:
+                logger.info(
+                    "Super Agents queue drain starting queued turn thread_id=%s queue_item_id=%s attempts=%d",
+                    thread_id,
+                    queued.id,
+                    queued.attempts,
+                )
                 await self.start_turn(
                     {
                         **queued.input_data,
@@ -163,9 +226,18 @@ class SessionClientMixin:
                     }
                 )
                 complete_queued_turn(self.queue_dir, queued)
+                logger.info(
+                    "Super Agents queue drain started queued turn thread_id=%s queue_item_id=%s",
+                    thread_id,
+                    queued.id,
+                )
             except Exception as exc:
                 release_queued_turn(self.queue_dir, queued, error=exc)
-                logger.exception("Failed to start queued Super Agents turn for thread_id=%s", thread_id)
+                logger.exception(
+                    "Failed to start queued Super Agents turn for thread_id=%s queue_item_id=%s",
+                    thread_id,
+                    queued.id,
+                )
                 return
 
     def thread_has_active_turn(self, thread_id: str) -> bool:
@@ -180,8 +252,27 @@ class SessionClientMixin:
                 and not _is_queue_item_id(turn.turn_id)
                 and active_turn_id == turn.turn_id
             ):
+                logger.debug(
+                    "Super Agents active-turn gate true from runtime turn thread_id=%s turn_id=%s status=%s "
+                    "finished_at=%s",
+                    thread_id,
+                    turn.turn_id,
+                    turn.status,
+                    turn.finished_at,
+                )
                 return True
-        return bool(session and is_active_status(self.session_status(session)))
+        session_status = self.session_status(session) if session else None
+        result = bool(session and is_active_status(session_status))
+        logger.debug(
+            "Super Agents active-turn gate from session thread_id=%s result=%s session_status=%s "
+            "active_turn_id=%s last_turn_id=%s",
+            thread_id,
+            result,
+            session_status,
+            active_turn_id,
+            session.last_turn_id if session else None,
+        )
+        return result
 
     def tracked_turn_is_active(self, turn: TurnState) -> bool:
         return is_active_status(turn.status) and not turn.finished_at and not _is_queue_item_id(turn.turn_id)
@@ -513,6 +604,17 @@ class SessionClientMixin:
         tracked_status: StoredStatus = "unknown" if status == "unknown" else to_tracked_turn_status(status)
         tracked_turn = self._turns.get(turn_key(thread_id, turn_id))
         state_session = await self.get_session(thread_id)
+        logger.info(
+            "Super Agents turn progress record thread_id=%s turn_id=%s incoming_status=%s "
+            "tracked_status=%s previous_active_turn_id=%s previous_last_status=%s pending_requests=%d",
+            thread_id,
+            turn_id,
+            status,
+            tracked_status,
+            state_session.active_turn_id if state_session else None,
+            state_session.last_status if state_session else None,
+            len(pending_requests),
+        )
         reasoning_effort = (
             tracked_turn.reasoning_effort if tracked_turn else None
         ) or self.session_turn_reasoning_effort(
@@ -532,7 +634,7 @@ class SessionClientMixin:
                 "lastTurnId": turn_id,
                 "lastStatus": tracked_status,
                 "lastFinishedAt": finished_at,
-                "lastUsefulMessage": text_preview(persisted_turn),
+                "lastUsefulMessage": turn_text_preview(persisted_turn),
                 "turns": {
                     turn_id: turn_patch(
                         turn_id,
@@ -541,7 +643,7 @@ class SessionClientMixin:
                         started_at=tracked_turn.started_at if tracked_turn else iso_now(),
                         updated_at=iso_now(),
                         finished_at=finished_at,
-                        last_useful_message=text_preview(persisted_turn),
+                        last_useful_message=turn_text_preview(persisted_turn),
                         pending_request_ids=[request.id for request in pending_requests],
                         event_count=len(tracked_turn.events) if tracked_turn else 0,
                     )
@@ -576,12 +678,26 @@ class SessionClientMixin:
                 current = state.sessions.get(thread_id) or SessionRecord(
                     thread_id=thread_id, created_at=now, updated_at=now
                 )
+                old_active_turn_id = current.active_turn_id
+                old_last_status = current.last_status
                 merged_json = {**current.to_json(), **without_none(patch), "threadId": thread_id, "updatedAt": now}
                 merged_json["createdAt"] = current.created_at or now
                 merged_json["turns"] = merge_turns(current.turns, patch.get("turns"))
                 for field_name in clear_fields or []:
                     merged_json.pop(field_name, None)
-                state.sessions[thread_id] = session_from_patch(merged_json)
+                merged = session_from_patch(merged_json)
+                logger.info(
+                    "Super Agents state merge thread_id=%s old_active_turn_id=%s new_active_turn_id=%s "
+                    "old_last_status=%s new_last_status=%s clear_fields=%s state_file=%s",
+                    thread_id,
+                    old_active_turn_id,
+                    merged.active_turn_id,
+                    old_last_status,
+                    merged.last_status,
+                    clear_fields or [],
+                    self.state_file,
+                )
+                state.sessions[thread_id] = merged
 
             update_state_file(self.state_file, update)
 

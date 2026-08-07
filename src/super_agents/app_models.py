@@ -111,6 +111,15 @@ class LabelQueryInput:
 
 
 @dataclass(slots=True)
+class QueueCancelInput:
+    queue_item_id: str | None = None
+    label: str | None = None
+    thread_id: str | None = None
+    cwd: str | None = None
+    position: int | None = None
+
+
+@dataclass(slots=True)
 class ResolvedSession:
     session: SessionRecord
     status: StoredStatus

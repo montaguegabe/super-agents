@@ -196,6 +196,8 @@ def normalize_turn_status(turn: JsonObject | None) -> str | None:
         return None
     if status in {"inProgress", "active"}:
         return "running"
+    if status in {"interrupted", "canceled"}:
+        return "cancelled"
     return status
 
 
@@ -206,6 +208,8 @@ def normalize_thread_status(thread: JsonObject) -> StoredStatus | None:
             return "running"
         if raw_status == "idle":
             return "completed"
+        if raw_status in {"interrupted", "canceled"}:
+            return "cancelled"
         if raw_status in {"completed", "failed", "cancelled", "waiting", "unknown"}:
             return raw_status  # type: ignore[return-value]
     if isinstance(raw_status, dict):
@@ -214,6 +218,8 @@ def normalize_thread_status(thread: JsonObject) -> StoredStatus | None:
             return "running"
         if kind == "idle":
             return "completed"
+        if kind in {"interrupted", "canceled"}:
+            return "cancelled"
         if kind in {"completed", "failed", "cancelled", "waiting", "unknown"}:
             return kind  # type: ignore[return-value]
     return None
@@ -222,6 +228,8 @@ def normalize_thread_status(thread: JsonObject) -> StoredStatus | None:
 def to_tracked_turn_status(status: str) -> TrackedStatus:
     if status in {"completed", "failed", "waiting", "cancelled"}:
         return status  # type: ignore[return-value]
+    if status in {"interrupted", "canceled"}:
+        return "cancelled"
     return "running"
 
 

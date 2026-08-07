@@ -16,6 +16,8 @@ import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
+from .app_client_transport import CONTROL_PLANE_DIAGNOSTICS_ENV, control_plane_diagnostics_enabled
+from .app_models import QueueCancelInput
 from .app_server_client import LabelQueryInput
 from .backend_clients import SuperAgentsClient, client_from_environment
 from .defaults import (
@@ -32,11 +34,14 @@ logger = logging.getLogger(__name__)
 INSTRUCTIONS = (
     "Control Openbase Super Agents threads asynchronously. A Super Agents thread may run on the configured "
     "backend, including Codex-compatible app-server sessions or Claude Code Agent SDK sessions. Tools start, "
-    "inspect, steer, cancel, and answer callbacks; they do not wait for turns to finish. Do not silently approve "
-    "app-server callbacks; use codex_answer_request when a callback is pending."
+    "inspect, steer, cancel active turns, remove queued turns, and answer callbacks; they do not wait for turns "
+    "to finish. Do not silently approve app-server callbacks; use codex_answer_request when a callback is pending."
 )
 
 SUPER_AGENT_INSTRUCTIONS_FILENAME = "SUPER_AGENT_INSTRUCTIONS.md"
+CONTROL_PLANE_LOG_FILE_ENV = "SUPER_AGENTS_CONTROL_PLANE_LOG_FILE"
+CONTROL_PLANE_LOGGER_NAME = "super_agents"
+DEFAULT_CONTROL_PLANE_LOG_FILE = Path.home() / ".super-agents" / "control-plane.log"
 
 
 @dataclass(slots=True)
@@ -76,10 +81,13 @@ def create_server(client: SuperAgentsClient | None = None) -> Server:
         safe_arguments = dict(arguments or {})
         safe_arguments["_mcpCallId"] = mcp_call_id
         logger.info(
-            "dispatch_timing stage=mcp_tool_request mcp_call_id=%s tool=%s name=%s cwd_basename=%s",
+            "dispatch_timing stage=mcp_tool_request mcp_call_id=%s tool=%s "
+            "name=%s thread_id=%s turn_id=%s cwd_basename=%s",
             mcp_call_id,
             name,
             safe_arguments.get("name") or safe_arguments.get("label") or "",
+            safe_arguments.get("threadId") or "",
+            safe_arguments.get("turnId") or "",
             _cwd_basename(safe_arguments.get("cwd")),
         )
         try:
@@ -88,18 +96,23 @@ def create_server(client: SuperAgentsClient | None = None) -> Server:
                 raise ValueError(f"Unknown tool: {name}")
             output = await tool.handler(safe_arguments)
             logger.info(
-                "dispatch_timing stage=mcp_tool_response mcp_call_id=%s tool=%s elapsed_ms=%d status=ok",
+                "dispatch_timing stage=mcp_tool_response mcp_call_id=%s tool=%s "
+                "thread_id=%s turn_id=%s elapsed_ms=%d status=ok",
                 mcp_call_id,
                 name,
+                _result_thread_id(output),
+                _result_turn_id(output),
                 int((time.monotonic() - started) * 1000),
             )
             return text_tool_result(output)
         except Exception as exc:
             logger.info(
                 "dispatch_timing stage=mcp_tool_response mcp_call_id=%s tool=%s "
-                "elapsed_ms=%d status=error error_type=%s",
+                "thread_id=%s turn_id=%s elapsed_ms=%d status=error error_type=%s",
                 mcp_call_id,
                 name,
+                safe_arguments.get("threadId") or "",
+                safe_arguments.get("turnId") or "",
                 int((time.monotonic() - started) * 1000),
                 type(exc).__name__,
             )
@@ -347,6 +360,7 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
             handler=lambda input_data: client.steer_by_label(
                 clean_name_query_input(input_data),
                 required_string(input_data, "prompt"),
+                {"_mcpCallId": optional_string(input_data, "_mcpCallId")},
             ),
         ),
         ToolDefinition(
@@ -414,6 +428,35 @@ def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
                 clean_name_query_input(input_data),
                 clean_queue_turn_input(input_data, backend=client_backend(client)),
             ),
+        ),
+        ToolDefinition(
+            name="super_agents_cancel_queued_turn",
+            title="Cancel Queued Super Agents Turn",
+            description=(
+                "Remove a queued Super Agents turn before it starts. Use queueItemId from super_agents_queue_turn "
+                "or queuedTurns/status output, or provide name/threadId with a 1-based queue position. Active or "
+                "already-started turns are not cancelled by this tool; use super_agents_cancel for active turns."
+            ),
+            input_schema=object_schema(
+                {
+                    "queueItemId": {
+                        "type": "string",
+                        "description": "Queued item id returned as item.id or queueItemId by queue/status output.",
+                    },
+                    "turnId": {
+                        "type": "string",
+                        "description": "Alias for queueItemId on backends that expose queued turns as turn ids.",
+                    },
+                    "name": {"type": "string"},
+                    "threadId": {"type": "string"},
+                    "cwd": {"type": "string"},
+                    "position": {
+                        "type": "number",
+                        "description": "1-based queue position within the target thread's queued turns.",
+                    },
+                },
+            ),
+            handler=lambda input_data: client.cancel_queued_turn(clean_cancel_queued_turn_input(input_data)),
         ),
         ToolDefinition(
             name="super_agents_recent",
@@ -522,6 +565,20 @@ def text_tool_result(value: Any, is_error: bool = False) -> types.CallToolResult
 def client_backend(client: SuperAgentsClient) -> str | None:
     backend = getattr(client, "backend", None)
     return backend if isinstance(backend, str) else None
+
+
+def _result_thread_id(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    thread_id = value.get("threadId") or value.get("thread_id")
+    return str(thread_id) if thread_id is not None else ""
+
+
+def _result_turn_id(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    turn_id = value.get("turnId") or value.get("turn_id")
+    return str(turn_id) if turn_id is not None else ""
 
 
 def clean_thread_input(input_data: JsonObject) -> JsonObject:
@@ -653,6 +710,22 @@ def clean_queue_turn_input(input_data: JsonObject, *, backend: str | None = None
     return cleaned
 
 
+def clean_cancel_queued_turn_input(input_data: JsonObject) -> QueueCancelInput:
+    queue_item_id = optional_string(input_data, "queueItemId") or optional_string(input_data, "turnId")
+    position = optional_number(input_data, "position")
+    if not queue_item_id and position is None:
+        raise ValueError("queueItemId, turnId, or position must be provided.")
+    if position is not None and not optional_string(input_data, "name") and not optional_string(input_data, "threadId"):
+        raise ValueError("name or threadId must be provided when canceling by position.")
+    return QueueCancelInput(
+        queue_item_id=queue_item_id,
+        label=optional_string(input_data, "name") or optional_string(input_data, "label"),
+        thread_id=optional_string(input_data, "threadId"),
+        cwd=optional_string(input_data, "cwd"),
+        position=position,
+    )
+
+
 def required_string(value: JsonObject, key: str) -> str:
     result = value.get(key)
     if not isinstance(result, str) or not result:
@@ -719,6 +792,42 @@ def _cwd_basename(value: Any) -> str:
     return value.rstrip("/").rsplit("/", 1)[-1]
 
 
+def control_plane_log_path() -> Path | None:
+    raw_path = os.environ.get(CONTROL_PLANE_LOG_FILE_ENV)
+    if raw_path is not None:
+        normalized = raw_path.strip()
+        if normalized.lower() in {"", "0", "false", "no", "off", "none"}:
+            return None
+        return Path(normalized).expanduser()
+    if control_plane_diagnostics_enabled():
+        return DEFAULT_CONTROL_PLANE_LOG_FILE
+    return None
+
+
+def configure_control_plane_diagnostic_logging() -> Path | None:
+    path = control_plane_log_path()
+    if path is None:
+        return None
+    control_logger = logging.getLogger(CONTROL_PLANE_LOGGER_NAME)
+    resolved = str(path)
+    for handler in control_logger.handlers:
+        if getattr(handler, "_super_agents_control_plane_log", False) and getattr(handler, "baseFilename", "") == resolved:
+            return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    handler._super_agents_control_plane_log = True  # type: ignore[attr-defined]
+    control_logger.addHandler(handler)
+    control_logger.setLevel(logging.INFO)
+    logger.info(
+        "dispatch_timing stage=control_plane_diagnostic_logging_enabled log_file=%s env=%s",
+        path,
+        CONTROL_PLANE_DIAGNOSTICS_ENV,
+    )
+    return path
+
+
 async def run_stdio() -> None:
     server = create_server()
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
@@ -744,6 +853,7 @@ def main() -> None:
         print(f"super-agents {package_version()}")
         return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_control_plane_diagnostic_logging()
     print("Super Agents MCP running on stdio.", file=sys.stderr)
     asyncio.run(run_stdio())
 

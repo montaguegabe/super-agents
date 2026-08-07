@@ -28,17 +28,11 @@ class BackendStatus:
 
 def current_backend(path: Path = DEFAULT_ENV_FILE) -> BackendStatus:
     values = read_env_values(path)
-    backend = (
-        values.get(CODING_BACKEND_ENV_KEY)
-        or os.environ.get(CODING_BACKEND_ENV_KEY)
-        or CODEX_BACKEND
-    )
+    backend = values.get(CODING_BACKEND_ENV_KEY) or os.environ.get(CODING_BACKEND_ENV_KEY) or CODEX_BACKEND
     try:
         backend = normalize_backend(backend)
     except ValueError:
         backend = f"unsupported:{backend}"
-    if backend == OPENBASE_CLOUD_BACKEND:
-        backend = CODEX_BACKEND
     return BackendStatus(env_file=path, backend=backend, exists=path.is_file())
 
 
@@ -84,9 +78,7 @@ def _format_env_value(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="super-agents-backend")
-    parser.add_argument(
-        "--version", action="version", version=f"super-agents {package_version()}"
-    )
+    parser.add_argument("--version", action="version", version=f"super-agents {package_version()}")
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status")
@@ -104,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "use":
         status = set_backend(args.backend, args.env_file)
         print(f"Backend set to {status.backend} in {status.env_file}.")
-        if status.backend == CLAUDE_CODE_BACKEND:
+        if status.backend in {CLAUDE_CODE_BACKEND, OPENBASE_CLOUD_BACKEND}:
             print(
                 "Restart the Super Agents MCP server for Claude Code mode. codex-app-server is not used by this backend."
             )

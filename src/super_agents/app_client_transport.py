@@ -29,6 +29,8 @@ from .state import JsonObject
 
 logger = logging.getLogger(__name__)
 DEFAULT_WEBSOCKET_MAX_SIZE = 16 * 1024 * 1024
+CONTROL_PLANE_DIAGNOSTICS_ENV = "SUPER_AGENTS_CONTROL_PLANE_DIAGNOSTICS"
+TIMED_OUT_REQUEST_LIMIT = 50
 
 
 def websocket_max_size() -> int | None:
@@ -46,6 +48,31 @@ def websocket_max_size() -> int | None:
             DEFAULT_WEBSOCKET_MAX_SIZE,
         )
         return DEFAULT_WEBSOCKET_MAX_SIZE
+
+
+def control_plane_diagnostics_enabled() -> bool:
+    raw = os.environ.get(CONTROL_PLANE_DIAGNOSTICS_ENV, "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def rpc_context(params: JsonObject | None) -> tuple[str, str]:
+    params = params or {}
+    thread_id = str(params.get("threadId") or "")
+    turn_id = str(params.get("turnId") or params.get("expectedTurnId") or "")
+    return thread_id, turn_id
+
+
+def rpc_log_context(params: JsonObject | None, context: JsonObject | None = None) -> JsonObject:
+    params = params or {}
+    context = context or {}
+    thread_id = str(context.get("threadId") or params.get("threadId") or "")
+    turn_id = str(context.get("turnId") or params.get("turnId") or params.get("expectedTurnId") or "")
+    return {
+        "dispatch_id": str(context.get("dispatchId") or context.get("mcpCallId") or ""),
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "target_name": str(context.get("name") or context.get("label") or ""),
+    }
 
 
 class TransportClientMixin:
@@ -99,29 +126,50 @@ class TransportClientMixin:
         except Exception:
             return False
 
-    async def request(self, method: str, params: JsonObject | None = None, timeout_seconds: float = 30) -> JsonObject:
+    async def request(
+        self,
+        method: str,
+        params: JsonObject | None = None,
+        timeout_seconds: float = 30,
+        *,
+        context: JsonObject | None = None,
+    ) -> JsonObject:
         request_id = self._next_id
         self._next_id += 1
         started = time.monotonic()
+        request_params = params or {}
+        log_context = rpc_log_context(request_params, context)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
         self._pending[request_id] = future
-        await self.send({"id": request_id, "method": method, "params": params or {}})
+        await self.send({"id": request_id, "method": method, "params": request_params})
         try:
             result = await asyncio.wait_for(future, timeout=timeout_seconds)
         except TimeoutError:
             self._pending.pop(request_id, None)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            self.remember_timed_out_request(request_id, method, log_context, started, elapsed_ms)
             logger.info(
-                "dispatch_timing stage=app_server_rpc_timeout request_id=%s method=%s elapsed_ms=%d",
+                "dispatch_timing stage=app_server_rpc_timeout request_id=%s method=%s "
+                "dispatch_id=%s thread_id=%s turn_id=%s target_name=%s elapsed_ms=%d",
                 request_id,
                 method,
-                int((time.monotonic() - started) * 1000),
+                log_context["dispatch_id"],
+                log_context["thread_id"],
+                log_context["turn_id"],
+                log_context["target_name"],
+                elapsed_ms,
             )
             raise TimeoutError(f"Timed out waiting for app-server response to {method}.") from None
         logger.info(
-            "dispatch_timing stage=app_server_rpc_response request_id=%s method=%s elapsed_ms=%d",
+            "dispatch_timing stage=app_server_rpc_response request_id=%s method=%s "
+            "dispatch_id=%s thread_id=%s turn_id=%s target_name=%s elapsed_ms=%d",
             request_id,
             method,
+            log_context["dispatch_id"],
+            log_context["thread_id"],
+            log_context["turn_id"],
+            log_context["target_name"],
             int((time.monotonic() - started) * 1000),
         )
         return result if isinstance(result, dict) else {"result": result}
@@ -165,11 +213,86 @@ class TransportClientMixin:
     def handle_rpc_response(self, request_id: str | int, message: JsonObject) -> None:
         pending = self._pending.pop(request_id, None)
         if pending is None or pending.done():
+            self.log_late_rpc_response(request_id, message)
             return
         if message.get("error"):
             pending.set_exception(RuntimeError(json.dumps(message["error"])))
         else:
             pending.set_result(message.get("result"))
+
+    def remember_timed_out_request(
+        self,
+        request_id: str | int,
+        method: str,
+        context: JsonObject,
+        started: float,
+        elapsed_ms: int,
+    ) -> None:
+        timed_out = getattr(self, "_timed_out_requests", None)
+        if timed_out is None:
+            return
+        timed_out[request_id] = {
+            "method": method,
+            "dispatch_id": context.get("dispatch_id") or "",
+            "thread_id": context.get("thread_id") or "",
+            "turn_id": context.get("turn_id") or "",
+            "target_name": context.get("target_name") or "",
+            "started": started,
+            "timeout_elapsed_ms": elapsed_ms,
+        }
+        while len(timed_out) > TIMED_OUT_REQUEST_LIMIT:
+            timed_out.pop(next(iter(timed_out)))
+
+    def log_late_rpc_response(self, request_id: str | int, message: JsonObject) -> None:
+        timed_out = getattr(self, "_timed_out_requests", None)
+        if not timed_out:
+            return
+        metadata = timed_out.get(request_id)
+        if not metadata:
+            return
+        elapsed_ms = int((time.monotonic() - float(metadata.get("started") or time.monotonic())) * 1000)
+        metadata["late_response_elapsed_ms"] = elapsed_ms
+        metadata["late_response_has_error"] = bool(message.get("error"))
+        if not control_plane_diagnostics_enabled():
+            return
+        logger.info(
+            "dispatch_timing stage=app_server_rpc_late_response request_id=%s method=%s "
+            "dispatch_id=%s thread_id=%s turn_id=%s target_name=%s "
+            "elapsed_ms=%d timeout_elapsed_ms=%s has_error=%s",
+            request_id,
+            metadata.get("method") or "",
+            metadata.get("dispatch_id") or "",
+            metadata.get("thread_id") or "",
+            metadata.get("turn_id") or "",
+            metadata.get("target_name") or "",
+            elapsed_ms,
+            metadata.get("timeout_elapsed_ms") or "",
+            bool(message.get("error")),
+        )
+
+    def recent_timed_out_requests(self) -> list[JsonObject]:
+        timed_out = getattr(self, "_timed_out_requests", None)
+        if not timed_out:
+            return []
+        now = time.monotonic()
+        result: list[JsonObject] = []
+        for request_id, metadata in timed_out.items():
+            started = float(metadata.get("started") or now)
+            result.append(
+                {
+                    "requestId": request_id,
+                    "method": metadata.get("method") or "",
+                    "dispatchId": metadata.get("dispatch_id") or "",
+                    "threadId": metadata.get("thread_id") or "",
+                    "turnId": metadata.get("turn_id") or "",
+                    "targetName": metadata.get("target_name") or "",
+                    "ageMs": int((now - started) * 1000),
+                    "timeoutElapsedMs": metadata.get("timeout_elapsed_ms"),
+                    "lateResponseElapsedMs": metadata.get("late_response_elapsed_ms"),
+                    "lateResponseHasError": metadata.get("late_response_has_error"),
+                }
+            )
+        return result
 
     def handle_server_request(self, request_id: str | int, method: str, params: JsonObject) -> None:
         pending_request = PendingServerRequest(id=request_id, method=method, params=params, received_at=iso_now())
@@ -286,6 +409,13 @@ class TransportClientMixin:
         thread_id = extract_notification_thread_id(params)
         turn_id = extract_notification_turn_id(params)
         if not thread_id or not turn_id:
+            if method in {"turn/completed", "turn/failed", "turn/cancelled", "turn/canceled", "turn/interrupted"}:
+                logger.warning(
+                    "Super Agents terminal notification missing identifiers method=%s thread_id=%s turn_id=%s",
+                    method,
+                    thread_id or "",
+                    turn_id or "",
+                )
             return
         turn = self.ensure_turn(thread_id, turn_id)
         received_at = iso_now()
@@ -303,6 +433,16 @@ class TransportClientMixin:
             turn.finished_at = iso_now()
         elif turn.status not in {"waiting", "completed", "failed", "cancelled"}:
             turn.status = "running"
+        if turn.status in {"completed", "failed", "cancelled"}:
+            logger.info(
+                "Super Agents terminal notification received method=%s thread_id=%s turn_id=%s "
+                "status=%s received_at=%s",
+                method,
+                thread_id,
+                turn_id,
+                turn.status,
+                received_at,
+            )
 
         last_useful_message = text_preview(params) or method
         clear_fields = ["activeTurnId"] if turn.status in {"completed", "failed", "cancelled"} else []
@@ -329,9 +469,50 @@ class TransportClientMixin:
             clear_fields=clear_fields,
         )
         if turn.status in {"completed", "failed", "cancelled"}:
-            merge_task.add_done_callback(
-                lambda _task, completed_thread_id=thread_id: self.schedule_queue_drain(completed_thread_id)
+            def on_terminal_merge_done(
+                task: asyncio.Task[None],
+                completed_thread_id: str = thread_id,
+                completed_turn_id: str = turn_id,
+                completed_status: str = turn.status,
+            ) -> None:
+                self._handle_terminal_merge_done(task, completed_thread_id, completed_turn_id, completed_status)
+
+            merge_task.add_done_callback(on_terminal_merge_done)
+
+    def _handle_terminal_merge_done(
+        self,
+        task: asyncio.Task[None],
+        thread_id: str,
+        turn_id: str,
+        status: str,
+    ) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.warning(
+                "Super Agents terminal state merge cancelled thread_id=%s turn_id=%s status=%s "
+                "scheduling_queue_drain=true",
+                thread_id,
+                turn_id,
+                status,
             )
+        except Exception:
+            logger.exception(
+                "Super Agents terminal state merge failed thread_id=%s turn_id=%s status=%s "
+                "scheduling_queue_drain=true",
+                thread_id,
+                turn_id,
+                status,
+            )
+        else:
+            logger.info(
+                "Super Agents terminal state merge completed thread_id=%s turn_id=%s status=%s "
+                "scheduling_queue_drain=true",
+                thread_id,
+                turn_id,
+                status,
+            )
+        self.schedule_queue_drain(thread_id)
 
     def _schedule_merge_session(
         self,

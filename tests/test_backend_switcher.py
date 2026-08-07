@@ -43,5 +43,5 @@ def test_backend_switch_supports_openbase_cloud(tmp_path: Path) -> None:
 
     status = set_backend("openbase-cloud", env_file)
 
-    assert status.backend == "codex"
+    assert status.backend == "openbase_cloud"
     assert "OPENBASE_CODING_BACKEND=openbase_cloud" in env_file.read_text(encoding="utf-8")

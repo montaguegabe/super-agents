@@ -93,7 +93,7 @@ Openbase Coder users usually do not need to run this by hand; the
 Super Agents supports three backend modes:
 
 - `codex`: native Codex app-server over websocket.
-- `openbase_cloud`: Codex-compatible sessions through Openbase Cloud.
+- `openbase_cloud`: Claude Code sessions through the Openbase Cloud Anthropic proxy.
 - `claude_code`: Claude Code sessions using local Claude auth/billing.
 
 Switch modes without MCP:
@@ -105,18 +105,19 @@ super-agents-backend use claude-code
 super-agents-backend status
 ```
 
-The aliases `claude` and `claude-sdk` also select `claude_code`. Restart the
-process that owns Super Agents after switching. For `codex` and
-`openbase_cloud`, restart `codex-app-server`; for Claude Code, restart the MCP
-host running `super-agents-mcp`.
+Restart the process that owns Super Agents after switching. For `codex`, restart
+`codex-app-server`; for Openbase Cloud and Claude Code, restart the MCP host
+running `super-agents-mcp`.
 
 ## Claude Code Backend
 
-The Claude Code backend uses the `claude-agent-sdk` package directly. It
-does not run a local Anthropic Messages API adapter, does not expose
-`/v1/responses`, does not require Codex app-server, and does not support
-`ANTHROPIC_API_KEY`. Billing/auth comes from the local Claude setup on the
-computer.
+The Claude Code backend uses the `claude-agent-sdk` package directly. It does
+not run a local Anthropic Messages API adapter, does not expose `/v1/responses`,
+and does not require Codex app-server. Direct `claude_code` billing/auth comes
+from the local Claude setup on the computer. The `openbase_cloud` backend uses
+the same Claude Code execution path, but points Claude Code at Openbase's
+Anthropic proxy with `ANTHROPIC_BASE_URL` and an Openbase machine token in
+`ANTHROPIC_AUTH_TOKEN`.
 
 Set `SUPER_AGENTS_CLAUDE_EXTRA_ARGS` to a JSON object to pass extra Claude
 Code CLI flags to every session, e.g. `{"chrome": null}` to enable the Claude
@@ -253,6 +254,8 @@ The MCP server exposes these tools:
   `turn/start`.
 - `super_agents_queue_turn`: queue a follow-up prompt to run after the active
   turn completes.
+- `super_agents_cancel_queued_turn`: remove a queued follow-up prompt before
+  it starts.
 - `super_agents_recent`: list recent named Codex app-server threads.
 
 List-style tools accept `favorite=true` or `favorite=false` to filter by
@@ -261,6 +264,41 @@ Openbase Coder's local per-machine favorite metadata.
 Default responses are intentionally compact. Full turns, tracked event
 transcripts, diffs, and large previews are opt-in through each tool's detail
 flags.
+
+### Cancelling Queued Turns
+
+Queued follow-up prompts are visible in `codex_app_server_status` under
+`queuedTurns`, and `super_agents_queue_turn` returns the queued item under
+`item`. To remove a queued item before it starts, call
+`super_agents_cancel_queued_turn` with the queued item id:
+
+```json
+{
+  "queueItemId": "q_abc123"
+}
+```
+
+The Claude Code backend exposes queued turns as turn ids, so `turnId` is also
+accepted as an alias:
+
+```json
+{
+  "turnId": "t_abc123"
+}
+```
+
+If the id is not available, cancel by target thread and 1-based queue position:
+
+```json
+{
+  "name": "agent-name",
+  "position": 1
+}
+```
+
+Use `threadId` instead of `name` when resolving by id is clearer. This tool only
+removes queued items whose status is still `queued`; active or already-started
+turns are rejected. Use `super_agents_cancel` for active turns.
 
 ## Openbase Coder Report Tags
 

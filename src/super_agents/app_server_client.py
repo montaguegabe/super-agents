@@ -30,6 +30,7 @@ from .app_formatting import (
     preview_text,
     scalar_field,
     text_preview,
+    turn_text_preview,
     without_none,
 )
 from .app_models import (
@@ -240,6 +241,10 @@ def _is_missing_rollout_error(exc: RuntimeError) -> bool:
     return "no rollout found for thread id" in str(exc)
 
 
+def _is_thread_not_found_error(exc: RuntimeError) -> bool:
+    return "thread not found" in str(exc).lower()
+
+
 def default_model_from_environment() -> str:
     return default_super_agents_model() or DEFAULT_MODEL
 
@@ -268,6 +273,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         self._ws: Any | None = None
         self._next_id = 1
         self._pending: dict[str | int, asyncio.Future[Any]] = {}
+        self._timed_out_requests: dict[str | int, JsonObject] = {}
         self._pending_server_requests: dict[str | int, PendingServerRequest] = {}
         self._turns: dict[str, TurnState] = {}
         self._connect_lock = asyncio.Lock()
@@ -289,6 +295,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "managedProcess": False,
             "pendingRequests": [request.to_json() for request in self._pending_server_requests.values()],
             "pendingPermissionRequests": [request.to_json() for request in self.pending_permission_requests()],
+            "recentTimedOutRpcRequests": self.recent_timed_out_requests(),
             "queuedTurns": self.queued_turn_summary(),
             "activeTurns": [
                 self.compact_tracked_turn(turn) for turn in self._turns.values() if self.tracked_turn_is_active(turn)
@@ -364,7 +371,14 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         ):
             params["developerInstructions"] = developer_instructions
 
-        result = await self.request("thread/start", params)
+        result = await self.request(
+            "thread/start",
+            params,
+            context={
+                "dispatchId": dispatch_id,
+                "name": name,
+            },
+        )
         thread_id = extract_thread_id(result)
         logger.info(
             "dispatch_timing stage=super_agents_thread_start_response dispatch_id=%s "
@@ -433,7 +447,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                 "threadId": thread_id,
                 "agentName": agent_name,
                 "model": extract_model(result) or self.default_model,
-                "lastUsefulMessage": text_preview(result),
+                "lastUsefulMessage": turn_text_preview(result),
             },
         )
         logger.info(
@@ -578,7 +592,15 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             mode,
             reasoning_effort,
         )
-        result = await self.request("turn/start", params)
+        result = await self.request(
+            "turn/start",
+            params,
+            context={
+                "dispatchId": dispatch_id,
+                "threadId": thread_id,
+                "name": label,
+            },
+        )
         turn_id = extract_turn_id(result) or f"{thread_id}:unknown:{int(time.time() * 1000)}"
         logger.info(
             "dispatch_timing stage=app_server_turn_start_response dispatch_id=%s thread_id=%s turn_id=%s elapsed_ms=%d",
@@ -631,7 +653,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
                         reasoning_effort=reasoning_effort,
                         updated_at=now,
                         prompt_preview=preview_text(str(input_data["prompt"])),
-                        last_useful_message=text_preview(result),
+                        last_useful_message=turn_text_preview(result),
                     )
                 },
             },
@@ -660,16 +682,38 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             result["sandboxPolicy"] = sandbox_policy
         return result
 
-    async def steer_turn(self, thread_id: str, turn_id: str, prompt: str) -> JsonObject:
+    async def steer_turn(self, thread_id: str, turn_id: str, prompt: str, *, dispatch_id: str = "") -> JsonObject:
+        started = time.monotonic()
+        logger.info(
+            "dispatch_timing stage=app_server_turn_steer_request dispatch_id=%s "
+            "thread_id=%s turn_id=%s prompt_chars=%d",
+            dispatch_id,
+            thread_id,
+            turn_id,
+            len(prompt),
+        )
         await self.ensure_connected()
-        return await self.request(
+        result = await self.request(
             "turn/steer",
             {
                 "threadId": thread_id,
                 "expectedTurnId": turn_id,
                 "input": [{"type": "text", "text": prompt}],
             },
+            context={
+                "dispatchId": dispatch_id,
+                "threadId": thread_id,
+                "turnId": turn_id,
+            },
         )
+        logger.info(
+            "dispatch_timing stage=app_server_turn_steer_response dispatch_id=%s thread_id=%s turn_id=%s elapsed_ms=%d",
+            dispatch_id,
+            thread_id,
+            turn_id,
+            int((time.monotonic() - started) * 1000),
+        )
+        return result
 
     async def turn_progress(
         self, thread_id: str, turn_id: str, input_data: LabelQueryInput | None = None
@@ -874,7 +918,11 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         input_data: LabelQueryInput,
         *,
         developer_instructions: str | None = None,
+        replace_developer_instructions: bool = False,
     ) -> JsonObject:
+        # Accepted for protocol parity: the app-server resume already applies
+        # the provided instructions to the resumed thread outright.
+        del replace_developer_instructions
         resolved = await self.resolve_session(required_label(input_data), replace(input_data, prefer="latest_any"))
         result = await self.resume_thread(
             resolved.session.thread_id,
@@ -910,11 +958,13 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         prompt: str,
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
+        dispatch_id = str((turn_input or {}).get("_mcpCallId") or "")
         if input_data.thread_id and input_data.turn_id:
             return await self.steer_turn(
                 input_data.thread_id,
                 input_data.turn_id,
                 prompt,
+                dispatch_id=dispatch_id,
             )
         extras = dict(turn_input or {})
         try:
@@ -925,7 +975,19 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         turn_id = input_data.turn_id or resolved.turn_id
         if not turn_id or not is_active_status(resolved.status):
             return await self._start_or_queue_prompt(resolved, prompt, extras)
-        return await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
+        try:
+            return await self.steer_turn(resolved.session.thread_id, turn_id, prompt, dispatch_id=dispatch_id)
+        except RuntimeError as exc:
+            recovered = await self.start_after_terminal_thread_not_found_steer(
+                resolved,
+                turn_id,
+                {"label": resolved.session.label, "agentName": resolved.session.agent_name, **extras, "prompt": prompt},
+                exc,
+                drain="started_after_terminal_thread_not_found_steer",
+            )
+            if recovered:
+                return recovered
+            raise
 
     async def _start_or_queue_prompt(
         self,
@@ -977,18 +1039,32 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         if turn_id and not turn_id.startswith("q_") and thread_is_active:
             prompt = str(turn_input.get("prompt") or "")
             try:
-                result = await self.steer_turn(resolved.session.thread_id, turn_id, prompt)
-            except RuntimeError as exc:
-                if "no active turn to steer" not in str(exc):
-                    raise
-                logger.warning(
-                    "Resolved active Super Agents thread had no native active turn; "
-                    "starting a new turn instead thread_id=%s turn_id=%s status=%s",
+                result = await self.steer_turn(
                     resolved.session.thread_id,
                     turn_id,
-                    resolved.status,
+                    prompt,
+                    dispatch_id=dispatch_id,
                 )
-                return await self._start_turn_immediately(resolved, turn_input, drain="started_after_stale_steer")
+            except RuntimeError as exc:
+                if "no active turn to steer" in str(exc):
+                    logger.warning(
+                        "Resolved active Super Agents thread had no native active turn; "
+                        "starting a new turn instead thread_id=%s turn_id=%s status=%s",
+                        resolved.session.thread_id,
+                        turn_id,
+                        resolved.status,
+                    )
+                    return await self._start_turn_immediately(resolved, turn_input, drain="started_after_stale_steer")
+                recovered = await self.start_after_terminal_thread_not_found_steer(
+                    resolved,
+                    turn_id,
+                    turn_input,
+                    exc,
+                    drain="started_after_terminal_thread_not_found_steer",
+                )
+                if recovered:
+                    return recovered
+                raise
             return {
                 **result,
                 "queued": False,
@@ -1007,12 +1083,60 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             return await self._start_turn_immediately(resolved, turn_input, drain="started_without_active_turn_id")
         return await self.start_or_queue_turn(resolved, turn_input)
 
+    async def start_after_terminal_thread_not_found_steer(
+        self,
+        resolved: ResolvedSession,
+        turn_id: str,
+        turn_input: JsonObject,
+        exc: RuntimeError,
+        *,
+        drain: str,
+    ) -> JsonObject | None:
+        if not _is_thread_not_found_error(exc):
+            return None
+        try:
+            progress = await self.turn_progress(resolved.session.thread_id, turn_id)
+        except RuntimeError:
+            return None
+        status = str(progress.get("status") or "")
+        if is_active_status(status):
+            return None
+        refreshed_session = await self.get_session(resolved.session.thread_id)
+        refreshed = ResolvedSession(
+            session=refreshed_session or resolved.session,
+            turn_id=None,
+            status="unknown" if status == "unknown" else to_tracked_turn_status(status),
+        )
+        logger.warning(
+            "Recovered stale active Super Agents turn after app-server thread-not-found on steer; "
+            "starting follow-up thread_id=%s turn_id=%s terminal_status=%s",
+            resolved.session.thread_id,
+            turn_id,
+            status,
+        )
+        return await self._start_turn_immediately(refreshed, turn_input, drain=drain)
+
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         target = await self.resolve_queue_target(input_data)
         return await self.start_or_queue_turn(target, turn_input)
 
     async def start_or_queue_turn(self, target: ResolvedSession, turn_input: JsonObject) -> JsonObject:
-        if is_active_status(target.status) or self.thread_has_active_turn(target.session.thread_id):
+        target_status_active = is_active_status(target.status)
+        active_gate = self.thread_has_active_turn(target.session.thread_id)
+        should_queue = target_status_active or active_gate
+        logger.info(
+            "Super Agents turn start decision thread_id=%s turn_id=%s status=%s active_turn_id=%s "
+            "last_turn_id=%s target_status_active=%s active_gate=%s decision=%s",
+            target.session.thread_id,
+            target.turn_id,
+            target.status,
+            target.session.active_turn_id,
+            target.session.last_turn_id,
+            target_status_active,
+            active_gate,
+            "queue" if should_queue else "start_immediately",
+        )
+        if should_queue:
             return await self.enqueue_turn(target, turn_input)
         return await self._start_turn_immediately(target, turn_input, drain="started_immediately")
 
@@ -1037,6 +1161,19 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             ),
         )
         self.schedule_queue_drain(target.session.thread_id)
+        drain = "scheduled" if not is_active_status(target.status) else "waiting_for_active_turn"
+        logger.info(
+            "Super Agents turn queued thread_id=%s queue_item_id=%s position=%d queue_depth=%d "
+            "status=%s active_turn_id=%s last_turn_id=%s drain=%s",
+            target.session.thread_id,
+            queued.id,
+            position,
+            position,
+            target.status,
+            target.session.active_turn_id,
+            target.session.last_turn_id,
+            drain,
+        )
         return {
             "queued": True,
             "threadId": target.session.thread_id,
@@ -1044,5 +1181,5 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             "position": position,
             "queueDepth": position,
             "item": queued.to_json(),
-            "drain": "scheduled" if not is_active_status(target.status) else "waiting_for_active_turn",
+            "drain": drain,
         }

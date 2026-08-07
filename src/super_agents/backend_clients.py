@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .app_models import LabelQueryInput
+from .app_models import LabelQueryInput, QueueCancelInput
 from .app_server_client import CodexAppServerClient
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     BACKEND_ALIASES,
@@ -12,6 +12,7 @@ from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     CODING_BACKEND_ENV_KEY,
     DEFAULT_ENV_FILE,
     OPENBASE_CLOUD_BACKEND,
+    OPENBASE_CLOUD_CODEX_BACKEND,
     backend_from_environment,
     configured_backend_from_environment,
     execution_backend,
@@ -29,6 +30,7 @@ class SuperAgentsClient(Protocol):
         input_data: LabelQueryInput,
         *,
         developer_instructions: str | None = None,
+        replace_developer_instructions: bool = False,
     ) -> JsonObject: ...
     async def read_by_label(self, input_data: LabelQueryInput, include_turns: bool = False) -> JsonObject: ...
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject: ...
@@ -52,6 +54,7 @@ class SuperAgentsClient(Protocol):
     async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject: ...
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject: ...
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject: ...
+    async def cancel_queued_turn(self, input_data: QueueCancelInput) -> JsonObject: ...
 
 
 def client_from_environment() -> SuperAgentsClient:

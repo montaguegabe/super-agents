@@ -14,6 +14,7 @@ from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     DEFAULT_ENV_FILE,
     OPENBASE_CLOUD_BACKEND,
     backend_from_environment,
+    configured_backend_from_environment,
     execution_backend,
     normalize_backend,
 )
@@ -24,6 +25,7 @@ REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
 DEFAULT_CODEX_SERVICE_TIER = "standard"
 CLAUDE_MODEL_ALIASES = {"fable", "opus", "sonnet", "haiku"}
+DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "openbase-claude"
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +49,21 @@ def default_service_tier() -> str:
 
 def default_super_agents_model(*, backend: str | None = None) -> str | None:
     payload = default_dispatcher_config()
-    selected_backend = execution_backend(backend or backend_from_environment())
+    configured_backend = normalize_backend(backend or configured_backend_from_environment())
+    selected_backend = execution_backend(configured_backend)
+    configured_model = _backend_model(
+        payload,
+        "super_agents",
+        backend=configured_backend,
+    ) or _backend_model(
+        payload,
+        "super_agents",
+        backend=selected_backend,
+    )
+    if configured_backend == OPENBASE_CLOUD_BACKEND and not configured_model:
+        configured_model = DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL
     return _model_for_backend(
-        _backend_model(
-            payload,
-            "super_agents",
-            backend=selected_backend,
-        ),
+        configured_model,
         backend=selected_backend,
     )
 
@@ -92,7 +102,7 @@ def _model_for_backend(model: str | None, *, backend: str | None = None) -> str 
         return None
     selected_backend = backend or backend_from_environment()
     normalized_model = model.strip().lower()
-    if selected_backend in {CODEX_BACKEND, OPENBASE_CLOUD_BACKEND} and (
+    if selected_backend in CODEX_COMPATIBLE_BACKENDS and (
         normalized_model in CLAUDE_MODEL_ALIASES or normalized_model.startswith("claude-")
     ):
         logger.warning(

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
+
+from .backend_config import OPENBASE_CLOUD_BACKEND, configured_backend_from_environment
 
 JsonObject = dict[str, Any]
 
@@ -27,6 +30,11 @@ CLAUDE_SERVICE_TIER_EFFORTS = {
 # environment, so an empty override keeps ANTHROPIC_API_KEY away from the
 # spawned CLI without mutating this process's environment.
 CLAUDE_SDK_ENV_OVERRIDES = {"ANTHROPIC_API_KEY": ""}
+OPENBASE_CLOUD_DEFAULT_BASE_URL = "https://app.openbase.cloud"
+OPENBASE_CLOUD_ANTHROPIC_PATH = "/api/openbase/llm/anthropic"
+OPENBASE_CLOUD_ANTHROPIC_BASE_URL_ENV = "OPENBASE_CLOUD_ANTHROPIC_BASE_URL"
+OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV = "OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN"
+OPENBASE_CODER_CLI_WEB_BACKEND_URL_ENV = "OPENBASE_CODER_CLI_WEB_BACKEND_URL"
 
 
 def agent_options(
@@ -42,7 +50,11 @@ def agent_options(
         "cwd": cwd,
         "permission_mode": CLAUDE_PERMISSION_MODE,
         **managed_options,
-        "env": {**managed_options.get("env", {}), **CLAUDE_SDK_ENV_OVERRIDES},
+        "env": {
+            **managed_options.get("env", {}),
+            **CLAUDE_SDK_ENV_OVERRIDES,
+            **openbase_cloud_claude_env(),
+        },
     }
     if model:
         kwargs["model"] = model
@@ -53,6 +65,53 @@ def agent_options(
     if extra_args := claude_extra_args():
         kwargs["extra_args"] = extra_args
     return sdk.ClaudeAgentOptions(**kwargs)
+
+
+def openbase_cloud_claude_env() -> dict[str, str]:
+    if configured_backend_from_environment() != OPENBASE_CLOUD_BACKEND:
+        return {}
+    return {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_BASE_URL": _openbase_cloud_anthropic_base_url(),
+        "ANTHROPIC_AUTH_TOKEN": _openbase_cloud_anthropic_auth_token(),
+    }
+
+
+def _openbase_cloud_anthropic_base_url() -> str:
+    configured = (
+        os.environ.get(OPENBASE_CLOUD_ANTHROPIC_BASE_URL_ENV)
+        or os.environ.get(OPENBASE_CODER_CLI_WEB_BACKEND_URL_ENV)
+        or OPENBASE_CLOUD_DEFAULT_BASE_URL
+    ).rstrip("/")
+    if configured.endswith(f"{OPENBASE_CLOUD_ANTHROPIC_PATH}/v1"):
+        return configured[: -len("/v1")]
+    if configured.endswith(OPENBASE_CLOUD_ANTHROPIC_PATH):
+        return configured
+    return f"{configured}{OPENBASE_CLOUD_ANTHROPIC_PATH}"
+
+
+def _openbase_cloud_anthropic_auth_token() -> str:
+    configured = os.environ.get(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "").strip()
+    if configured:
+        return configured
+    try:
+        result = subprocess.run(
+            ["openbase-coder", "auth", "print-machine-token"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "Unable to get an Openbase Cloud machine token. Run `openbase-coder login`, then restart services."
+        ) from exc
+    token = result.stdout.strip()
+    if result.returncode != 0 or not token:
+        raise RuntimeError(
+            "Unable to get an Openbase Cloud machine token. Run `openbase-coder login`, then restart services."
+        )
+    return token
 
 
 def claude_extra_args() -> dict[str, str | None] | None:
