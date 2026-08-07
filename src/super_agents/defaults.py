@@ -25,7 +25,7 @@ REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
 DEFAULT_CODEX_SERVICE_TIER = "standard"
 CLAUDE_MODEL_ALIASES = {"fable", "opus", "sonnet", "haiku"}
-DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "openbase-claude"
+DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "claude-sonnet-5"
 
 logger = logging.getLogger(__name__)
 

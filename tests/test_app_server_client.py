@@ -11,9 +11,9 @@ import pytest
 import websockets
 
 import super_agents.app_server_client as app_server_client
-from super_agents.app_queue import append_queued_turn, cancel_queued_turn, new_queued_turn, reserve_next_queued_turn
 from super_agents.app_client_transport import websocket_max_size
 from super_agents.app_models import LabelQueryInput, QueueCancelInput, TurnState
+from super_agents.app_queue import append_queued_turn, cancel_queued_turn, new_queued_turn, reserve_next_queued_turn
 from super_agents.app_server_client import CodexAppServerClient
 from super_agents.app_time import iso_now, turn_key
 from super_agents.mcp_server import (
@@ -395,6 +395,18 @@ def test_openbase_cloud_uses_cloud_claude_model_defaults(monkeypatch, tmp_path: 
 
     assert cleaned["model"] == "openbase-claude"
     assert default_super_agents_model() == "openbase-claude"
+
+
+def test_openbase_cloud_defaults_to_sonnet_when_unconfigured(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(json.dumps({}), encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
+
+    cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
+
+    assert cleaned["model"] == "claude-sonnet-5"
+    assert default_super_agents_model() == "claude-sonnet-5"
 
 
 def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:
