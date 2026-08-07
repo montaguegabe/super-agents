@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import logging
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -69,10 +71,18 @@ from super_agents.defaults import (
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
 
+logger = logging.getLogger(__name__)
+
 # How long an extra response-read (draining steered queries) waits for the
 # next response to start before concluding the CLI coalesced those queries
 # into an already-consumed response.
 _STEER_DRAIN_TIMEOUT_SECONDS = 5.0
+
+# Minimum age before a running turn may be treated as orphaned. Rows are
+# written before the turn task acquires the session flock, so very fresh
+# turns can look unowned for a moment.
+_ORPHAN_SWEEP_MIN_AGE_SECONDS = 60.0
+_ORPHAN_RECLAIM_MIN_AGE_SECONDS = 5.0
 
 SDK_IMPORT_ERROR = (
     "Claude Code backend requires the claude-agent-sdk package. "
@@ -107,6 +117,7 @@ class ClaudeAgentSdkClient:
         # reads are bounded by this timeout instead of blocking forever.
         self._session_pending_results: dict[str, int] = {}
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
+        self._orphan_sweep_done = False
         # Identifies this client instance in the shared store so instances in
         # other processes can tell their cached CLI's conversation leaf is
         # stale (see _sdk_client_for).
@@ -114,6 +125,7 @@ class ClaudeAgentSdkClient:
         self._closed = False
 
     async def status(self) -> JsonObject:
+        self._reconcile_orphaned_turns_once()
         sessions = self.store.list_sessions(include_inactive=True)
         ready, error = self._sdk_ready()
         return without_none(
@@ -335,6 +347,7 @@ class ClaudeAgentSdkClient:
         return {"backend": self.backend, "cancelled": True, "threadId": refreshed.id, "name": refreshed.name}
 
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
+        self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
         if self._session_is_busy(session):
             return await self._steer_active_turn(
@@ -663,6 +676,21 @@ class ClaudeAgentSdkClient:
                 {**turn_input, "prompt": prompt},
             )
         if sdk_client is None:
+            # No client in this process: either the turn runs in another
+            # process (its flock is held — steering stays unsupported there)
+            # or the owning process died and left a ghost row. Reclaim the
+            # ghost so the user's message becomes a fresh turn instead of
+            # black-holing against a dead turn.
+            if self._reclaim_orphaned_turn(session.id, active_turn_id):
+                logger.info(
+                    "Steer reclaimed orphaned Claude Code turn session_id=%s turn_id=%s",
+                    session.id,
+                    active_turn_id,
+                )
+                return await self.start_turn_by_label(
+                    LabelQueryInput(thread_id=session.id),
+                    {**turn_input, "prompt": prompt},
+                )
             raise RuntimeError("Active Claude Code turn cannot accept steering before its SDK client is ready.")
 
         # The steered query produces its own response on the shared stream;
@@ -824,6 +852,110 @@ class ClaudeAgentSdkClient:
             return
         with contextlib.suppress(Exception):
             await disconnect()
+
+    def _session_turn_lock_is_free(self, session_id: str) -> bool:
+        """True when no live process holds the session's turn lock.
+
+        A running turn holds the session flock for its whole duration and
+        flock releases on process death, so an acquirable lock while the
+        store claims a running turn proves the owning process is gone.
+        Without flock support, orphanhood cannot be proven; stay conservative.
+        """
+        if fcntl is None:
+            return False
+        lock_dir = self.store.path.parent / "session-locks"
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_dir / f"{session_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            return False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return True
+        finally:
+            os.close(fd)
+
+    def _turn_age_seconds(self, turn: Turn | None) -> float | None:
+        if turn is None or not turn.updated_at:
+            return None
+        try:
+            updated = datetime.fromisoformat(turn.updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (datetime.now(timezone.utc) - updated).total_seconds()
+
+    def _fail_orphaned_turn(self, session_id: str, turn_id: str | None) -> None:
+        if turn_id:
+            with contextlib.suppress(KeyError):
+                turn = self.store.get_turn(turn_id)
+                if turn.status not in {"completed", "failed", "cancelled"}:
+                    self.store.update_turn(
+                        turn_id,
+                        status="failed",
+                        finished_at=iso_now(),
+                        last_error="interrupted: owning process exited mid-turn",
+                    )
+        self.store.update_session(
+            session_id,
+            status="failed",
+            active_turn_id=None,
+            last_observed_state="turn orphaned by process exit",
+        )
+
+    def _reclaim_orphaned_turn(self, session_id: str, turn_id: str) -> bool:
+        """Terminalize a turn whose owning process died; True if reclaimed."""
+        turn = None
+        with contextlib.suppress(KeyError):
+            turn = self.store.get_turn(turn_id)
+        age = self._turn_age_seconds(turn)
+        if age is not None and age < _ORPHAN_RECLAIM_MIN_AGE_SECONDS:
+            return False
+        if not self._session_turn_lock_is_free(session_id):
+            return False
+        self._fail_orphaned_turn(session_id, turn_id)
+        return True
+
+    def reconcile_orphaned_turns(self) -> int:
+        """Startup sweep: fail running turns whose owning process is gone.
+
+        A service restart kills in-flight turn tasks without touching the
+        store, leaving sessions active/running forever; those ghost rows
+        then black-hole steers and mislead status consumers.
+        """
+        reconciled = 0
+        for session in self.store.list_sessions(include_inactive=True):
+            if not session.active_turn_id and session.status != "running":
+                continue
+            turn = None
+            if session.active_turn_id:
+                with contextlib.suppress(KeyError):
+                    turn = self.store.get_turn(session.active_turn_id)
+            age = self._turn_age_seconds(turn)
+            if age is not None and age < _ORPHAN_SWEEP_MIN_AGE_SECONDS:
+                continue
+            if not self._session_turn_lock_is_free(session.id):
+                continue
+            self._fail_orphaned_turn(session.id, session.active_turn_id)
+            reconciled += 1
+            logger.info(
+                "Reconciled orphaned Claude Code turn session_id=%s turn_id=%s",
+                session.id,
+                session.active_turn_id or "",
+            )
+        return reconciled
+
+    def _reconcile_orphaned_turns_once(self) -> None:
+        if self._orphan_sweep_done:
+            return
+        self._orphan_sweep_done = True
+        try:
+            self.reconcile_orphaned_turns()
+        except Exception:
+            logger.warning("Orphaned-turn reconciliation failed", exc_info=True)
 
     @contextlib.asynccontextmanager
     async def _cross_process_session_lock(self, session_id: str):

@@ -1091,3 +1091,83 @@ async def test_claude_sdk_resume_can_replace_developer_instructions(
     session = store.get_session(overlaid["threadId"])
     assert "New current rules." in (session.developer_instructions or "")
     assert "Additional overlay." in (session.developer_instructions or "")
+
+
+def _insert_ghost_turn(store: Store, thread_id: str, *, updated_at: str) -> str:
+    import sqlite3 as _sqlite3
+
+    turn_id = "t_ghost"
+    with _sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "insert into turns (id, session_id, prompt, status, created_at, updated_at) "
+            "values (?, ?, 'ghost prompt', 'running', ?, ?)",
+            (turn_id, thread_id, updated_at, updated_at),
+        )
+        conn.execute(
+            "update sessions set status='running', active_turn_id=? where id=?",
+            (turn_id, thread_id),
+        )
+    return turn_id
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_startup_sweep_fails_orphaned_running_turns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A service restart kills turn tasks without touching the store; the
+    sweep must terminalize those ghost rows so they stop looking active."""
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    turn_id = _insert_ghost_turn(store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z")
+
+    reconciled = client.reconcile_orphaned_turns()
+
+    assert reconciled == 1
+    turn = store.get_turn(turn_id)
+    assert turn.status == "failed"
+    assert "process exited" in (turn.last_error or "")
+    session = store.get_session(started["threadId"])
+    assert session.active_turn_id is None
+    assert session.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_startup_sweep_leaves_fresh_turns_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from super_agents.agent_store import iso_now as _iso_now
+
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    turn_id = _insert_ghost_turn(store, started["threadId"], updated_at=_iso_now())
+
+    reconciled = client.reconcile_orphaned_turns()
+
+    assert reconciled == 0
+    assert store.get_turn(turn_id).status == "running"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_steer_reclaims_orphaned_turn_into_fresh_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A message steered at a dead turn must become a fresh turn instead of
+    black-holing against a turn whose owning process is gone."""
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    ghost_turn_id = _insert_ghost_turn(
+        store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z"
+    )
+
+    steered = await client.steer_by_label(LabelQueryInput(label="sdk"), "hello again", {})
+
+    assert steered["turnId"] != ghost_turn_id
+    await wait_for(lambda: store.get_turn(steered["turnId"]).status == "completed")
+    assert "hello again" in (store.get_turn(steered["turnId"]).last_useful_message or "")
+    assert store.get_turn(ghost_turn_id).status == "failed"
