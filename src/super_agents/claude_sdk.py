@@ -581,12 +581,25 @@ class ClaudeAgentSdkClient:
                         else:
                             messages = stream
                         async for message in messages:
-                            append_log(session.log_path, _message_to_log(message))
+                            # These per-message writes (log append + sqlite
+                            # commits) must not run on the event loop: hosts
+                            # that share the loop with realtime audio (voice
+                            # workers) drop audio frames whenever a slow
+                            # fsync stalls it, truncating user speech.
+                            await asyncio.to_thread(append_log, session.log_path, _message_to_log(message))
                             if claude_session_id := _message_session_id(message):
-                                self.store.update_session(session_id, backend_session_id=claude_session_id)
+                                await asyncio.to_thread(
+                                    self.store.update_session,
+                                    session_id,
+                                    backend_session_id=claude_session_id,
+                                )
                             if useful := _message_preview(message):
                                 last_useful_message = useful
-                                self.store.update_turn(turn_id, last_useful_message=last_useful_message)
+                                await asyncio.to_thread(
+                                    self.store.update_turn,
+                                    turn_id,
+                                    last_useful_message=last_useful_message,
+                                )
                             if getattr(message, "num_turns", None) is not None:
                                 result_message = message
                     finally:
