@@ -23,7 +23,13 @@ except ImportError:  # pragma: no cover - platform dependent
 
 from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
-from super_agents.app_models import LabelQueryInput, QueueCancelInput
+from super_agents.app_models import (
+    DEFAULT_ACTIVE_AGENTS_LIMIT,
+    DEFAULT_COMPACT_STATUS_LIMIT,
+    DEFAULT_RECENT_AGENTS_LIMIT,
+    LabelQueryInput,
+    QueueCancelInput,
+)
 from super_agents.app_protocol import (
     _without_super_agent_identity_lines,
     is_active_status,
@@ -267,7 +273,11 @@ class ClaudeAgentSdkClient:
         self._reconcile_orphaned_turns_once()
         query = input_data or LabelQueryInput()
         items = [self._agent_item(session, query) for session in self._query_sessions(query, include_inactive=False)]
-        return {"backend": self.backend, "count": len(items), "agents": items[: query.limit or 50]}
+        return {
+            "backend": self.backend,
+            "count": len(items),
+            "agents": items[: query.limit or DEFAULT_ACTIVE_AGENTS_LIMIT],
+        }
 
     async def recent(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         query = input_data or LabelQueryInput()
@@ -275,14 +285,18 @@ class ClaudeAgentSdkClient:
             self._agent_item(session, query)
             for session in self._query_sessions(query, include_inactive=bool(query.include_inactive))
         ]
-        return {"backend": self.backend, "count": len(items), "agents": items[: query.limit or 20]}
+        return {
+            "backend": self.backend,
+            "count": len(items),
+            "agents": items[: query.limit or DEFAULT_RECENT_AGENTS_LIMIT],
+        }
 
     async def compact_status(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         query = input_data or LabelQueryInput()
         items = [
             self._status_item(session)
             for session in self._query_sessions(query, include_inactive=bool(query.include_inactive))
-        ][: query.limit or 50]
+        ][: query.limit or DEFAULT_COMPACT_STATUS_LIMIT]
         return {
             "backend": self.backend,
             "count": len(items),

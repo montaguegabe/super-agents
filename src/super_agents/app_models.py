@@ -10,6 +10,11 @@ from .state import JsonObject, SessionRecord, StoredStatus, TrackedStatus
 LabelResolutionPrefer = Literal["latest_active", "latest_any"]
 Mode = Literal["default", "plan"]
 
+# Default result-list caps shared by every SuperAgentsClient backend.
+DEFAULT_ACTIVE_AGENTS_LIMIT = 50
+DEFAULT_RECENT_AGENTS_LIMIT = 20
+DEFAULT_COMPACT_STATUS_LIMIT = 50
+
 
 @dataclass(slots=True)
 class PendingServerRequest:

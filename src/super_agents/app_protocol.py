@@ -86,7 +86,15 @@ def extract_model(value: JsonObject) -> str | None:
 
 
 def extract_thread_id(value: JsonObject) -> str | None:
-    return get_string(value, "threadId") or get_string(value, "id") or get_string(as_object(value.get("thread")), "id")
+    return (
+        get_string(value, "threadId")
+        or get_string(value, "thread_id")
+        or get_string(value, "id")
+        or get_string(as_object(value.get("thread")), "id")
+        or get_string(as_object(value.get("thread")), "threadId")
+        or get_string(as_object(value.get("session")), "id")
+        or get_string(as_object(value.get("session")), "threadId")
+    )
 
 
 def extract_thread_cwd(value: JsonObject) -> str | None:
@@ -109,15 +117,58 @@ def extract_threads(value: JsonObject) -> list[JsonObject]:
     return [thread for thread in raw_threads if isinstance(thread, dict)]
 
 
+QUEUE_ITEM_ID_PREFIX = "q_"
+
+
+def is_queue_item_id(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(QUEUE_ITEM_ID_PREFIX)
+
+
 def extract_turn_id(value: JsonObject) -> str | None:
     for candidate in (
         get_string(value, "turnId"),
+        get_string(value, "turn_id"),
         get_string(value, "id"),
         get_string(as_object(value.get("turn")), "id"),
+        get_string(as_object(value.get("turn")), "turnId"),
+        get_string(as_object(value.get("item")), "id"),
+        get_string(as_object(value.get("item")), "turnId"),
     ):
-        if candidate and not candidate.startswith("q_"):
+        if candidate and not is_queue_item_id(candidate):
             return candidate
     return None
+
+
+def response_is_queued(value: JsonObject) -> bool:
+    if value.get("queued") is True:
+        return True
+    if any(is_queue_item_id(value.get(key)) for key in ("turnId", "turn_id", "id")):
+        return True
+    item = value.get("item")
+    if not isinstance(item, dict):
+        return False
+    status = str(item.get("status") or "").lower()
+    item_id = item.get("id")
+    return status in {"queued", "starting"} and (not isinstance(item_id, str) or is_queue_item_id(item_id))
+
+
+def extract_queued_id(value: JsonObject) -> str | None:
+    for key in ("turnId", "turn_id", "id"):
+        candidate = value.get(key)
+        if is_queue_item_id(candidate):
+            return candidate
+    item = value.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_id = item.get("id")
+    return item_id if isinstance(item_id, str) and item_id else None
+
+
+def extract_started_turn_id(value: JsonObject) -> str | None:
+    """Turn id for a started (not merely queued) turn, else None."""
+    if response_is_queued(value):
+        return None
+    return extract_turn_id(value)
 
 
 def extract_notification_thread_id(value: JsonObject) -> str | None:

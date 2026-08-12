@@ -24,8 +24,13 @@ from .app_protocol import (
     normalize_thread_status,
     to_tracked_turn_status,
 )
+from .app_protocol import (
+    is_queue_item_id as _is_queue_item_id,
+)
 from .app_queue import (
     cancel_queued_turn as cancel_queued_turn_item,
+)
+from .app_queue import (
     complete_queued_turn,
     queued_turn_summaries,
     release_queued_turn,
@@ -53,11 +58,6 @@ from .state import (
 from .thread_favorites import favorite_status, is_favorite
 
 logger = logging.getLogger(__name__)
-
-
-def _is_queue_item_id(value: str | None) -> bool:
-    return bool(value and value.startswith("q_"))
-
 
 STALE_ACTIVE_TURN_WARNING = "stale_active_turn"
 

@@ -34,6 +34,9 @@ from .app_formatting import (
     without_none,
 )
 from .app_models import (
+    DEFAULT_ACTIVE_AGENTS_LIMIT,
+    DEFAULT_COMPACT_STATUS_LIMIT,
+    DEFAULT_RECENT_AGENTS_LIMIT,
     LabelQueryInput,
     LabelResolutionPrefer,
     Mode,
@@ -62,6 +65,8 @@ from .app_protocol import (
     extract_model,
     extract_notification_thread_id,
     extract_notification_turn_id,
+    extract_queued_id,
+    extract_started_turn_id,
     extract_thread_cwd,
     extract_thread_id,
     extract_thread_name,
@@ -71,8 +76,10 @@ from .app_protocol import (
     find_turn,
     is_active_status,
     is_likely_stale,
+    is_queue_item_id,
     normalize_thread_status,
     normalize_turn_status,
+    response_is_queued,
     super_agent_label,
     to_tracked_turn_status,
     with_super_agent_identity_instructions,
@@ -172,6 +179,8 @@ __all__ = [
     "extract_model",
     "extract_notification_thread_id",
     "extract_notification_turn_id",
+    "extract_queued_id",
+    "extract_started_turn_id",
     "extract_thread_cwd",
     "extract_thread_id",
     "extract_thread_name",
@@ -183,6 +192,8 @@ __all__ = [
     "is_active_status",
     "is_diff_like_key",
     "is_likely_stale",
+    "is_queue_item_id",
+    "response_is_queued",
     "is_permission_request",
     "iso_from_thread_time",
     "iso_now",
@@ -870,7 +881,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         query = input_data or LabelQueryInput()
         items = [item for item in await self.recent_items(query) if is_active_status(str(item.get("status")))][
-            : query.limit or 50
+            : query.limit or DEFAULT_ACTIVE_AGENTS_LIMIT
         ]
         items = [self.compact_agent_item(item, query) for item in items]
         return {"count": len(items), "agents": items}
@@ -881,7 +892,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             item
             for item in await self.recent_items(query)
             if query.include_inactive or is_active_status(str(item.get("status")))
-        ][: query.limit or 20]
+        ][: query.limit or DEFAULT_RECENT_AGENTS_LIMIT]
         items = [self.compact_agent_item(item, query) for item in items]
         return {"count": len(items), "agents": items}
 
@@ -891,7 +902,7 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
             self.status_item(item)
             for item in await self.recent_items(query)
             if query.include_inactive or is_active_status(str(item.get("status")))
-        ][: query.limit or 50]
+        ][: query.limit or DEFAULT_COMPACT_STATUS_LIMIT]
         return {"count": len(items), "agents": [apply_field_selection(item, query.fields) for item in items]}
 
     async def resolve_label(self, input_data: LabelQueryInput) -> JsonObject:
