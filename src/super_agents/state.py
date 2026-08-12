@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None
+
+logger = logging.getLogger(__name__)
 
 JsonObject = dict[str, Any]
 TrackedStatus = Literal["running", "completed", "failed", "waiting", "cancelled"]
@@ -179,7 +182,17 @@ class StateFile:
 def read_state_file(path: Path) -> StateFile:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return StateFile()
     except Exception:
+        # Never crash on a bad read, but a present-but-unreadable/corrupt
+        # state file would otherwise silently reset every tracked session
+        # and routine — surface that instead of swallowing it.
+        logger.warning(
+            "Super Agents state file %s is unreadable; starting from empty state",
+            path,
+            exc_info=True,
+        )
         return StateFile()
     sessions = as_session_record_map(raw.get("sessions") if isinstance(raw, dict) else None)
     routines = as_routine_record_map(raw.get("routines") if isinstance(raw, dict) else None)
@@ -340,7 +353,9 @@ def routine_record_from_json(
         enabled=value.get("enabled") if isinstance(value.get("enabled"), bool) else True,
         target_name=get_string(value, "targetName"),
         thread_id=get_string(value, "threadId"),
-        fresh_thread_per_run=bool(value.get("freshThreadPerRun")) if isinstance(value.get("freshThreadPerRun"), bool) else False,
+        fresh_thread_per_run=bool(value.get("freshThreadPerRun"))
+        if isinstance(value.get("freshThreadPerRun"), bool)
+        else False,
         cwd=get_string(value, "cwd"),
         approval_policy=get_string(value, "approvalPolicy"),
         sandbox_type=get_string(value, "sandboxType"),
