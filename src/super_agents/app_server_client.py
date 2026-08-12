@@ -124,6 +124,7 @@ from .item_tags import (
     tag_options,
     thread_tags,
 )
+from .rollout_history import needs_rollout_turn_fallback, rollout_fallback_turns
 from .state import (
     JsonObject,
     TrackedStatus,
@@ -494,6 +495,11 @@ class CodexAppServerClient(TransportClientMixin, RoutineClientMixin, SessionClie
         started = time.monotonic()
         await self.ensure_connected()
         result = await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns})
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if needs_rollout_turn_fallback(thread, include_turns):
+            turns = await asyncio.to_thread(rollout_fallback_turns, thread["path"])
+            if turns:
+                thread["turns"] = turns
         logger.info(
             "dispatch_timing stage=super_agents_thread_read_response thread_id=%s include_turns=%s elapsed_ms=%d",
             thread_id,
