@@ -26,8 +26,20 @@ from .defaults import (
     default_super_agents_reasoning_effort,
 )
 from .state import without_none
+from .tool_inputs import (
+    JsonObject,
+    optional_boolean,
+    optional_boolean_or_none,
+    optional_mode,
+    optional_number,
+    optional_prefer,
+    optional_string,
+    optional_string_array,
+    required_object,
+    required_request_id,
+    required_string,
+)
 
-JsonObject = dict[str, Any]
 Handler = Callable[[JsonObject], Awaitable[Any]]
 logger = logging.getLogger(__name__)
 
@@ -122,351 +134,453 @@ def create_server(client: SuperAgentsClient | None = None) -> Server:
 
 
 def build_tools(client: SuperAgentsClient) -> list[ToolDefinition]:
-    return [
-        ToolDefinition(
-            name="codex_app_server_status",
-            title="Super Agents Backend Status",
-            description=(
-                "Check Super Agents backend readiness, pending requests, queued turns, and active turns. "
-                "The backend may be Codex-compatible or Claude Code."
-            ),
-            input_schema=object_schema({}),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda _input: client.status(),
-        ),
-        ToolDefinition(
-            name="super_agents_start",
-            title="Start Super Agents Thread",
-            description="Create a named Super Agents thread on the configured backend.",
-            input_schema=object_schema(
-                {
-                    "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
-                    "cwd": {
-                        "type": "string",
-                        "description": "Project working directory. Defaults to the user's home directory.",
-                    },
-                    "developerInstructions": {"type": "string"},
-                    "agentName": {
-                        "type": "string",
-                        "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
-                    },
-                    **permission_option_properties(include_sandbox=True),
-                },
-                ["name"],
-            ),
-            handler=lambda input_data: client.start_thread(clean_thread_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_resume",
-            title="Resume Super Agents Thread",
-            description="Resume a named Super Agents thread.",
-            input_schema=name_query_schema(["name"]),
-            annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.resume_by_label(clean_name_query_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_read",
-            title="Read Super Agents Thread",
-            description=(
-                "Read a named or id-addressed Super Agents thread. Compact by default; "
-                "pass includeTurns=true to include full turns."
-            ),
-            input_schema=object_schema(
-                {**name_query_properties(), "includeTurns": {"type": "boolean", "default": False}},
-            ),
-            annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.read_by_label(
-                clean_name_query_input(input_data),
-                optional_boolean(input_data, "includeTurns", False),
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_rename",
-            title="Rename Super Agents Thread",
-            description="Rename a Super Agents thread using its current name.",
-            input_schema=object_schema(
-                {
-                    **name_query_properties(include_ids=False, include_output_options=False),
-                    "newName": {"type": "string"},
-                },
-                ["name", "newName"],
-            ),
-            handler=lambda input_data: client.rename_by_label(
-                clean_name_query_input(input_data),
-                required_string(input_data, "newName"),
-            ),
-        ),
-        ToolDefinition(
-            name="codex_answer_request",
-            title="Answer Super Agents Callback",
-            description=(
-                "Answer a pending Super Agents backend callback. For plan questions, pass result "
-                "{ answers: { question_id: { answers: [...] } } }. For approvals, pass result "
-                "{ decision: 'accept' | 'decline' | 'cancel' }. Some backends may not support callbacks."
-            ),
-            input_schema=object_schema(
-                {
-                    "requestId": {"anyOf": [{"type": "string"}, {"type": "number"}]},
-                    "result": {"type": "object", "additionalProperties": True},
-                },
-                ["requestId", "result"],
-            ),
-            handler=lambda input_data: client.answer_request(
-                required_request_id(input_data), required_object(input_data, "result")
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_sessions",
-            title="Super Agents Sessions",
-            description="List named Super Agents threads from the configured backend.",
-            input_schema=object_schema({}),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda _input: client.sessions(),
-        ),
-        ToolDefinition(
-            name="super_agents_thread_favorite",
-            title="Super Agents Thread Favorite",
-            description="Query whether one local Openbase Coder thread is favorited.",
-            input_schema=object_schema(
-                {
-                    "threadId": {
-                        "type": "string",
-                        "description": "Super Agents thread id to inspect.",
-                    },
-                },
-                ["threadId"],
-            ),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.thread_favorite(required_string(input_data, "threadId")),
-        ),
-        ToolDefinition(
-            name="super_agents_tags",
-            title="Super Agents Tags",
-            description="List local Openbase Coder tag options shared by threads and reports.",
-            input_schema=object_schema({}),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda _input: client.tags(),
-        ),
-        ToolDefinition(
-            name="super_agents_thread_tags",
-            title="Super Agents Thread Tags",
-            description=(
-                "Read or replace local Openbase Coder tags for one thread. Omit tags to read; "
-                "pass tags to apply shared tag options."
-            ),
-            input_schema=object_schema(
-                {
-                    "threadId": {
-                        "type": "string",
-                        "description": "Super Agents thread id to inspect or tag.",
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Complete tag label list to apply. Omit to read current tags.",
-                    },
-                },
-                ["threadId"],
-            ),
-            handler=lambda input_data: client.thread_tags(
-                required_string(input_data, "threadId"),
-                optional_string_array(input_data, "tags"),
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_report_tags",
-            title="Super Agents Report Tags",
-            description=(
-                "Read or replace local Openbase Coder tags for one report file. Omit tags to read; "
-                "pass tags to apply shared tag options."
-            ),
-            input_schema=object_schema(
-                {
-                    "projectPath": {
-                        "type": "string",
-                        "description": "Project directory containing the .reports folder.",
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Report path relative to the project's .reports folder.",
-                    },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Complete tag label list to apply. Omit to read current tags.",
-                    },
-                },
-                ["projectPath", "path"],
-            ),
-            handler=lambda input_data: client.report_tags(
-                required_string(input_data, "projectPath"),
-                required_string(input_data, "path"),
-                optional_string_array(input_data, "tags"),
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_active",
-            title="Active Super Agents",
-            description=(
-                "List active tracked Super Agents with names, cwd, status, age, and short previews. "
-                "Previews default to 160 chars; pass previewLength or includePreview=false to control them."
-            ),
-            input_schema=name_query_schema(),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.active(clean_name_query_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_status",
-            title="Super Agents Compact Status",
-            description=(
-                "Compact status list for voice/status checks. Returns active threads by default with name, thread id, "
-                "turn id, status, update times, pending request count, cwd, and stale indicators. No transcripts, diffs, or previews."
-            ),
-            input_schema=name_query_schema(),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.compact_status(clean_name_query_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_resolve",
-            title="Resolve Super Agents Name",
-            description="Resolve a thread name to the latest active matching Super Agents session by default.",
-            input_schema=name_query_schema(["name"]),
-            annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.resolve_label(clean_name_query_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_progress",
-            title="Super Agents Progress By Name",
-            description=(
-                "Check progress for a Super Agents turn by name or threadId/turnId. Compact by default: status, summary, "
-                "pending requests, and stale indicators only. Pass full=true for raw turn/tracked-turn output; includeTurn=true "
-                "or includeItems=true for bounded extra details."
-            ),
-            input_schema=name_query_schema(),
-            annotations={"readOnlyHint": True},
-            handler=lambda input_data: client.progress_by_label(clean_name_query_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_steer",
-            title="Steer Super Agents By Name",
-            description=(
-                "Send steering input to the latest active Super Agents turn matching a thread name. "
-                "If no active turn exists, starts a new turn on the same thread."
-            ),
-            input_schema=object_schema(
-                {**name_query_properties(include_output_options=False), "prompt": {"type": "string"}},
-                ["name", "prompt"],
-            ),
-            handler=lambda input_data: client.steer_by_label(
-                clean_name_query_input(input_data),
-                required_string(input_data, "prompt"),
-                {"_mcpCallId": optional_string(input_data, "_mcpCallId")},
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_cancel",
-            title="Cancel Super Agents By Name",
-            description="Cancel the latest active Super Agents turn matching a thread name.",
-            input_schema=name_query_schema(["name"]),
-            handler=lambda input_data: client.cancel_by_label(clean_name_query_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_start_turn",
-            title="Start Super Agents Turn By Name",
-            description=(
-                "Submit follow-up input to the latest matching named thread. If a turn is active, this steers "
-                "the active turn; otherwise it starts a new turn. Use super_agents_queue_turn for an explicit "
-                "separate follow-up after the active turn finishes."
-            ),
-            input_schema=object_schema(
-                {
-                    **name_query_properties(include_ids=False, include_output_options=False),
-                    "prompt": {"type": "string"},
-                    "cwd": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
-                    "model": {
-                        "type": "string",
-                        "description": "Defaults to the model for the selected backend's Super Agents role.",
-                    },
-                    "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    **permission_option_properties(include_sandbox_type=True),
-                },
-                ["name", "prompt"],
-            ),
-            handler=lambda input_data: client.start_turn_by_label(
-                clean_name_query_input(input_data),
-                clean_start_turn_by_name_input(input_data, backend=client_backend(client)),
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_queue_turn",
-            title="Queue Super Agents Turn",
-            description=(
-                "Queue a follow-up prompt in Super Agents' per-thread filesystem queue so it starts as a separate "
-                "turn after the target thread's active turn finishes. If no active turn exists, starts immediately. "
-                "Some backends do not expose native queued-next-turn semantics for normal user prompts."
-            ),
-            input_schema=object_schema(
-                {
-                    **name_query_properties(include_ids=True, include_output_options=False),
-                    "prompt": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
-                    "model": {
-                        "type": "string",
-                        "description": "Defaults to the model for the selected backend's Super Agents role.",
-                    },
-                    "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "agentName": {
-                        "type": "string",
-                        "description": "Optional agent name/persona to store for this thread.",
-                    },
-                    **permission_option_properties(include_sandbox_type=True),
-                },
-                ["prompt"],
-            ),
-            handler=lambda input_data: client.queue_turn_by_label(
-                clean_name_query_input(input_data),
-                clean_queue_turn_input(input_data, backend=client_backend(client)),
-            ),
-        ),
-        ToolDefinition(
-            name="super_agents_cancel_queued_turn",
-            title="Cancel Queued Super Agents Turn",
-            description=(
-                "Remove a queued Super Agents turn before it starts. Use queueItemId from super_agents_queue_turn "
-                "or queuedTurns/status output, or provide name/threadId with a 1-based queue position. Active or "
-                "already-started turns are not cancelled by this tool; use super_agents_cancel for active turns."
-            ),
-            input_schema=object_schema(
-                {
-                    "queueItemId": {
-                        "type": "string",
-                        "description": "Queued item id returned as item.id or queueItemId by queue/status output.",
-                    },
-                    "turnId": {
-                        "type": "string",
-                        "description": "Alias for queueItemId on backends that expose queued turns as turn ids.",
-                    },
-                    "name": {"type": "string"},
-                    "threadId": {"type": "string"},
-                    "cwd": {"type": "string"},
-                    "position": {
-                        "type": "number",
-                        "description": "1-based queue position within the target thread's queued turns.",
-                    },
-                },
-            ),
-            handler=lambda input_data: client.cancel_queued_turn(clean_cancel_queued_turn_input(input_data)),
-        ),
-        ToolDefinition(
-            name="super_agents_recent",
-            title="Recent Super Agents",
-            description="List recent named Super Agents threads from the configured backend.",
-            input_schema=name_query_schema(),
-            annotations={"readOnlyHint": True, "idempotentHint": True},
-            handler=lambda input_data: client.recent(clean_name_query_input(input_data)),
-        ),
+    """Assemble the full ordered list of Super Agents MCP tools.
+
+    Each tool is built by a dedicated ``_tool_*`` function so that its schema
+    lives next to its handler. Ordering here is the public tool ordering.
+    """
+    builders: list[Callable[[SuperAgentsClient], ToolDefinition]] = [
+        _tool_codex_app_server_status,
+        _tool_super_agents_start,
+        _tool_super_agents_resume,
+        _tool_super_agents_read,
+        _tool_super_agents_rename,
+        _tool_codex_answer_request,
+        _tool_super_agents_sessions,
+        _tool_super_agents_thread_favorite,
+        _tool_super_agents_tags,
+        _tool_super_agents_thread_tags,
+        _tool_super_agents_report_tags,
+        _tool_super_agents_active,
+        _tool_super_agents_status,
+        _tool_super_agents_resolve,
+        _tool_super_agents_progress,
+        _tool_super_agents_steer,
+        _tool_super_agents_cancel,
+        _tool_super_agents_start_turn,
+        _tool_super_agents_queue_turn,
+        _tool_super_agents_cancel_queued_turn,
+        _tool_super_agents_recent,
     ]
+    return [build(client) for build in builders]
+
+
+# --- Backend / thread lifecycle -------------------------------------------------
+
+
+def _tool_codex_app_server_status(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="codex_app_server_status",
+        title="Super Agents Backend Status",
+        description=(
+            "Check Super Agents backend readiness, pending requests, queued turns, and active turns. "
+            "The backend may be Codex-compatible or Claude Code."
+        ),
+        input_schema=object_schema({}),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda _input: client.status(),
+    )
+
+
+def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_start",
+        title="Start Super Agents Thread",
+        description="Create a named Super Agents thread on the configured backend.",
+        input_schema=object_schema(
+            {
+                "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
+                "cwd": {
+                    "type": "string",
+                    "description": "Project working directory. Defaults to the user's home directory.",
+                },
+                "developerInstructions": {"type": "string"},
+                "agentName": {
+                    "type": "string",
+                    "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
+                },
+                **permission_option_properties(include_sandbox=True),
+            },
+            ["name"],
+        ),
+        handler=lambda input_data: client.start_thread(clean_thread_input(input_data)),
+    )
+
+
+def _tool_super_agents_resume(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_resume",
+        title="Resume Super Agents Thread",
+        description="Resume a named Super Agents thread.",
+        input_schema=name_query_schema(["name"]),
+        annotations={"readOnlyHint": True},
+        handler=lambda input_data: client.resume_by_label(clean_name_query_input(input_data)),
+    )
+
+
+def _tool_super_agents_read(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_read",
+        title="Read Super Agents Thread",
+        description=(
+            "Read a named or id-addressed Super Agents thread. Compact by default; "
+            "pass includeTurns=true to include full turns."
+        ),
+        input_schema=object_schema(
+            {**name_query_properties(), "includeTurns": {"type": "boolean", "default": False}},
+        ),
+        annotations={"readOnlyHint": True},
+        handler=lambda input_data: client.read_by_label(
+            clean_name_query_input(input_data),
+            optional_boolean(input_data, "includeTurns", False),
+        ),
+    )
+
+
+def _tool_super_agents_rename(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_rename",
+        title="Rename Super Agents Thread",
+        description="Rename a Super Agents thread using its current name.",
+        input_schema=object_schema(
+            {
+                **name_query_properties(include_ids=False, include_output_options=False),
+                "newName": {"type": "string"},
+            },
+            ["name", "newName"],
+        ),
+        handler=lambda input_data: client.rename_by_label(
+            clean_name_query_input(input_data),
+            required_string(input_data, "newName"),
+        ),
+    )
+
+
+def _tool_codex_answer_request(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="codex_answer_request",
+        title="Answer Super Agents Callback",
+        description=(
+            "Answer a pending Super Agents backend callback. For plan questions, pass result "
+            "{ answers: { question_id: { answers: [...] } } }. For approvals, pass result "
+            "{ decision: 'accept' | 'decline' | 'cancel' }. Some backends may not support callbacks."
+        ),
+        input_schema=object_schema(
+            {
+                "requestId": {"anyOf": [{"type": "string"}, {"type": "number"}]},
+                "result": {"type": "object", "additionalProperties": True},
+            },
+            ["requestId", "result"],
+        ),
+        handler=lambda input_data: client.answer_request(
+            required_request_id(input_data), required_object(input_data, "result")
+        ),
+    )
+
+
+def _tool_super_agents_sessions(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_sessions",
+        title="Super Agents Sessions",
+        description="List named Super Agents threads from the configured backend.",
+        input_schema=object_schema({}),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda _input: client.sessions(),
+    )
+
+
+# --- Favorites & tags -----------------------------------------------------------
+
+
+def _tool_super_agents_thread_favorite(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_thread_favorite",
+        title="Super Agents Thread Favorite",
+        description="Query whether one local Openbase Coder thread is favorited.",
+        input_schema=object_schema(
+            {
+                "threadId": {
+                    "type": "string",
+                    "description": "Super Agents thread id to inspect.",
+                },
+            },
+            ["threadId"],
+        ),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda input_data: client.thread_favorite(required_string(input_data, "threadId")),
+    )
+
+
+def _tool_super_agents_tags(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_tags",
+        title="Super Agents Tags",
+        description="List local Openbase Coder tag options shared by threads and reports.",
+        input_schema=object_schema({}),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda _input: client.tags(),
+    )
+
+
+def _tool_super_agents_thread_tags(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_thread_tags",
+        title="Super Agents Thread Tags",
+        description=(
+            "Read or replace local Openbase Coder tags for one thread. Omit tags to read; "
+            "pass tags to apply shared tag options."
+        ),
+        input_schema=object_schema(
+            {
+                "threadId": {
+                    "type": "string",
+                    "description": "Super Agents thread id to inspect or tag.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Complete tag label list to apply. Omit to read current tags.",
+                },
+            },
+            ["threadId"],
+        ),
+        handler=lambda input_data: client.thread_tags(
+            required_string(input_data, "threadId"),
+            optional_string_array(input_data, "tags"),
+        ),
+    )
+
+
+def _tool_super_agents_report_tags(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_report_tags",
+        title="Super Agents Report Tags",
+        description=(
+            "Read or replace local Openbase Coder tags for one report file. Omit tags to read; "
+            "pass tags to apply shared tag options."
+        ),
+        input_schema=object_schema(
+            {
+                "projectPath": {
+                    "type": "string",
+                    "description": "Project directory containing the .reports folder.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Report path relative to the project's .reports folder.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Complete tag label list to apply. Omit to read current tags.",
+                },
+            },
+            ["projectPath", "path"],
+        ),
+        handler=lambda input_data: client.report_tags(
+            required_string(input_data, "projectPath"),
+            required_string(input_data, "path"),
+            optional_string_array(input_data, "tags"),
+        ),
+    )
+
+
+# --- Listing & status -----------------------------------------------------------
+
+
+def _tool_super_agents_active(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_active",
+        title="Active Super Agents",
+        description=(
+            "List active tracked Super Agents with names, cwd, status, age, and short previews. "
+            "Previews default to 160 chars; pass previewLength or includePreview=false to control them."
+        ),
+        input_schema=name_query_schema(),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda input_data: client.active(clean_name_query_input(input_data)),
+    )
+
+
+def _tool_super_agents_status(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_status",
+        title="Super Agents Compact Status",
+        description=(
+            "Compact status list for voice/status checks. Returns active threads by default with name, thread id, "
+            "turn id, status, update times, pending request count, cwd, and stale indicators. No transcripts, diffs, or previews."
+        ),
+        input_schema=name_query_schema(),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda input_data: client.compact_status(clean_name_query_input(input_data)),
+    )
+
+
+def _tool_super_agents_resolve(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_resolve",
+        title="Resolve Super Agents Name",
+        description="Resolve a thread name to the latest active matching Super Agents session by default.",
+        input_schema=name_query_schema(["name"]),
+        annotations={"readOnlyHint": True},
+        handler=lambda input_data: client.resolve_label(clean_name_query_input(input_data)),
+    )
+
+
+def _tool_super_agents_progress(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_progress",
+        title="Super Agents Progress By Name",
+        description=(
+            "Check progress for a Super Agents turn by name or threadId/turnId. Compact by default: status, summary, "
+            "pending requests, and stale indicators only. Pass full=true for raw turn/tracked-turn output; includeTurn=true "
+            "or includeItems=true for bounded extra details."
+        ),
+        input_schema=name_query_schema(),
+        annotations={"readOnlyHint": True},
+        handler=lambda input_data: client.progress_by_label(clean_name_query_input(input_data)),
+    )
+
+
+# --- Turn control ---------------------------------------------------------------
+
+
+def _tool_super_agents_steer(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_steer",
+        title="Steer Super Agents By Name",
+        description=(
+            "Send steering input to the latest active Super Agents turn matching a thread name. "
+            "If no active turn exists, starts a new turn on the same thread."
+        ),
+        input_schema=object_schema(
+            {**name_query_properties(include_output_options=False), "prompt": {"type": "string"}},
+            ["name", "prompt"],
+        ),
+        handler=lambda input_data: client.steer_by_label(
+            clean_name_query_input(input_data),
+            required_string(input_data, "prompt"),
+            {"_mcpCallId": optional_string(input_data, "_mcpCallId")},
+        ),
+    )
+
+
+def _tool_super_agents_cancel(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_cancel",
+        title="Cancel Super Agents By Name",
+        description="Cancel the latest active Super Agents turn matching a thread name.",
+        input_schema=name_query_schema(["name"]),
+        handler=lambda input_data: client.cancel_by_label(clean_name_query_input(input_data)),
+    )
+
+
+def _tool_super_agents_start_turn(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_start_turn",
+        title="Start Super Agents Turn By Name",
+        description=(
+            "Submit follow-up input to the latest matching named thread. If a turn is active, this steers "
+            "the active turn; otherwise it starts a new turn. Use super_agents_queue_turn for an explicit "
+            "separate follow-up after the active turn finishes."
+        ),
+        input_schema=object_schema(
+            {
+                **name_query_properties(include_ids=False, include_output_options=False),
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string"},
+                "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
+                "model": {
+                    "type": "string",
+                    "description": "Defaults to the model for the selected backend's Super Agents role.",
+                },
+                "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                **permission_option_properties(include_sandbox_type=True),
+            },
+            ["name", "prompt"],
+        ),
+        handler=lambda input_data: client.start_turn_by_label(
+            clean_name_query_input(input_data),
+            clean_start_turn_by_name_input(input_data, backend=client_backend(client)),
+        ),
+    )
+
+
+def _tool_super_agents_queue_turn(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_queue_turn",
+        title="Queue Super Agents Turn",
+        description=(
+            "Queue a follow-up prompt in Super Agents' per-thread filesystem queue so it starts as a separate "
+            "turn after the target thread's active turn finishes. If no active turn exists, starts immediately. "
+            "Some backends do not expose native queued-next-turn semantics for normal user prompts."
+        ),
+        input_schema=object_schema(
+            {
+                **name_query_properties(include_ids=True, include_output_options=False),
+                "prompt": {"type": "string"},
+                "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
+                "model": {
+                    "type": "string",
+                    "description": "Defaults to the model for the selected backend's Super Agents role.",
+                },
+                "developerInstructions": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "agentName": {
+                    "type": "string",
+                    "description": "Optional agent name/persona to store for this thread.",
+                },
+                **permission_option_properties(include_sandbox_type=True),
+            },
+            ["prompt"],
+        ),
+        handler=lambda input_data: client.queue_turn_by_label(
+            clean_name_query_input(input_data),
+            clean_queue_turn_input(input_data, backend=client_backend(client)),
+        ),
+    )
+
+
+def _tool_super_agents_cancel_queued_turn(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_cancel_queued_turn",
+        title="Cancel Queued Super Agents Turn",
+        description=(
+            "Remove a queued Super Agents turn before it starts. Use queueItemId from super_agents_queue_turn "
+            "or queuedTurns/status output, or provide name/threadId with a 1-based queue position. Active or "
+            "already-started turns are not cancelled by this tool; use super_agents_cancel for active turns."
+        ),
+        input_schema=object_schema(
+            {
+                "queueItemId": {
+                    "type": "string",
+                    "description": "Queued item id returned as item.id or queueItemId by queue/status output.",
+                },
+                "turnId": {
+                    "type": "string",
+                    "description": "Alias for queueItemId on backends that expose queued turns as turn ids.",
+                },
+                "name": {"type": "string"},
+                "threadId": {"type": "string"},
+                "cwd": {"type": "string"},
+                "position": {
+                    "type": "number",
+                    "description": "1-based queue position within the target thread's queued turns.",
+                },
+            },
+        ),
+        handler=lambda input_data: client.cancel_queued_turn(clean_cancel_queued_turn_input(input_data)),
+    )
+
+
+def _tool_super_agents_recent(client: SuperAgentsClient) -> ToolDefinition:
+    return ToolDefinition(
+        name="super_agents_recent",
+        title="Recent Super Agents",
+        description="List recent named Super Agents threads from the configured backend.",
+        input_schema=name_query_schema(),
+        annotations={"readOnlyHint": True, "idempotentHint": True},
+        handler=lambda input_data: client.recent(clean_name_query_input(input_data)),
+    )
 
 
 def object_schema(properties: JsonObject, required: list[str] | None = None) -> JsonObject:
@@ -726,66 +840,6 @@ def clean_cancel_queued_turn_input(input_data: JsonObject) -> QueueCancelInput:
     )
 
 
-def required_string(value: JsonObject, key: str) -> str:
-    result = value.get(key)
-    if not isinstance(result, str) or not result:
-        raise ValueError(f"{key} must be a non-empty string.")
-    return result
-
-
-def required_object(value: JsonObject, key: str) -> JsonObject:
-    result = value.get(key)
-    if not isinstance(result, dict):
-        raise ValueError(f"{key} must be an object.")
-    return result
-
-
-def required_request_id(value: JsonObject) -> str | int:
-    result = value.get("requestId")
-    if isinstance(result, str | int) and not isinstance(result, bool):
-        return result
-    raise ValueError("requestId must be a string or number.")
-
-
-def optional_string(value: JsonObject, key: str) -> str | None:
-    result = value.get(key)
-    return result if isinstance(result, str) and result else None
-
-
-def optional_boolean_or_none(value: JsonObject, key: str) -> bool | None:
-    result = value.get(key)
-    return result if isinstance(result, bool) else None
-
-
-def optional_boolean(value: JsonObject, key: str, default: bool) -> bool:
-    result = value.get(key)
-    return result if isinstance(result, bool) else default
-
-
-def optional_number(value: JsonObject, key: str) -> int | None:
-    result = value.get(key)
-    if isinstance(result, int | float) and not isinstance(result, bool) and result > 0:
-        return int(result)
-    return None
-
-
-def optional_mode(value: JsonObject, key: str) -> str | None:
-    result = optional_string(value, key)
-    return result if result in {"default", "plan"} else None
-
-
-def optional_prefer(value: JsonObject, key: str) -> str | None:
-    result = optional_string(value, key)
-    return result if result in {"latest_active", "latest_any"} else None
-
-
-def optional_string_array(value: JsonObject, key: str) -> list[str] | None:
-    result = value.get(key)
-    if not isinstance(result, list):
-        return None
-    return [item for item in result if isinstance(item, str) and item]
-
-
 def _cwd_basename(value: Any) -> str:
     if not isinstance(value, str) or not value:
         return ""
@@ -811,7 +865,10 @@ def configure_control_plane_diagnostic_logging() -> Path | None:
     control_logger = logging.getLogger(CONTROL_PLANE_LOGGER_NAME)
     resolved = str(path)
     for handler in control_logger.handlers:
-        if getattr(handler, "_super_agents_control_plane_log", False) and getattr(handler, "baseFilename", "") == resolved:
+        if (
+            getattr(handler, "_super_agents_control_plane_log", False)
+            and getattr(handler, "baseFilename", "") == resolved
+        ):
             return path
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(path, encoding="utf-8")
