@@ -21,7 +21,6 @@ Issues = "https://github.com/montaguegabe/super-agents/issues"
 [project.scripts]
 super-agents-mcp = "super_agents.mcp_server:main"
 super-agents-backend = "super_agents.backend:main"
-super-agents-open-pr-review-discover = "super_agents.open_pr_reviews:main"
 
 [project.optional-dependencies]
 # Needed when OPENBASE_CODING_BACKEND=claude_code is selected.

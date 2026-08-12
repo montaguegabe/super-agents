@@ -2833,8 +2833,8 @@ async def test_interval_routine_does_not_overlap_active_run(tmp_path: Path) -> N
     try:
         await client.save_routine(
             {
-                "name": "open-pr-review-routine",
-                "prompt": "Review open PRs.",
+                "name": "interval-check-routine",
+                "prompt": "Poll for due work.",
                 "scheduleType": "interval",
                 "intervalSeconds": 60,
                 "threadId": "thread-routine",
@@ -2847,7 +2847,7 @@ async def test_interval_routine_does_not_overlap_active_run(tmp_path: Path) -> N
         assert skipped["count"] == 0
         assert not any(message.get("method") == "turn/start" for message in captured)
 
-        await client.save_routine({"name": "open-pr-review-routine", "lastStatus": "completed"})
+        await client.save_routine({"name": "interval-check-routine", "lastStatus": "completed"})
         started = await client.run_due_routines()
         assert started["count"] == 1
     finally:
