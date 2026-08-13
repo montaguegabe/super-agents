@@ -66,6 +66,7 @@ from super_agents.claude_prompts import (
 from super_agents.claude_prompts import (
     with_claude_turn_context as _with_claude_turn_context,
 )
+from super_agents.claude_transcript import transcript_turn_views
 from super_agents.claude_views import SessionViewMixin
 from super_agents.defaults import (
     default_super_agents_model,
@@ -237,10 +238,19 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             "session": session.to_json(),
             "logTail": self.store.tail_log(session, lines=80),
         }
+        turn_views = [self._turn_view(session, turn) for turn in turns]
+        if not turn_views:
+            # Imported sessions (e.g. thread sync) have history only in the
+            # backend transcript JSONL, never in the turns table.
+            turn_views = transcript_turn_views(session, limit=input_data.max_items or 20)
+            for view in turn_views:
+                if view.get("model"):
+                    payload["session"].setdefault("model", view["model"])
+                    break
         if include_turns:
-            payload["turns"] = [self._turn_view(session, turn) for turn in turns]
+            payload["turns"] = turn_views
         else:
-            payload["recentTurns"] = [self._turn_view(session, turn) for turn in turns[:5]]
+            payload["recentTurns"] = turn_views[:5]
         return payload
 
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject:

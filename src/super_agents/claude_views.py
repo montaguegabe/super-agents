@@ -13,7 +13,18 @@ JsonObject = dict[str, Any]
 
 class SessionViewMixin:
     def _session_view(self, session: Session) -> JsonObject:
-        return {"backend": self.backend, **session.to_json()}
+        view = {"backend": self.backend, **session.to_json()}
+        # Session rows do not record reasoning effort (or, for imported
+        # sessions, a model); surface the latest turn's values so list
+        # consumers can show them without fetching turns.
+        turns = self.store.list_turns(session.id, limit=1)
+        if turns:
+            latest = turns[0]
+            if latest.reasoning_effort:
+                view.setdefault("reasoningEffort", latest.reasoning_effort)
+            if latest.model:
+                view.setdefault("model", latest.model)
+        return view
 
     def _agent_item(self, session: Session, query: LabelQueryInput) -> JsonObject:
         turns = self.store.list_turns(session.id, limit=1)
