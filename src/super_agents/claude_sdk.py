@@ -56,6 +56,9 @@ from super_agents.claude_options import (
 from super_agents.claude_options import (
     claude_effort as _claude_effort,
 )
+from super_agents.claude_options import (
+    openbase_cloud_claude_model as _openbase_cloud_claude_model,
+)
 from super_agents.claude_orphans import OrphanReconciliationMixin
 from super_agents.claude_prompts import (
     combine_developer_instructions as _combine_developer_instructions,
@@ -820,8 +823,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             await self._disconnect_sdk_client(session.id)
             existing = None
         if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
-            if model and hasattr(existing, "set_model"):
-                await existing.set_model(model)
+            resolved_model = _openbase_cloud_claude_model(model)
+            if resolved_model and hasattr(existing, "set_model"):
+                await existing.set_model(resolved_model)
             self._record_session_leaf_owner(session.id)
             return existing
         await self._disconnect_sdk_client(session.id)

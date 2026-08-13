@@ -39,6 +39,10 @@ OPENBASE_CLOUD_CLAUDE_MODEL_MAP = {
     "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5",
 }
+# With no model configured, the Claude Code CLI falls back to its own family
+# default (Opus/Fable), which the Cloud proxy rejects for trial accounts —
+# pin the proxy's trial-safe default instead of leaving the choice to the SDK.
+OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL = "claude-sonnet-5"
 OPENBASE_CLOUD_DEFAULT_BASE_URL = "https://app.openbase.cloud"
 OPENBASE_CLOUD_ANTHROPIC_PATH = "/api/openbase/llm/anthropic"
 OPENBASE_CLOUD_ANTHROPIC_BASE_URL_ENV = "OPENBASE_CLOUD_ANTHROPIC_BASE_URL"
@@ -65,8 +69,8 @@ def agent_options(
             **openbase_cloud_claude_env(),
         },
     }
-    if model:
-        kwargs["model"] = openbase_cloud_claude_model(model)
+    if resolved_model := openbase_cloud_claude_model(model):
+        kwargs["model"] = resolved_model
     if reasoning_effort:
         kwargs["effort"] = reasoning_effort
     if resume:
@@ -76,9 +80,11 @@ def agent_options(
     return sdk.ClaudeAgentOptions(**kwargs)
 
 
-def openbase_cloud_claude_model(model: str) -> str:
+def openbase_cloud_claude_model(model: str | None) -> str | None:
     if configured_backend_from_environment() != OPENBASE_CLOUD_BACKEND:
         return model
+    if not model:
+        return OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL
     return OPENBASE_CLOUD_CLAUDE_MODEL_MAP.get(model.strip().lower(), model)
 
 
