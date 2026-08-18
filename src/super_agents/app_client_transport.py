@@ -434,6 +434,7 @@ class TransportClientMixin:
         elif turn.status not in {"waiting", "completed", "failed", "cancelled"}:
             turn.status = "running"
         if turn.status in {"completed", "failed", "cancelled"}:
+            self.signal_turn_update(turn)
             logger.info(
                 "Super Agents terminal notification received method=%s thread_id=%s turn_id=%s "
                 "status=%s received_at=%s",
@@ -469,6 +470,7 @@ class TransportClientMixin:
             clear_fields=clear_fields,
         )
         if turn.status in {"completed", "failed", "cancelled"}:
+
             def on_terminal_merge_done(
                 task: asyncio.Task[None],
                 completed_thread_id: str = thread_id,
@@ -531,6 +533,34 @@ class TransportClientMixin:
         if key not in self._turns:
             self._turns[key] = TurnState(thread_id=thread_id, turn_id=turn_id, status="running", started_at=iso_now())
         return self._turns[key]
+
+    def signal_turn_update(self, turn: TurnState) -> None:
+        """Wake any caller awaiting progress on this turn (see wait_for_turn_update)."""
+        if not turn.update_event.is_set():
+            turn.update_event.set()
+
+    async def wait_for_turn_update(self, thread_id: str, turn_id: str, timeout: float) -> None:
+        """Await the next update to a turn instead of polling on a fixed interval.
+
+        Returns as soon as a terminal notification (or other progress signal)
+        fires for the turn, or after ``timeout`` seconds as a safety net for the
+        rare case a push is missed on an otherwise-healthy connection. Callers
+        re-read progress after this returns; the event is a wakeup, not the
+        answer. A dropped websocket surfaces through the caller's own progress
+        read (which raises), not here.
+        """
+        turn = self.ensure_turn(thread_id, turn_id)
+        event = turn.update_event
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+        finally:
+            # Keep the event latched once terminal so a caller that re-reads
+            # progress and still sees a stale non-terminal snapshot wakes again
+            # immediately instead of waiting out the fallback timeout.
+            if turn.status not in {"completed", "failed", "cancelled"}:
+                event.clear()
 
     def remove_pending_request_from_turn(self, request_id: str | int) -> None:
         for turn in self._turns.values():

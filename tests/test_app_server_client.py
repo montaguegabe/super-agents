@@ -3089,3 +3089,58 @@ async def test_recent_ranks_across_creation_ordered_pages(tmp_path: Path) -> Non
     finally:
         await client.close()
         await server.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_turn_update_wakes_on_signal(tmp_path: Path) -> None:
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+    turn = client.ensure_turn("thread-sig", "turn-sig")
+
+    async def signal_soon() -> None:
+        await asyncio.sleep(0.01)
+        turn.status = "completed"
+        client.signal_turn_update(turn)
+
+    task = asyncio.create_task(signal_soon())
+    # Returns as soon as the signal fires, well before the fallback timeout.
+    await asyncio.wait_for(
+        client.wait_for_turn_update("thread-sig", "turn-sig", timeout=5.0),
+        timeout=1.0,
+    )
+    await task
+    # Terminal turns keep the event latched, so a re-wait returns immediately
+    # even though nothing signals again.
+    await asyncio.wait_for(
+        client.wait_for_turn_update("thread-sig", "turn-sig", timeout=5.0),
+        timeout=0.1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_turn_update_falls_back_and_clears_for_running_turn(tmp_path: Path) -> None:
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+    turn = client.ensure_turn("thread-run", "turn-run")
+    # No signal: returns after the (short) fallback timeout without raising.
+    await client.wait_for_turn_update("thread-run", "turn-run", timeout=0.05)
+    # A still-running turn leaves the event cleared so the next wait blocks again.
+    assert not turn.update_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_terminal_notification_signals_turn_update(tmp_path: Path) -> None:
+    client = CodexAppServerClient(state_file=tmp_path / "state.json")
+    try:
+        turn = client.ensure_turn("thread-note", "turn-note")
+        assert not turn.update_event.is_set()
+        client.handle_notification(
+            "turn/completed",
+            {"threadId": "thread-note", "turnId": "turn-note"},
+        )
+        assert turn.status == "completed"
+        # A waiter parked before the notification would now be released.
+        await asyncio.wait_for(
+            client.wait_for_turn_update("thread-note", "turn-note", timeout=5.0),
+            timeout=0.1,
+        )
+    finally:
+        await client.close()

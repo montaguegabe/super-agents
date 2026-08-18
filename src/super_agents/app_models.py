@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
@@ -45,6 +46,10 @@ class TurnState:
     events: list[JsonObject] = field(default_factory=list)
     pending_requests: list[PendingServerRequest] = field(default_factory=list)
     finished_at: str | None = None
+    # Set whenever a notification advances this turn toward a state a waiter
+    # cares about (terminal, or an approval request arriving/clearing). Lets
+    # callers await turn progress instead of polling. Not serialized.
+    update_event: asyncio.Event = field(default_factory=asyncio.Event, compare=False, repr=False)
 
     def to_json(self) -> JsonObject:
         return without_none(
