@@ -172,6 +172,40 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_local_and_cloud_claude_clients_keep_distinct_sdk_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN", "cloud-machine-token")
+    path = tmp_path / "shared-state.sqlite3"
+    local = ClaudeAgentSdkClient(
+        store=Store(path),
+        sdk_loader=fake_sdk_loader,
+        backend_identity="claude_code",
+        approval_requests_file=tmp_path / "local-approvals.json",
+    )
+    cloud = ClaudeAgentSdkClient(
+        store=Store(path),
+        sdk_loader=fake_sdk_loader,
+        backend_identity="openbase_cloud",
+        approval_requests_file=tmp_path / "cloud-approvals.json",
+    )
+    await local.start_thread({"name": "local", "cwd": str(tmp_path), "model": "sonnet"})
+    local_turn = await local.start_turn_by_label(LabelQueryInput(label="local"), {"prompt": "local"})
+    await wait_for(lambda: local.store.get_turn(local_turn["turnId"]).status == "completed")
+    await cloud.start_thread({"name": "cloud", "cwd": str(tmp_path), "model": "sonnet"})
+    cloud_turn = await cloud.start_turn_by_label(LabelQueryInput(label="cloud"), {"prompt": "cloud"})
+    await wait_for(lambda: cloud.store.get_turn(cloud_turn["turnId"]).status == "completed")
+
+    local_options, cloud_options = [item.kwargs for item in FakeClaudeSDKClient.options_seen]
+    assert local_options["model"] == "sonnet"
+    assert local_options["env"] == {"ANTHROPIC_API_KEY": ""}
+    assert cloud_options["model"] == "claude-sonnet-5"
+    assert cloud_options["env"]["ANTHROPIC_AUTH_TOKEN"] == "cloud-machine-token"
+    assert cloud_options["env"]["ANTHROPIC_BASE_URL"].endswith("/api/openbase/llm/anthropic")
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -634,9 +668,7 @@ async def test_claude_sdk_progress_scopes_to_requested_turn(tmp_path: Path) -> N
         last_useful_message="The session preview answer.",
     )
 
-    progress = await client.progress_by_label(
-        LabelQueryInput(label="sdk", turn_id=target.id, max_items=5)
-    )
+    progress = await client.progress_by_label(LabelQueryInput(label="sdk", turn_id=target.id, max_items=5))
 
     assert progress["turnId"] == target.id
     assert progress["status"] == "completed"
@@ -983,9 +1015,7 @@ async def test_claude_sdk_steered_response_does_not_shift_next_turn(
     await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
 
     first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
-    await wait_for(
-        lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["hello"]
-    )
+    await wait_for(lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["hello"])
     steered = await client.steer_by_label(LabelQueryInput(label="sdk"), "how are you", {})
     assert steered["turnId"] == first["turnId"]
 
@@ -1041,9 +1071,7 @@ async def test_claude_sdk_coalesced_steers_do_not_hang_the_turn(
     await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
 
     first = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "hello"})
-    await wait_for(
-        lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["hello"]
-    )
+    await wait_for(lambda: [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["hello"])
     steered = await client.steer_by_label(LabelQueryInput(label="sdk"), "and also this", {})
     assert steered["turnId"] == first["turnId"]
 
@@ -1161,9 +1189,7 @@ async def test_claude_sdk_steer_reclaims_orphaned_turn_into_fresh_turn(
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
     started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
-    ghost_turn_id = _insert_ghost_turn(
-        store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z"
-    )
+    ghost_turn_id = _insert_ghost_turn(store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z")
 
     steered = await client.steer_by_label(LabelQueryInput(label="sdk"), "hello again", {})
 

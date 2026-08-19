@@ -11,11 +11,14 @@ from super_agents.backend_clients import (
     OPENBASE_CLOUD_BACKEND,
     OPENBASE_CLOUD_CODEX_BACKEND,
     backend_from_environment,
+    client_for_backend,
     client_from_environment,
     configured_backend_from_environment,
+    default_backend_from_environment,
     normalize_backend,
 )
 from super_agents.claude_sdk import ClaudeAgentSdkClient
+from super_agents.app_server_client import CodexAppServerClient
 
 
 def test_backend_normalization_supports_three_canonical_modes() -> None:
@@ -53,3 +56,28 @@ def test_internal_openbase_cloud_codex_still_uses_codex(monkeypatch: pytest.Monk
 
     assert configured_backend_from_environment() == "openbase_cloud_codex"
     assert backend_from_environment() == "codex"
+
+
+def test_default_backend_override_preserves_configured_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "codex")
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_BACKEND", "openbase_cloud")
+
+    assert default_backend_from_environment() == "openbase_cloud"
+
+
+def test_explicit_client_factories_preserve_cloud_identities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_CODE_HOME", str(tmp_path / "claude"))
+
+    cloud = client_for_backend("openbase_cloud")
+    cloud_codex = client_for_backend("openbase_cloud_codex")
+
+    assert isinstance(cloud, ClaudeAgentSdkClient)
+    assert cloud.backend == "openbase_cloud"
+    assert cloud._permission_gate.backend == "openbase_cloud"
+    assert isinstance(cloud_codex, CodexAppServerClient)
+    assert cloud_codex.backend == "openbase_cloud_codex"

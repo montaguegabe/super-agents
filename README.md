@@ -90,11 +90,27 @@ Openbase Coder users usually do not need to run this by hand; the
 
 ## Backends
 
-Super Agents supports three backend modes:
+Super Agents supports four configured backend identities:
 
 - `codex`: native Codex app-server over websocket.
 - `openbase_cloud`: Claude Code sessions through the Openbase Cloud Anthropic proxy.
 - `claude_code`: Claude Code sessions using local Claude auth/billing.
+- `openbase_cloud_codex`: Codex-compatible sessions routed through an
+  Openbase Cloud integration.
+
+The MCP server can mix these identities per thread. Pass `backend` to
+`super_agents_start` to override the launch default. If it is omitted,
+`SUPER_AGENTS_DEFAULT_BACKEND` wins when set, then `OPENBASE_CODING_BACKEND`.
+Explicit and default identities are persisted against returned thread, turn,
+and approval-request ids, so follow-up operations keep using the owning
+backend after a server restart. If the same name exists on multiple backends,
+name-only operations fail with an ambiguity error; pass `backend` or the
+returned `threadId`.
+
+`codex` and `openbase_cloud_codex` can coexist only when their identity-specific
+websocket variables point to distinct app-server processes. The server rejects
+a second Codex identity on the same endpoint instead of pretending it is an
+independent backend.
 
 Switch modes without MCP:
 
@@ -210,9 +226,13 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `SUPER_AGENTS_WS_URL` | `ws://127.0.0.1:4500` | Codex app-server websocket URL |
-| `OPENBASE_CODING_BACKEND` | unset | Backend mode: `codex`, `openbase_cloud`, or `claude_code` |
+| `SUPER_AGENTS_CODEX_WS_URL` | unset | Identity-specific Codex endpoint; required to differ when local and Cloud Codex identities coexist |
+| `SUPER_AGENTS_OPENBASE_CLOUD_CODEX_WS_URL` | unset | Identity-specific Cloud Codex endpoint; required to differ when local and Cloud Codex identities coexist |
+| `OPENBASE_CODING_BACKEND` | unset | Machine backend identity: `codex`, `openbase_cloud`, `claude_code`, or `openbase_cloud_codex` |
+| `SUPER_AGENTS_DEFAULT_BACKEND` | unset | Per-process default for newly launched threads; falls back to `OPENBASE_CODING_BACKEND` |
 | `OPENBASE_CODEX_BACKEND` | unset | Legacy fallback for `OPENBASE_CODING_BACKEND` |
 | `SUPER_AGENTS_STATE_FILE` | `~/.super-agents/state.json` | Local session metadata file |
+| `SUPER_AGENTS_BACKEND_PROVENANCE_FILE` | `~/.super-agents/backend-provenance.json` | Configured-backend ownership for thread, turn, and approval ids |
 | `SUPER_AGENTS_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Claude SDK permission mode. Gated modes route tool requests through the native approval store. |
 
 Openbase-specific defaults:
@@ -239,12 +259,12 @@ The MCP server exposes these tools:
 
 - `codex_app_server_status`: check app-server readiness, websocket connection,
   pending callbacks, and active turns.
-- `super_agents_start`: create a named Codex app-server thread.
+- `super_agents_start`: create a named thread, optionally on an explicit backend.
 - `super_agents_resume`: resume a named thread.
 - `super_agents_read`: read a named or id-addressed thread.
-- `super_agents_rename`: rename a Codex app-server thread.
-- `codex_answer_request`: answer a pending app-server callback.
-- `super_agents_sessions`: list named Codex app-server threads.
+- `super_agents_rename`: rename a Super Agents thread.
+- `codex_answer_request`: answer a pending callback on its owning backend.
+- `super_agents_sessions`: list named threads across engaged backends.
 - `super_agents_thread_favorite`: check whether one local Openbase Coder thread
   is favorited.
 - `super_agents_tags`: list local Openbase Coder tag options shared by threads

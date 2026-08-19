@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .backend_config import OPENBASE_CLOUD_BACKEND, configured_backend_from_environment
+from .backend_config import OPENBASE_CLOUD_BACKEND, configured_backend_from_environment, normalize_backend
 
 JsonObject = dict[str, Any]
 
@@ -64,6 +64,7 @@ def agent_options(
     *,
     resume: str | None,
     can_use_tool: Any | None = None,
+    backend: str | None = None,
 ) -> Any:
     managed_options = managed_claude_config_options()
     permission_mode = resolve_permission_mode()
@@ -74,14 +75,14 @@ def agent_options(
         "env": {
             **managed_options.get("env", {}),
             **CLAUDE_SDK_ENV_OVERRIDES,
-            **openbase_cloud_claude_env(),
+            **openbase_cloud_claude_env(backend),
         },
     }
     if permission_mode != "bypassPermissions":
         if can_use_tool is None:
             raise RuntimeError("Claude permission gating was requested but no approval handler is available.")
         kwargs["can_use_tool"] = can_use_tool
-    if resolved_model := openbase_cloud_claude_model(model):
+    if resolved_model := openbase_cloud_claude_model(model, backend):
         kwargs["model"] = resolved_model
     if reasoning_effort:
         kwargs["effort"] = reasoning_effort
@@ -92,22 +93,26 @@ def agent_options(
     return sdk.ClaudeAgentOptions(**kwargs)
 
 
-def openbase_cloud_claude_model(model: str | None) -> str | None:
-    if configured_backend_from_environment() != OPENBASE_CLOUD_BACKEND:
+def openbase_cloud_claude_model(model: str | None, backend: str | None = None) -> str | None:
+    if _configured_backend(backend) != OPENBASE_CLOUD_BACKEND:
         return model
     if not model:
         return OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL
     return OPENBASE_CLOUD_CLAUDE_MODEL_MAP.get(model.strip().lower(), model)
 
 
-def openbase_cloud_claude_env() -> dict[str, str]:
-    if configured_backend_from_environment() != OPENBASE_CLOUD_BACKEND:
+def openbase_cloud_claude_env(backend: str | None = None) -> dict[str, str]:
+    if _configured_backend(backend) != OPENBASE_CLOUD_BACKEND:
         return {}
     return {
         "ANTHROPIC_API_KEY": "",
         "ANTHROPIC_BASE_URL": _openbase_cloud_anthropic_base_url(),
         "ANTHROPIC_AUTH_TOKEN": _openbase_cloud_anthropic_auth_token(),
     }
+
+
+def _configured_backend(backend: str | None) -> str:
+    return normalize_backend(backend) if backend else configured_backend_from_environment()
 
 
 def _openbase_cloud_anthropic_base_url() -> str:

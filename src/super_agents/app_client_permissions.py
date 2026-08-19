@@ -6,6 +6,7 @@ from .app_permissions import (
     is_permission_request,
     normalize_permission_response,
 )
+from .backend_config import normalize_backend
 from .state import JsonObject
 
 
@@ -49,7 +50,16 @@ class PermissionClientMixin:
             result["sandboxPolicy"] = sandbox_policy
         return result
 
-    async def answer_request(self, request_id: str | int, result: JsonObject) -> JsonObject:
+    async def answer_request(
+        self,
+        request_id: str | int,
+        result: JsonObject,
+        *,
+        backend: str | None = None,
+    ) -> JsonObject:
+        selected_backend = normalize_backend(backend) if backend else self.backend
+        if selected_backend != self.backend:
+            raise ValueError(f"This client handles backend {self.backend}, not {selected_backend}.")
         await self.ensure_connected()
         if request_id not in self._pending_server_requests:
             raise ValueError(f"No pending app-server request found for id {request_id}.")

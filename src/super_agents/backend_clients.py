@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Protocol
 
 from .app_models import LabelQueryInput, QueueCancelInput
@@ -10,11 +11,13 @@ from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     CODEX_BACKEND,
     CODEX_COMPATIBLE_BACKENDS,
     CODING_BACKEND_ENV_KEY,
+    DEFAULT_BACKEND_ENV_KEY,
     DEFAULT_ENV_FILE,
     OPENBASE_CLOUD_BACKEND,
     OPENBASE_CLOUD_CODEX_BACKEND,
     backend_from_environment,
     configured_backend_from_environment,
+    default_backend_from_environment,
     execution_backend,
     normalize_backend,
 )
@@ -34,7 +37,13 @@ class SuperAgentsClient(Protocol):
     ) -> JsonObject: ...
     async def read_by_label(self, input_data: LabelQueryInput, include_turns: bool = False) -> JsonObject: ...
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject: ...
-    async def answer_request(self, request_id: str | int, result: JsonObject) -> JsonObject: ...
+    async def answer_request(
+        self,
+        request_id: str | int,
+        result: JsonObject,
+        *,
+        backend: str | None = None,
+    ) -> JsonObject: ...
     async def sessions(self) -> list[JsonObject]: ...
     async def thread_favorite(self, thread_id: str) -> JsonObject: ...
     async def tags(self) -> JsonObject: ...
@@ -58,9 +67,32 @@ class SuperAgentsClient(Protocol):
 
 
 def client_from_environment() -> SuperAgentsClient:
-    backend = backend_from_environment()
-    if backend == CLAUDE_CODE_BACKEND:
+    return client_for_backend(configured_backend_from_environment())
+
+
+def client_for_backend(backend: str) -> SuperAgentsClient:
+    """Build a client for one configured backend identity.
+
+    Configured identity is deliberately kept separate from execution kind:
+    Cloud-backed identities use the same protocol clients while retaining
+    their own model, credential, approval, and provenance semantics.
+    """
+    identity = normalize_backend(backend)
+    if execution_backend(identity) == CLAUDE_CODE_BACKEND:
         from super_agents.claude_sdk import ClaudeAgentSdkClient
 
-        return ClaudeAgentSdkClient()
-    return CodexAppServerClient()
+        return ClaudeAgentSdkClient(backend_identity=identity)
+    from super_agents.defaults import default_super_agents_model
+
+    backend_ws_url = os.environ.get(f"SUPER_AGENTS_{identity.upper()}_WS_URL")
+    return CodexAppServerClient(
+        ws_url=backend_ws_url,
+        backend_identity=identity,
+        default_model=default_super_agents_model(backend=identity),
+    )
+
+
+def multi_client_from_environment() -> SuperAgentsClient:
+    from super_agents.multi_backend import MultiBackendClient
+
+    return MultiBackendClient()

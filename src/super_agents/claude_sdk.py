@@ -74,6 +74,7 @@ from super_agents.defaults import (
     default_super_agents_model,
     default_super_agents_reasoning_effort,
 )
+from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
@@ -109,8 +110,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         *,
         approval_requests_file: str | Path | None = None,
         approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+        backend_identity: str | None = None,
     ) -> None:
-        self.store = store or Store()
+        self.backend = normalize_backend(backend_identity or CLAUDE_CODE_BACKEND)
+        if execution_backend(self.backend) != CLAUDE_CODE_BACKEND:
+            raise ValueError(f"{self.backend} is not a Claude-compatible backend.")
+        self.store = store or Store(backend=self.backend)
+        self.store.scope_backend(self.backend)
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
@@ -281,7 +287,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             "threadId": renamed.id,
         }
 
-    async def answer_request(self, request_id: str | int, result: JsonObject) -> JsonObject:
+    async def answer_request(
+        self,
+        request_id: str | int,
+        result: JsonObject,
+        *,
+        backend: str | None = None,
+    ) -> JsonObject:
+        selected_backend = normalize_backend(backend) if backend else self.backend
+        if selected_backend != self.backend:
+            raise ValueError(f"This client handles backend {self.backend}, not {selected_backend}.")
         decision = decision_from_answer(result)
         if decision is None:
             raise ValueError(f"Unsupported approval answer for request {request_id}.")
@@ -861,7 +876,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             await self._disconnect_sdk_client(session.id)
             existing = None
         if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
-            resolved_model = _openbase_cloud_claude_model(model)
+            resolved_model = _openbase_cloud_claude_model(model, self.backend)
             if resolved_model and hasattr(existing, "set_model"):
                 await existing.set_model(resolved_model)
             self._record_session_leaf_owner(session.id)
@@ -879,6 +894,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 session.id,
                 lambda session_id=session.id: self._active_turn_id(session_id),
             ),
+            backend=self.backend,
         )
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()

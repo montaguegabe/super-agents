@@ -61,6 +61,25 @@ def test_openbase_cloud_backend_sets_anthropic_proxy_env(monkeypatch) -> None:
     }
 
 
+def test_explicit_cloud_identity_overrides_process_backend(monkeypatch) -> None:
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+    monkeypatch.setenv("OPENBASE_CODER_CLI_WEB_BACKEND_URL", "http://localhost:8000")
+    monkeypatch.setenv(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "machine-token")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    options = agent_options(
+        _FAKE_SDK,
+        "/tmp",
+        None,
+        None,
+        resume=None,
+        backend="openbase_cloud",
+    )
+
+    assert options.kwargs["model"] == "claude-sonnet-5"
+    assert options.kwargs["env"]["ANTHROPIC_AUTH_TOKEN"] == "machine-token"
+
+
 def test_openbase_cloud_backend_pins_claude_aliases(monkeypatch) -> None:
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
     monkeypatch.setenv(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "machine-token")

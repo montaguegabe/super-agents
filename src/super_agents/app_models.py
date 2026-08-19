@@ -100,6 +100,7 @@ class QueuedTurn:
 @dataclass(slots=True)
 class LabelQueryInput:
     label: str | None = None
+    backend: str | None = None
     cwd: str | None = None
     group: str | None = None
     status: str | None = None
@@ -123,6 +124,7 @@ class LabelQueryInput:
 @dataclass(slots=True)
 class QueueCancelInput:
     queue_item_id: str | None = None
+    backend: str | None = None
     label: str | None = None
     thread_id: str | None = None
     cwd: str | None = None

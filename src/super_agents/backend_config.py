@@ -22,6 +22,7 @@ BACKENDS = {
 }
 CODEX_COMPATIBLE_BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_CODEX_BACKEND}
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
+DEFAULT_BACKEND_ENV_KEY = "SUPER_AGENTS_DEFAULT_BACKEND"
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
 BACKEND_ALIASES = {
     "": CODEX_BACKEND,
@@ -56,6 +57,12 @@ def execution_backend(backend: str) -> str:
 def configured_backend_from_environment() -> str:
     env_values = read_env_values(DEFAULT_ENV_FILE)
     return normalize_backend(os.environ.get(CODING_BACKEND_ENV_KEY) or env_values.get(CODING_BACKEND_ENV_KEY))
+
+
+def default_backend_from_environment() -> str:
+    """Return the configured identity used for new threads in this process."""
+    override = os.environ.get(DEFAULT_BACKEND_ENV_KEY, "").strip()
+    return normalize_backend(override) if override else configured_backend_from_environment()
 
 
 def backend_from_environment() -> str:

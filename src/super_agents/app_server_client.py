@@ -119,6 +119,7 @@ from .app_time import (
     turn_recency,
 )
 from .defaults import default_super_agents_model
+from .backend_config import CODEX_BACKEND, execution_backend, normalize_backend
 from .state import JsonObject
 
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
@@ -253,7 +254,11 @@ class CodexAppServerClient(
         permission_callback: PermissionRequestCallback | None = None,
         approval_requests_file: str | Path | None = None,
         queue_dir: str | Path | None = None,
+        backend_identity: str | None = None,
     ) -> None:
+        self.backend = normalize_backend(backend_identity or CODEX_BACKEND)
+        if execution_backend(self.backend) != CODEX_BACKEND:
+            raise ValueError(f"{self.backend} is not a Codex-compatible backend.")
         self.ws_url = ws_url or os.environ.get("SUPER_AGENTS_WS_URL") or DEFAULT_WS_URL
         self.state_file = Path(state_file or os.environ.get("SUPER_AGENTS_STATE_FILE") or DEFAULT_STATE_FILE)
         self.queue_dir = Path(
@@ -284,6 +289,7 @@ class CodexAppServerClient(
     async def status(self) -> JsonObject:
         ready = await self.check_ready()
         return {
+            "backend": self.backend,
             "ready": ready,
             "websocketUrl": self.ws_url,
             "websocketConnected": websocket_is_open(self._ws),

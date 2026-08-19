@@ -31,6 +31,7 @@ class Session:
     last_observed_state: str | None = None
     last_useful_message: str | None = None
     backend_session_id: str | None = None
+    backend: str | None = None
     last_client_instance: str | None = None
     last_exit_code: int | None = None
     log_path: str | None = None
@@ -52,6 +53,7 @@ class Session:
             "lastObservedState": self.last_observed_state,
             "lastUsefulMessage": self.last_useful_message,
             "backendSessionId": self.backend_session_id,
+            "backend": self.backend,
             "lastClientInstance": self.last_client_instance,
             "lastExitCode": self.last_exit_code,
             "createdAt": self.created_at,
@@ -104,11 +106,23 @@ class Turn:
 
 
 class Store:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, backend: str | None = None) -> None:
         self.path = path or database_path()
+        self.backend = backend
         self.path.parent.mkdir(parents=True, exist_ok=True)
         logs_dir().mkdir(parents=True, exist_ok=True)
         self._init()
+
+    def scope_backend(self, backend: str) -> None:
+        """Claim legacy rows and constrain this store instance to one backend."""
+        if self.backend and self.backend != backend:
+            raise ValueError(f"Store is already scoped to backend {self.backend}.")
+        self.backend = backend
+        with self.connect() as conn:
+            conn.execute(
+                "update sessions set backend = ? where backend is null",
+                (backend,),
+            )
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -134,6 +148,7 @@ class Store:
                     last_observed_state text,
                     last_useful_message text,
                     backend_session_id text,
+                    backend text,
                     last_client_instance text,
                     last_exit_code integer,
                     log_path text,
@@ -174,6 +189,13 @@ class Store:
                 conn.execute("alter table sessions add column backend_session_id text")
             if "last_client_instance" not in session_columns:
                 conn.execute("alter table sessions add column last_client_instance text")
+            if "backend" not in session_columns:
+                conn.execute("alter table sessions add column backend text")
+            if self.backend:
+                conn.execute(
+                    "update sessions set backend = ? where backend is null",
+                    (self.backend,),
+                )
 
     def create_session(
         self,
@@ -197,8 +219,8 @@ class Store:
                 """
                 insert into sessions (
                     id, name, agent_name, developer_instructions, cwd, command_json, model, status,
-                    log_path, raw_log_path, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    backend, log_path, raw_log_path, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -209,6 +231,7 @@ class Store:
                     command_to_json(resolved_command),
                     model,
                     "unknown",
+                    self.backend,
                     log_path,
                     raw_log_path,
                     now,
@@ -227,14 +250,26 @@ class Store:
 
     def get_session(self, session_id: str) -> Session:
         with self.connect() as conn:
-            row = conn.execute("select * from sessions where id = ?", (session_id,)).fetchone()
+            if self.backend:
+                row = conn.execute(
+                    "select * from sessions where id = ? and backend = ?",
+                    (session_id, self.backend),
+                ).fetchone()
+            else:
+                row = conn.execute("select * from sessions where id = ?", (session_id,)).fetchone()
         if row is None:
             raise KeyError(f"No session with id {session_id}")
         return row_to_session(row)
 
     def get_by_name(self, name: str) -> Session | None:
         with self.connect() as conn:
-            row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
+            if self.backend:
+                row = conn.execute(
+                    "select * from sessions where name = ? and backend = ?",
+                    (name, self.backend),
+                ).fetchone()
+            else:
+                row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
         return row_to_session(row) if row else None
 
     def require_by_name(self, name: str) -> Session:
@@ -252,6 +287,9 @@ class Store:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        if self.backend:
+            clauses.append("backend = ?")
+            params.append(self.backend)
         if clauses:
             query += " where " + " and ".join(clauses)
         query += " order by updated_at desc"
@@ -441,6 +479,7 @@ def row_to_session(row: sqlite3.Row) -> Session:
         last_observed_state=row["last_observed_state"],
         last_useful_message=row["last_useful_message"],
         backend_session_id=row["backend_session_id"],
+        backend=row["backend"],
         last_client_instance=row["last_client_instance"],
         last_exit_code=row["last_exit_code"],
         log_path=row["log_path"],

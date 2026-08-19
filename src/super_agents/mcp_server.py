@@ -19,7 +19,8 @@ from mcp.server.models import InitializationOptions
 from .app_client_transport import CONTROL_PLANE_DIAGNOSTICS_ENV, control_plane_diagnostics_enabled
 from .app_models import QueueCancelInput
 from .app_server_client import LabelQueryInput
-from .backend_clients import SuperAgentsClient, client_from_environment
+from .backend_clients import SuperAgentsClient, multi_client_from_environment
+from .backend_config import BACKENDS, normalize_backend
 from .defaults import (
     default_service_tier,
     default_super_agents_model,
@@ -78,7 +79,7 @@ class ToolDefinition:
 
 
 def create_server(client: SuperAgentsClient | None = None) -> Server:
-    app_client = client or client_from_environment()
+    app_client = client or multi_client_from_environment()
     server = Server("super-agents", instructions=INSTRUCTIONS)
     tool_by_name = {tool.name: tool for tool in build_tools(app_client)}
 
@@ -199,6 +200,7 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
                     "type": "string",
                     "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
                 },
+                **backend_option_properties(),
                 **permission_option_properties(include_sandbox=True),
             },
             ["name"],
@@ -269,12 +271,11 @@ def _tool_codex_answer_request(client: SuperAgentsClient) -> ToolDefinition:
             {
                 "requestId": {"anyOf": [{"type": "string"}, {"type": "number"}]},
                 "result": {"type": "object", "additionalProperties": True},
+                **backend_option_properties(),
             },
             ["requestId", "result"],
         ),
-        handler=lambda input_data: client.answer_request(
-            required_request_id(input_data), required_object(input_data, "result")
-        ),
+        handler=lambda input_data: answer_request(client, input_data),
     )
 
 
@@ -562,6 +563,7 @@ def _tool_super_agents_cancel_queued_turn(client: SuperAgentsClient) -> ToolDefi
                 "name": {"type": "string"},
                 "threadId": {"type": "string"},
                 "cwd": {"type": "string"},
+                **backend_option_properties(),
                 "position": {
                     "type": "number",
                     "description": "1-based queue position within the target thread's queued turns.",
@@ -597,6 +599,7 @@ def object_schema(properties: JsonObject, required: list[str] | None = None) -> 
 def name_query_properties(include_ids: bool = True, include_output_options: bool = True) -> JsonObject:
     properties: JsonObject = {
         "name": {"type": "string"},
+        **backend_option_properties(),
         "cwd": {"type": "string"},
         "status": {"type": "string", "enum": ["running", "waiting", "completed", "failed", "cancelled", "unknown"]},
         "favorite": {
@@ -665,6 +668,20 @@ def permission_option_properties(*, include_sandbox: bool = False, include_sandb
     return properties
 
 
+def backend_option_properties() -> JsonObject:
+    return {
+        "backend": {
+            "type": "string",
+            "enum": sorted(BACKENDS),
+            "description": (
+                "Configured backend identity. On thread creation, overrides "
+                "SUPER_AGENTS_DEFAULT_BACKEND and the machine configuration. "
+                "On name-based operations, disambiguates identical names."
+            ),
+        }
+    }
+
+
 def name_query_schema(required: list[str] | None = None) -> JsonObject:
     return object_schema(name_query_properties(), required)
 
@@ -704,6 +721,7 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
             "agentName": optional_string(input_data, "agentName"),
+            "backend": optional_backend(input_data),
             "approvalPolicy": optional_string(input_data, "approvalPolicy"),
             "sandbox": optional_string(input_data, "sandbox"),
             "sandboxPolicy": optional_string(input_data, "sandboxPolicy"),
@@ -781,6 +799,7 @@ def default_super_agent_instructions_path() -> Path:
 def clean_name_query_input(input_data: JsonObject) -> LabelQueryInput:
     return LabelQueryInput(
         label=optional_string(input_data, "name") or optional_string(input_data, "label"),
+        backend=optional_backend(input_data),
         cwd=optional_string(input_data, "cwd"),
         status=optional_string(input_data, "status"),
         favorite=optional_boolean_or_none(input_data, "favorite"),
@@ -833,11 +852,26 @@ def clean_cancel_queued_turn_input(input_data: JsonObject) -> QueueCancelInput:
         raise ValueError("name or threadId must be provided when canceling by position.")
     return QueueCancelInput(
         queue_item_id=queue_item_id,
+        backend=optional_backend(input_data),
         label=optional_string(input_data, "name") or optional_string(input_data, "label"),
         thread_id=optional_string(input_data, "threadId"),
         cwd=optional_string(input_data, "cwd"),
         position=position,
     )
+
+
+def optional_backend(input_data: JsonObject) -> str | None:
+    backend = optional_string(input_data, "backend")
+    return normalize_backend(backend) if backend else None
+
+
+async def answer_request(client: SuperAgentsClient, input_data: JsonObject) -> JsonObject:
+    request_id = required_request_id(input_data)
+    result = required_object(input_data, "result")
+    backend = optional_backend(input_data)
+    if backend:
+        return await client.answer_request(request_id, result, backend=backend)
+    return await client.answer_request(request_id, result)
 
 
 def _cwd_basename(value: Any) -> str:
