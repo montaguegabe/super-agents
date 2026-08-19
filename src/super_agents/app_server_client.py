@@ -120,6 +120,7 @@ from .app_time import (
 )
 from .defaults import default_super_agents_model
 from .backend_config import CODEX_BACKEND, execution_backend, normalize_backend
+from .execution_control import ApprovalAuthorizer, ExecutionPolicyGuard, configure_execution_controls
 from .state import JsonObject
 
 DEFAULT_WS_URL = "ws://127.0.0.1:4500"
@@ -255,6 +256,9 @@ class CodexAppServerClient(
         approval_requests_file: str | Path | None = None,
         queue_dir: str | Path | None = None,
         backend_identity: str | None = None,
+        execution_policy_guard: ExecutionPolicyGuard | None = None,
+        approval_authorizer: ApprovalAuthorizer | None = None,
+        require_controls: bool = False,
     ) -> None:
         self.backend = normalize_backend(backend_identity or CODEX_BACKEND)
         if execution_backend(self.backend) != CODEX_BACKEND:
@@ -285,6 +289,12 @@ class CodexAppServerClient(
         self._permission_callback_tasks: set[asyncio.Task[None]] = set()
         self._permission_decision_tasks: set[asyncio.Task[None]] = set()
         self._merge_session_tasks: set[asyncio.Task[None]] = set()
+        configure_execution_controls(
+            self,
+            execution_policy_guard=execution_policy_guard,
+            approval_authorizer=approval_authorizer,
+            require_controls=require_controls,
+        )
 
     async def status(self) -> JsonObject:
         ready = await self.check_ready()

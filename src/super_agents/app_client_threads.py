@@ -15,6 +15,7 @@ from .app_protocol import (
     with_super_agent_identity_instructions,
 )
 from .app_time import iso_now, path_basename
+from .execution_control import validate_execution
 from .rollout_history import needs_rollout_turn_fallback, rollout_fallback_turns
 from .state import JsonObject, get_string
 
@@ -48,6 +49,13 @@ class ThreadLifecycleMixin:
             agent_name=agent_name,
         ):
             params["developerInstructions"] = developer_instructions
+
+        await validate_execution(
+            self,
+            operation="start_thread",
+            action={"method": "thread/start", "params": params},
+            requested_policy=self.permission_overrides(input_data),
+        )
 
         result = await self.request(
             "thread/start",

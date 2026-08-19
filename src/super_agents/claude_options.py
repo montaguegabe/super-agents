@@ -65,9 +65,10 @@ def agent_options(
     resume: str | None,
     can_use_tool: Any | None = None,
     backend: str | None = None,
+    permission_mode: str | None = None,
 ) -> Any:
     managed_options = managed_claude_config_options()
-    permission_mode = resolve_permission_mode()
+    permission_mode = permission_mode or resolve_permission_mode()
     kwargs: JsonObject = {
         "cwd": cwd,
         "permission_mode": permission_mode,

@@ -24,6 +24,7 @@ from .app_time import iso_now
 from .app_protocol import is_active_status
 from .app_time import turn_key
 from .state import JsonObject, RoutineRecord, StateFile, get_string, read_state_file, update_state_file, write_state_file
+from .execution_control import validate_execution
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +239,15 @@ class RoutineClientMixin:
     async def run_command_routine(self, routine: RoutineRecord) -> JsonObject:
         if not routine.command:
             raise RuntimeError(f"Command routine {routine.name} is missing a command.")
+        await validate_execution(
+            self,
+            operation="run_command_routine",
+            action={
+                "method": "routine/command",
+                "params": {"name": routine.name, "command": routine.command, "cwd": routine.cwd},
+            },
+            requested_policy={},
+        )
         timeout = parse_routine_command_timeout_seconds(routine.command_timeout_seconds)
         process = await asyncio.create_subprocess_shell(
             routine.command,

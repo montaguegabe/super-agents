@@ -60,6 +60,7 @@ from super_agents.claude_options import (
 from super_agents.claude_options import (
     openbase_cloud_claude_model as _openbase_cloud_claude_model,
 )
+from super_agents.claude_options import resolve_permission_mode
 from super_agents.claude_permissions import CLAUDE_APPROVAL_METHOD, can_use_tool_handler
 from super_agents.claude_orphans import OrphanReconciliationMixin
 from super_agents.claude_prompts import (
@@ -75,6 +76,12 @@ from super_agents.defaults import (
     default_super_agents_reasoning_effort,
 )
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
+from super_agents.execution_control import (
+    ApprovalAuthorizer,
+    ExecutionPolicyGuard,
+    configure_execution_controls,
+    validate_execution,
+)
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
@@ -111,6 +118,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         approval_requests_file: str | Path | None = None,
         approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
         backend_identity: str | None = None,
+        execution_policy_guard: ExecutionPolicyGuard | None = None,
+        approval_authorizer: ApprovalAuthorizer | None = None,
+        require_controls: bool = False,
     ) -> None:
         self.backend = normalize_backend(backend_identity or CLAUDE_CODE_BACKEND)
         if execution_backend(self.backend) != CLAUDE_CODE_BACKEND:
@@ -137,6 +147,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # stale (see _sdk_client_for).
         self._instance_id = f"ci_{uuid.uuid4().hex}"
         self._closed = False
+        self._permission_mode = resolve_permission_mode()
+        configure_execution_controls(
+            self,
+            execution_policy_guard=execution_policy_guard,
+            approval_authorizer=approval_authorizer,
+            require_controls=require_controls,
+        )
         self._permission_gate = ToolApprovalGate(
             backend=self.backend,
             request_method=CLAUDE_APPROVAL_METHOD,
@@ -169,6 +186,12 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         name = str(input_data.get("name") or input_data.get("label") or "").strip()
         if not name:
             raise ValueError("name is required.")
+        await validate_execution(
+            self,
+            operation="start_thread",
+            action={"method": "thread/start", "params": _action_input(input_data)},
+            requested_policy={"permissionMode": self._permission_mode},
+        )
         agent_name = _optional_str(input_data.get("agentName"))
         developer_instructions = with_super_agent_identity_instructions(
             _optional_str(input_data.get("developerInstructions")),
@@ -410,6 +433,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
+        await validate_execution(
+            self,
+            operation="start_turn",
+            action={
+                "method": "turn/start",
+                "params": {"threadId": session.id, **_action_input(turn_input)},
+            },
+            requested_policy={"permissionMode": self._permission_mode},
+            thread_id=session.id,
+            turn_id=input_data.turn_id,
+        )
         if self._session_is_busy(session):
             return await self._steer_active_turn(
                 session,
@@ -435,6 +469,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     async def queue_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         session = self._resolve_session(input_data)
+        await validate_execution(
+            self,
+            operation="queue_turn",
+            action={
+                "method": "turn/queue",
+                "params": {"threadId": session.id, **_action_input(turn_input)},
+            },
+            requested_policy={"permissionMode": self._permission_mode},
+            thread_id=session.id,
+            turn_id=input_data.turn_id,
+        )
         if not self._session_is_busy(session):
             return await self.start_turn_by_label(input_data, turn_input)
         turn = self.store.create_turn(
@@ -893,8 +938,11 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 self._permission_gate,
                 session.id,
                 lambda session_id=session.id: self._active_turn_id(session_id),
+                self._approval_authorizer,
+                backend=self.backend,
             ),
             backend=self.backend,
+            permission_mode=self._permission_mode,
         )
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
@@ -987,6 +1035,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             if not queued:
                 return
             turn = queued[0]
+            await validate_execution(
+                self,
+                operation="run_queued_turn",
+                action={
+                    "method": "turn/start",
+                    "params": {"threadId": session_id, "prompt": turn.prompt},
+                },
+                requested_policy={"permissionMode": self._permission_mode},
+                thread_id=session_id,
+                turn_id=turn.id,
+            )
             sdk = self._require_sdk()
             self.store.update_turn(turn.id, status="running", attempts=turn.attempts + 1)
             self.store.update_session(
@@ -1096,3 +1155,8 @@ def _load_sdk() -> Any:
 
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _action_input(input_data: JsonObject) -> JsonObject:
+    """Drop transport-only fields so direct and MCP calls cover one action."""
+    return {key: value for key, value in input_data.items() if not key.startswith("_")}

@@ -22,6 +22,7 @@ from .app_permissions import (
 )
 from .app_time import iso_now, parse_iso_ms
 from .approval_redaction import redact_approval_payload
+from .execution_control import approval_action, canonical_action_digest
 from .state import JsonObject
 
 ApprovalDecision = Literal["accept", "decline", "cancel"]
@@ -49,6 +50,7 @@ _DECISION_ALIASES: dict[str, ApprovalDecision] = {
 class ApprovalOutcome:
     decision: ApprovalDecision
     reason: Literal["answered", "timeout", "cancelled"]
+    request: PendingServerRequest
 
 
 def decision_from_answer(result: JsonObject) -> ApprovalDecision | None:
@@ -206,6 +208,11 @@ class ToolApprovalGate:
             "approvalOwnerId": self.owner_id,
             "approvalOwnerPid": self.owner_pid,
             "approvalExpiresAt": expires_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            # Safe to expose: this covers the original input before the
+            # display copy is redacted and contains no reversible content.
+            "approvalActionDigest": canonical_action_digest(
+                approval_action(self.request_method, tool_name, tool_input)
+            ),
         }
         if turn_id:
             params["turnId"] = turn_id
@@ -235,22 +242,22 @@ class ToolApprovalGate:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return ApprovalOutcome("decline", "timeout")
+                return ApprovalOutcome("decline", "timeout", request)
             if self._stored_request_matches(request):
                 shared = pop_shared_permission_decision(request.id, self.requests_file)
                 if shared is not None:
                     decision = decision_from_answer(shared)
                     if decision is not None:
-                        return ApprovalOutcome(decision, "answered")
+                        return ApprovalOutcome(decision, "answered", request)
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return ApprovalOutcome("decline", "timeout")
+                return ApprovalOutcome("decline", "timeout", request)
             try:
                 decision = await asyncio.wait_for(
                     asyncio.shield(future),
                     timeout=min(DECISION_POLL_SECONDS, remaining),
                 )
-                return ApprovalOutcome(decision, "cancelled" if decision == "cancel" else "answered")
+                return ApprovalOutcome(decision, "cancelled" if decision == "cancel" else "answered", request)
             except TimeoutError:
                 continue
 
