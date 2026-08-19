@@ -16,6 +16,7 @@ from .app_protocol import extract_threads, is_active_status, to_tracked_turn_sta
 from .app_queue import append_queued_turn, new_queued_turn
 from .app_sessions import required_label
 from .state import JsonObject
+from .execution_control import validate_execution
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +330,16 @@ class LabelQueryMixin:
         return {**result, "queued": False, "startedImmediately": True, "drain": drain}
 
     async def enqueue_turn(self, target: ResolvedSession, turn_input: JsonObject) -> JsonObject:
+        await validate_execution(
+            self,
+            operation="queue_turn",
+            action={
+                "method": "turn/queue",
+                "params": {"threadId": target.session.thread_id, **turn_input},
+            },
+            requested_policy=self.permission_overrides(turn_input),
+            thread_id=target.session.thread_id,
+        )
         queued, position = append_queued_turn(
             self.queue_dir,
             new_queued_turn(

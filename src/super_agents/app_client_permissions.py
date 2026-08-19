@@ -7,6 +7,8 @@ from .app_permissions import (
     normalize_permission_response,
 )
 from .backend_config import normalize_backend
+from .approval_gate import decision_from_answer
+from .execution_control import approval_action, authorize_approval
 from .state import JsonObject
 
 
@@ -64,13 +66,52 @@ class PermissionClientMixin:
         if request_id not in self._pending_server_requests:
             raise ValueError(f"No pending app-server request found for id {request_id}.")
         request = self._pending_server_requests[request_id]
+        normalized = normalize_permission_response(request, result)
+        if is_permission_request(request.method) and decision_from_answer(normalized) == "accept":
+            params = request.params
+            action_type = str(params.get("toolName") or request.method)
+            action_input = {
+                key: value
+                for key, value in params.items()
+                if key
+                not in {
+                    "approvalExpiresAt",
+                    "approvalActionDigest",
+                    "approvalManagedBy",
+                    "approvalOwnerId",
+                    "approvalOwnerPid",
+                    "backend",
+                    "description",
+                    "name",
+                    "threadId",
+                    "title",
+                    "toolCallId",
+                    "toolName",
+                    "turnId",
+                }
+            }
+            await authorize_approval(
+                self._approval_authorizer,
+                backend=self.backend,
+                request_id=request.id,
+                action_type=action_type,
+                action=approval_action(request.method, action_type, action_input),
+                thread_id=_optional_scope(params, "threadId"),
+                turn_id=_optional_scope(params, "turnId"),
+                tool_call_id=_optional_scope(params, "toolCallId"),
+            )
         await self.send(
             {
                 "id": request_id,
-                "result": normalize_permission_response(request, result),
+                "result": normalized,
             }
         )
         request = self._pending_server_requests.pop(request_id)
         self.remove_pending_request_from_turn(request_id)
         clear_shared_permission_request(request_id, self.approval_requests_file)
         return {"answered": True, "request": request.to_json()}
+
+
+def _optional_scope(params: JsonObject, key: str) -> str | None:
+    value = params.get(key)
+    return str(value) if isinstance(value, (str, int)) else None

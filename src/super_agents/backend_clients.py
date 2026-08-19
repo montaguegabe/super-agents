@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from .app_models import LabelQueryInput, QueueCancelInput
 from .app_server_client import CodexAppServerClient
+from .execution_control import ApprovalAuthorizer, ExecutionPolicyGuard
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     BACKEND_ALIASES,
     CLAUDE_CODE_BACKEND,
@@ -66,11 +67,27 @@ class SuperAgentsClient(Protocol):
     async def cancel_queued_turn(self, input_data: QueueCancelInput) -> JsonObject: ...
 
 
-def client_from_environment() -> SuperAgentsClient:
-    return client_for_backend(configured_backend_from_environment())
+def client_from_environment(
+    *,
+    execution_policy_guard: ExecutionPolicyGuard | None = None,
+    approval_authorizer: ApprovalAuthorizer | None = None,
+    require_controls: bool = False,
+) -> SuperAgentsClient:
+    return client_for_backend(
+        configured_backend_from_environment(),
+        execution_policy_guard=execution_policy_guard,
+        approval_authorizer=approval_authorizer,
+        require_controls=require_controls,
+    )
 
 
-def client_for_backend(backend: str) -> SuperAgentsClient:
+def client_for_backend(
+    backend: str,
+    *,
+    execution_policy_guard: ExecutionPolicyGuard | None = None,
+    approval_authorizer: ApprovalAuthorizer | None = None,
+    require_controls: bool = False,
+) -> SuperAgentsClient:
     """Build a client for one configured backend identity.
 
     Configured identity is deliberately kept separate from execution kind:
@@ -81,7 +98,12 @@ def client_for_backend(backend: str) -> SuperAgentsClient:
     if execution_backend(identity) == CLAUDE_CODE_BACKEND:
         from super_agents.claude_sdk import ClaudeAgentSdkClient
 
-        return ClaudeAgentSdkClient(backend_identity=identity)
+        return ClaudeAgentSdkClient(
+            backend_identity=identity,
+            execution_policy_guard=execution_policy_guard,
+            approval_authorizer=approval_authorizer,
+            require_controls=require_controls,
+        )
     from super_agents.defaults import default_super_agents_model
 
     backend_ws_url = os.environ.get(f"SUPER_AGENTS_{identity.upper()}_WS_URL")
@@ -89,10 +111,22 @@ def client_for_backend(backend: str) -> SuperAgentsClient:
         ws_url=backend_ws_url,
         backend_identity=identity,
         default_model=default_super_agents_model(backend=identity),
+        execution_policy_guard=execution_policy_guard,
+        approval_authorizer=approval_authorizer,
+        require_controls=require_controls,
     )
 
 
-def multi_client_from_environment() -> SuperAgentsClient:
+def multi_client_from_environment(
+    *,
+    execution_policy_guard: ExecutionPolicyGuard | None = None,
+    approval_authorizer: ApprovalAuthorizer | None = None,
+    require_controls: bool = False,
+) -> SuperAgentsClient:
     from super_agents.multi_backend import MultiBackendClient
 
-    return MultiBackendClient()
+    return MultiBackendClient(
+        execution_policy_guard=execution_policy_guard,
+        approval_authorizer=approval_authorizer,
+        require_controls=require_controls,
+    )

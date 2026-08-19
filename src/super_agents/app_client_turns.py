@@ -26,6 +26,7 @@ from .app_protocol import (
 )
 from .app_sessions import turn_patch
 from .app_time import iso_now, path_basename, turn_key
+from .execution_control import validate_execution
 from .state import JsonObject, TrackedStatus
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,13 @@ class TurnLifecycleMixin:
             mode,
             reasoning_effort,
             developer_instructions,
+        )
+        await validate_execution(
+            self,
+            operation="start_turn",
+            action={"method": "turn/start", "params": params},
+            requested_policy=self.permission_overrides(input_data),
+            thread_id=thread_id,
         )
         await self._refresh_thread_environment(thread_id, params)
         logger.info(

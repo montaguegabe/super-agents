@@ -919,8 +919,9 @@ def configure_control_plane_diagnostic_logging() -> Path | None:
     return path
 
 
-async def run_stdio() -> None:
-    server = create_server()
+async def run_stdio(client: SuperAgentsClient | None = None) -> None:
+    """Run stdio with an optionally injected, externally controlled client."""
+    server = create_server(client)
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,

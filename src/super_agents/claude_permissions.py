@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .approval_gate import ToolApprovalGate
+from .execution_control import ApprovalAuthorizer, ExecutionControlError, approval_action, authorize_approval
 from .state import JsonObject
 
 CLAUDE_APPROVAL_METHOD = "claudeCode/requestApproval"
@@ -18,6 +19,9 @@ def can_use_tool_handler(
     gate: ToolApprovalGate,
     thread_id: str,
     turn_id_getter: TurnIdGetter,
+    approval_authorizer: ApprovalAuthorizer | None = None,
+    *,
+    backend: str = "claude_code",
 ) -> Any:
     """Build a Claude SDK callback that allows tools only after approval."""
 
@@ -31,6 +35,21 @@ def can_use_tool_handler(
             description=_context_description(context),
         )
         if outcome.decision == "accept":
+            if approval_authorizer is not None:
+                request = outcome.request
+                try:
+                    await authorize_approval(
+                        approval_authorizer,
+                        backend=backend,
+                        request_id=request.id,
+                        action_type=tool_name,
+                        action=approval_action(CLAUDE_APPROVAL_METHOD, tool_name, tool_input),
+                        thread_id=thread_id,
+                        turn_id=turn_id_getter(),
+                        tool_call_id=_context_string(context, "tool_use_id"),
+                    )
+                except ExecutionControlError as exc:
+                    return sdk.PermissionResultDeny(message=str(exc), interrupt=False)
             # Explicit pass-through avoids older SDK/CLI combinations treating
             # an omitted updated_input as an empty tool argument object.
             return sdk.PermissionResultAllow(updated_input=tool_input)

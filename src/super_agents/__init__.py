@@ -11,9 +11,24 @@ from .app_server_client import (
     is_permission_request,
 )
 from .state import SessionRecord, StateFile, TurnSummary
+from .execution_control import (
+    ApprovalAuthorizationRequest,
+    ApprovalAuthorizer,
+    AuthorizationDecision,
+    ExecutionControlError,
+    ExecutionPolicyGuard,
+    ExecutionRequest,
+    canonical_action_digest,
+)
 
 __all__ = [
     "CodexAppServerClient",
+    "ApprovalAuthorizationRequest",
+    "ApprovalAuthorizer",
+    "AuthorizationDecision",
+    "ExecutionControlError",
+    "ExecutionPolicyGuard",
+    "ExecutionRequest",
     "LabelQueryInput",
     "PendingServerRequest",
     "PermissionRequestCallback",
@@ -24,4 +39,5 @@ __all__ = [
     "shared_permission_requests",
     "write_shared_permission_decision",
     "is_permission_request",
+    "canonical_action_digest",
 ]

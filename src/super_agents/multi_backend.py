@@ -29,6 +29,7 @@ from .backend_routing import (
     session_thread_id as _session_thread_id,
 )
 from .defaults import default_super_agents_model
+from .execution_control import ApprovalAuthorizer, ExecutionPolicyGuard
 
 JsonObject = dict[str, Any]
 RoutedOperation = Callable[[Any], Awaitable[JsonObject]]
@@ -50,6 +51,9 @@ class MultiBackendClient:
         clients: dict[str, Any] | None = None,
         *,
         provenance_store: BackendProvenanceStore | None = None,
+        execution_policy_guard: ExecutionPolicyGuard | None = None,
+        approval_authorizer: ApprovalAuthorizer | None = None,
+        require_controls: bool = False,
     ) -> None:
         self._default_backend = normalize_backend(
             default_backend if default_backend is not None else default_backend_from_environment()
@@ -57,6 +61,9 @@ class MultiBackendClient:
         self._clients = {normalize_backend(key): value for key, value in (clients or {}).items()}
         self._factory_created: set[str] = set()
         self.provenance = provenance_store or BackendProvenanceStore()
+        self._execution_policy_guard = execution_policy_guard
+        self._approval_authorizer = approval_authorizer
+        self._require_controls = require_controls
         self.client_for(self._default_backend)
         # Claim legacy state through its canonical local backend before an
         # explicit Cloud launch can instantiate a second identity that shares
@@ -74,7 +81,12 @@ class MultiBackendClient:
     def client_for(self, backend: str | None) -> Any:
         identity = self.resolve_backend(backend)
         if identity not in self._clients:
-            candidate = client_for_backend(identity)
+            candidate = client_for_backend(
+                identity,
+                execution_policy_guard=self._execution_policy_guard,
+                approval_authorizer=self._approval_authorizer,
+                require_controls=self._require_controls,
+            )
             self._validate_endpoint(identity, candidate)
             self._clients[identity] = candidate
             self._factory_created.add(identity)
