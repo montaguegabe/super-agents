@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 from super_agents.app_permissions import (
     normalize_permission_response,
     pop_shared_permission_decision,
     shared_permission_requests,
+    write_permission_store,
 )
 
 
@@ -80,9 +82,7 @@ def test_pop_shared_permission_decision_returns_elicitation_action(tmp_path: Pat
         "content": None,
         "_meta": None,
     }
-    assert pop_shared_permission_decision("approval-1", approvals_path) == {
-        "decision": "decline"
-    }
+    assert pop_shared_permission_decision("approval-1", approvals_path) == {"decision": "decline"}
 
 
 def test_normalize_permission_response_converts_elicitation_decision() -> None:
@@ -101,3 +101,13 @@ def test_normalize_permission_response_converts_elicitation_decision() -> None:
         {"id": "approval-1", "method": "exec/requestApproval", "params": {}},
         {"decision": "accept"},
     ) == {"decision": "accept"}
+
+
+def test_permission_store_has_restrictive_permissions(tmp_path: Path) -> None:
+    store_dir = tmp_path / "approval-store"
+    approvals_path = store_dir / "approvals.json"
+
+    write_permission_store(approvals_path, {"requests": {}, "decisions": {}})
+
+    assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(approvals_path.stat().st_mode) == 0o600

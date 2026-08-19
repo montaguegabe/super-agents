@@ -213,6 +213,7 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | `OPENBASE_CODING_BACKEND` | unset | Backend mode: `codex`, `openbase_cloud`, or `claude_code` |
 | `OPENBASE_CODEX_BACKEND` | unset | Legacy fallback for `OPENBASE_CODING_BACKEND` |
 | `SUPER_AGENTS_STATE_FILE` | `~/.super-agents/state.json` | Local session metadata file |
+| `SUPER_AGENTS_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Claude SDK permission mode. Gated modes route tool requests through the native approval store. |
 
 Openbase-specific defaults:
 
@@ -225,6 +226,12 @@ Openbase-specific defaults:
 Super Agents does not silently approve app-server callbacks. If plan mode asks a
 question or a sandboxed turn asks for approval, inspect the pending request and
 answer it explicitly with `codex_answer_request`.
+
+The same flow applies to Claude Code when `SUPER_AGENTS_CLAUDE_PERMISSION_MODE`
+is a gated SDK mode such as `default` or `acceptEdits`. Pending tool requests
+appear in status and can be answered with `codex_answer_request`. Approval waits
+are bounded and fail closed; persisted details are redacted, and stale requests
+from exited processes are discarded rather than reused after restart.
 
 ## Tools
 

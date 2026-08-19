@@ -13,6 +13,7 @@ from .backend_config import OPENBASE_CLOUD_BACKEND, configured_backend_from_envi
 JsonObject = dict[str, Any]
 
 CLAUDE_PERMISSION_MODE = "bypassPermissions"
+CLAUDE_PERMISSION_MODE_ENV = "SUPER_AGENTS_CLAUDE_PERMISSION_MODE"
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 # JSON object of extra Claude Code CLI flags, e.g. {"chrome": null} for
 # --chrome. Values map to flag arguments; null means a bare flag.
@@ -50,6 +51,11 @@ OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV = "OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN"
 OPENBASE_CODER_CLI_WEB_BACKEND_URL_ENV = "OPENBASE_CODER_CLI_WEB_BACKEND_URL"
 
 
+def resolve_permission_mode() -> str:
+    """Resolve the process-wide Claude permission posture."""
+    return os.environ.get(CLAUDE_PERMISSION_MODE_ENV, "").strip() or CLAUDE_PERMISSION_MODE
+
+
 def agent_options(
     sdk: Any,
     cwd: str,
@@ -57,11 +63,13 @@ def agent_options(
     reasoning_effort: str | None,
     *,
     resume: str | None,
+    can_use_tool: Any | None = None,
 ) -> Any:
     managed_options = managed_claude_config_options()
+    permission_mode = resolve_permission_mode()
     kwargs: JsonObject = {
         "cwd": cwd,
-        "permission_mode": CLAUDE_PERMISSION_MODE,
+        "permission_mode": permission_mode,
         **managed_options,
         "env": {
             **managed_options.get("env", {}),
@@ -69,6 +77,10 @@ def agent_options(
             **openbase_cloud_claude_env(),
         },
     }
+    if permission_mode != "bypassPermissions":
+        if can_use_tool is None:
+            raise RuntimeError("Claude permission gating was requested but no approval handler is available.")
+        kwargs["can_use_tool"] = can_use_tool
     if resolved_model := openbase_cloud_claude_model(model):
         kwargs["model"] = resolved_model
     if reasoning_effort:

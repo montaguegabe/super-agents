@@ -25,7 +25,8 @@ def shared_permission_requests(path: str | Path | None = None) -> list[JsonObjec
     return [
         item
         for request_id, item in raw_requests.items()
-        if isinstance(item, dict) and is_permission_request(str(item.get("method") or ""))
+        if isinstance(item, dict)
+        and is_permission_request(str(item.get("method") or ""))
         and request_id not in raw_decisions
     ]
 
@@ -140,12 +141,17 @@ def read_permission_store(path: str | Path | None = None) -> JsonObject:
 
 def write_permission_store(path: str | Path | None, store: JsonObject) -> None:
     store_path = Path(path or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE") or DEFAULT_APPROVAL_REQUESTS_FILE)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Approval payloads can contain commands, paths, and redacted input
+    # context. Do not depend on the host's umask to keep that metadata private.
+    os.chmod(store_path.parent, 0o700)
     payload = json.dumps(
         {"requests": as_object(store.get("requests")), "decisions": as_object(store.get("decisions"))},
         indent=2,
     )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=store_path.parent, delete=False) as tmp:
+        os.chmod(tmp.name, 0o600)
         tmp.write(payload + "\n")
         tmp_name = tmp.name
     os.replace(tmp_name, store_path)
+    os.chmod(store_path, 0o600)

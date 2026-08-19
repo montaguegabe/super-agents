@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from super_agents.agent_store import Session, Store, Turn, iso_now
+from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import (
     DEFAULT_ACTIVE_AGENTS_LIMIT,
@@ -59,6 +60,7 @@ from super_agents.claude_options import (
 from super_agents.claude_options import (
     openbase_cloud_claude_model as _openbase_cloud_claude_model,
 )
+from super_agents.claude_permissions import CLAUDE_APPROVAL_METHOD, can_use_tool_handler
 from super_agents.claude_orphans import OrphanReconciliationMixin
 from super_agents.claude_prompts import (
     combine_developer_instructions as _combine_developer_instructions,
@@ -100,7 +102,14 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     backend = "claude_code"
 
-    def __init__(self, store: Store | None = None, sdk_loader: SdkLoader | None = None) -> None:
+    def __init__(
+        self,
+        store: Store | None = None,
+        sdk_loader: SdkLoader | None = None,
+        *,
+        approval_requests_file: str | Path | None = None,
+        approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+    ) -> None:
         self.store = store or Store()
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
@@ -122,6 +131,12 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # stale (see _sdk_client_for).
         self._instance_id = f"ci_{uuid.uuid4().hex}"
         self._closed = False
+        self._permission_gate = ToolApprovalGate(
+            backend=self.backend,
+            request_method=CLAUDE_APPROVAL_METHOD,
+            requests_file=approval_requests_file or self.store.path.with_name("approval-requests.json"),
+            timeout_seconds=approval_timeout_seconds,
+        )
 
     async def status(self) -> JsonObject:
         self._reconcile_orphaned_turns_once()
@@ -135,8 +150,10 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 "sdkPackage": "claude-agent-sdk",
                 "sdkError": error,
                 "dataStore": str(self.store.path),
-                "pendingRequests": [],
-                "pendingPermissionRequests": [],
+                "pendingRequests": [request.to_json() for request in self._permission_gate.pending_requests()],
+                "pendingPermissionRequests": [
+                    request.to_json() for request in self._permission_gate.pending_requests()
+                ],
                 "queuedTurns": [turn.to_json() for session in sessions for turn in self.store.queued_turns(session.id)],
                 "activeTurns": [self._status_item(session) for session in sessions if is_active_status(session.status)],
             }
@@ -265,7 +282,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         }
 
     async def answer_request(self, request_id: str | int, result: JsonObject) -> JsonObject:
-        return self._unsupported("codex_answer_request", requestId=request_id, result=result)
+        decision = decision_from_answer(result)
+        if decision is None:
+            raise ValueError(f"Unsupported approval answer for request {request_id}.")
+        request = self._permission_gate.resolve(request_id, decision)
+        if request is None:
+            raise ValueError(f"No pending permission request found for id {request_id}.")
+        return {"answered": True, "backend": self.backend, "request": request.to_json()}
+
+    def pending_permission_requests(self) -> list[Any]:
+        return self._permission_gate.pending_requests()
 
     async def sessions(self) -> list[JsonObject]:
         self._reconcile_orphaned_turns_once()
@@ -352,6 +378,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         session = self._resolve_session(input_data)
+        self._permission_gate.cancel_scope(thread_id=session.id, turn_id=session.active_turn_id)
         sdk_client = self._sdk_clients.get(session.id)
         if sdk_client and hasattr(sdk_client, "interrupt"):
             await sdk_client.interrupt()
@@ -678,6 +705,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         last_observed_state=str(exc),
                     )
             finally:
+                self._permission_gate.cancel_scope(thread_id=session_id, turn_id=turn_id)
                 if self._closed:
                     await self._disconnect_sdk_client(session_id)
                 self._schedule_queue_drain(session_id)
@@ -845,6 +873,12 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             model,
             effective_effort,
             resume=session.backend_session_id,
+            can_use_tool=can_use_tool_handler(
+                sdk,
+                self._permission_gate,
+                session.id,
+                lambda session_id=session.id: self._active_turn_id(session_id),
+            ),
         )
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
@@ -897,6 +931,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         mid-answer here.
         """
         self._closed = True
+        self._permission_gate.cancel_scope()
         queue_tasks = list(self._queue_tasks.values())
         for task in queue_tasks:
             task.cancel()
@@ -993,6 +1028,12 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     def _session_is_busy(self, session: Session) -> bool:
         return bool(session.active_turn_id or session.status == "running")
+
+    def _active_turn_id(self, session_id: str) -> str | None:
+        try:
+            return self.store.get_session(session_id).active_turn_id
+        except KeyError:
+            return None
 
     def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
         prompt = str(turn_input["prompt"])
