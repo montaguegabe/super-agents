@@ -15,6 +15,7 @@ DEFAULT_ROUTINE_INTERVAL_SECONDS = 60
 MIN_ROUTINE_INTERVAL_SECONDS = 5
 ACTIVE_ROUTINE_STATUSES = {"starting", "started", "queued"}
 DEFAULT_ROUTINE_COMMAND_TIMEOUT_SECONDS = 300
+DEFAULT_ROUTINE_STALE_SECONDS = 4 * 60 * 60
 
 
 def routine_from_patch(value: JsonObject) -> RoutineRecord:
@@ -102,6 +103,25 @@ def routine_is_due(routine: RoutineRecord) -> bool:
 
 def routine_has_active_run(routine: RoutineRecord) -> bool:
     return routine.last_status in ACTIVE_ROUTINE_STATUSES
+
+
+def routine_stale_seconds() -> int:
+    raw = os.environ.get("SUPER_AGENTS_ROUTINE_STALE_SECONDS")
+    try:
+        value = int(raw) if raw else DEFAULT_ROUTINE_STALE_SECONDS
+    except ValueError:
+        return DEFAULT_ROUTINE_STALE_SECONDS
+    return max(60, value)
+
+
+def routine_active_run_is_stale(routine: RoutineRecord) -> bool:
+    if not routine_has_active_run(routine):
+        return False
+    started_ms = parse_iso_ms(routine.last_started_at)
+    if started_ms <= 0:
+        return True
+    now_ms = parse_iso_ms(iso_now())
+    return now_ms - started_ms >= routine_stale_seconds() * 1000
 
 
 def routine_local_date(routine: RoutineRecord) -> str:

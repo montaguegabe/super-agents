@@ -6,24 +6,31 @@ import os
 
 from .app_formatting import without_none
 from .app_models import LabelQueryInput
-from .app_protocol import extract_thread_id
+from .app_protocol import extract_thread_id, is_active_status
 from .app_routines import (
     DEFAULT_ROUTINE_TIMEZONE,
-    routine_from_patch,
+    parse_routine_command_timeout_seconds,
+    routine_active_run_is_stale,
     routine_fresh_thread_name,
+    routine_from_patch,
     routine_has_active_run,
     routine_is_due,
     routine_local_date,
     routine_next_run_sort_key,
     routine_next_run_summary,
-    parse_routine_command_timeout_seconds,
     routine_turn_input,
     routine_with_next_run,
 )
-from .app_time import iso_now
-from .app_protocol import is_active_status
-from .app_time import turn_key
-from .state import JsonObject, RoutineRecord, StateFile, get_string, read_state_file, update_state_file, write_state_file
+from .app_time import iso_now, turn_key
+from .state import (
+    JsonObject,
+    RoutineRecord,
+    StateFile,
+    get_string,
+    read_state_file,
+    update_state_file,
+    write_state_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +112,7 @@ class RoutineClientMixin:
         }
 
     async def run_due_routines(self, name: str | None = None, force: bool = False) -> JsonObject:
+        await self.reconcile_routine_terminal_statuses()
         candidates = await self.reserve_due_routines(name=name, force=force)
         results = []
         for routine in sorted(candidates, key=lambda item: item.name):
@@ -296,17 +304,9 @@ class RoutineClientMixin:
             now = iso_now()
             changed = False
             for routine in state.routines.values():
-                if routine.last_status not in {"starting", "started", "queued"}:
+                if not routine_has_active_run(routine):
                     continue
-                if not routine.last_thread_id or not routine.last_turn_id:
-                    continue
-                session = state.sessions.get(routine.last_thread_id)
-                if session is None:
-                    continue
-                turn = (session.turns or {}).get(routine.last_turn_id)
-                status = turn.status if turn else None
-                if status is None and session.last_turn_id == routine.last_turn_id:
-                    status = session.last_status
+                status = self._resolved_routine_turn_status(state, routine)
                 if status in {"completed", "failed", "cancelled"}:
                     patch: JsonObject = {
                         **routine.to_json(),
@@ -317,8 +317,41 @@ class RoutineClientMixin:
                         patch["lastError"] = f"Routine turn became {status}."
                     state.routines[routine.name] = routine_from_patch(patch)
                     changed = True
+                elif routine_active_run_is_stale(routine):
+                    state.routines[routine.name] = routine_from_patch(
+                        {
+                            **routine.to_json(),
+                            "lastStatus": "stale",
+                            "lastError": (
+                                f"Routine run stuck in {routine.last_status} since "
+                                f"{routine.last_started_at or 'an unknown time'} with no resolvable turn status; "
+                                "marked stale so the routine can run again."
+                            ),
+                            "updatedAt": now,
+                        }
+                    )
+                    logger.warning(
+                        "routine_reconcile marked_stale name=%s lastStartedAt=%s previousStatus=%s",
+                        routine.name,
+                        routine.last_started_at,
+                        routine.last_status,
+                    )
+                    changed = True
             if changed:
                 write_state_file(self.state_file, state)
+
+    def _resolved_routine_turn_status(self, state: StateFile, routine: RoutineRecord) -> str | None:
+        if not routine.last_thread_id or not routine.last_turn_id:
+            return None
+        session = state.sessions.get(routine.last_thread_id)
+        if session is None:
+            return None
+        turn = (session.turns or {}).get(routine.last_turn_id)
+        if turn is not None:
+            return turn.status
+        if session.last_turn_id == routine.last_turn_id:
+            return session.last_status
+        return None
 
     async def record_routine_run(self, name: str, patch: JsonObject) -> None:
         async with self._state_lock:

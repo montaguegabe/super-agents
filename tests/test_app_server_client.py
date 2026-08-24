@@ -2509,6 +2509,88 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_stuck_routine_is_marked_stale_and_runs_again(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-recovered"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "stuck-daily",
+                "prompt": "Write the daily report.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+                "cwd": "/tmp/routine",
+                "lastRunDate": "2020-01-01",
+                "lastStartedAt": "2020-01-01T00:00:00.000Z",
+                "lastStatus": "started",
+                "lastThreadId": "thread-gone",
+                "lastTurnId": "turn-gone",
+            }
+        )
+
+        listed = await client.list_routines()
+        routine = listed["routines"][0]
+        assert routine["lastStatus"] == "stale"
+        assert "stale" in routine["lastError"]
+
+        result = await client.run_due_routines()
+        assert result["count"] == 1
+        assert result["results"][0]["turnId"] == "turn-recovered"
+
+        stored = await client.read_routine("stuck-daily")
+        assert stored["routine"]["lastStatus"] == "started"
+        assert stored["routine"]["lastTurnId"] == "turn-recovered"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_active_routine_run_is_not_marked_stale(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.save_routine(
+            {
+                "name": "running-daily",
+                "prompt": "Write the daily report.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+                "cwd": "/tmp/routine",
+                "lastRunDate": "2020-01-01",
+                "lastStartedAt": iso_now(),
+                "lastStatus": "started",
+                "lastThreadId": "thread-gone",
+                "lastTurnId": "turn-gone",
+            }
+        )
+
+        listed = await client.list_routines()
+        assert listed["routines"][0]["lastStatus"] == "started"
+
+        result = await client.run_due_routines()
+        assert result["count"] == 0
+        assert not any(message.get("method") == "turn/start" for message in captured)
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_command_routine_runs_local_command_without_app_server(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
@@ -2839,6 +2921,7 @@ async def test_interval_routine_does_not_overlap_active_run(tmp_path: Path) -> N
                 "intervalSeconds": 60,
                 "threadId": "thread-routine",
                 "lastRunAt": "2000-01-01T00:00:00.000Z",
+                "lastStartedAt": iso_now(),
                 "lastStatus": "started",
             }
         )
