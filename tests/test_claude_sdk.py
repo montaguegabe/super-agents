@@ -116,7 +116,13 @@ def reset_fake_claude_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     )
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("SUPER_AGENTS_BASE_INSTRUCTIONS_PATH", raising=False)
     monkeypatch.delenv("SUPER_AGENTS_CLAUDE_EXTRA_ARGS", raising=False)
+    # Keep unit tests off the developer's real ~/.claude.json.
+    monkeypatch.setattr(
+        "super_agents.claude_options.claude_state_path",
+        lambda: tmp_path / "isolated-claude-state.json",
+    )
     monkeypatch.delenv("OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("OPENBASE_CLOUD_ANTHROPIC_BASE_URL", raising=False)
     FakeClaudeSDKClient.prompts = []
@@ -151,6 +157,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "high",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -234,6 +241,7 @@ async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "low",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -263,6 +271,7 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "xhigh",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -288,6 +297,7 @@ async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "low",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -315,6 +325,7 @@ async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "high",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -340,6 +351,7 @@ async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "xhigh",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -533,10 +545,8 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
     FakeClaudeSDKClient.options_seen = []
     config_dir = tmp_path / "claude_config"
     config_dir.mkdir()
-    settings_path = config_dir / "settings.json"
     config_path = config_dir / ".claude.json"
-    instructions_path = config_dir / "CLAUDE.md"
-    settings_path.write_text('{"model": "sonnet"}\n', encoding="utf-8")
+    instructions_path = tmp_path / "OPENBASE_AGENTS.md"
     mcp_servers = {
         "super-agents": {
             "type": "stdio",
@@ -550,6 +560,11 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
     config_path.write_text(json.dumps({"mcpServers": mcp_servers}) + "\n", encoding="utf-8")
     instructions_path.write_text("Openbase instructions\n", encoding="utf-8")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("SUPER_AGENTS_BASE_INSTRUCTIONS_PATH", str(instructions_path))
+    monkeypatch.setattr(
+        "super_agents.claude_options.claude_state_path",
+        lambda: config_path,
+    )
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
 
@@ -563,7 +578,6 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
         "permission_mode": "bypassPermissions",
         "effort": "high",
         "env": {"CLAUDE_CONFIG_DIR": str(config_dir), "ANTHROPIC_API_KEY": ""},
-        "settings": str(settings_path),
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "file", "path": str(instructions_path)},
         "mcp_servers": mcp_servers,
@@ -739,6 +753,7 @@ async def test_claude_sdk_steer_by_label_uses_native_active_turn_steering(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "high",
         "env": {"ANTHROPIC_API_KEY": ""},
     }
@@ -820,6 +835,7 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
+        "setting_sources": ["user", "project"],
         "effort": "low",
         "env": {"ANTHROPIC_API_KEY": ""},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from .app_formatting import as_object
 from .app_time import age_ms, turn_recency
 from .defaults import default_super_agents_reasoning_effort
 from .state import JsonObject, StoredStatus, TrackedStatus, get_string
+
+# Optional file of base developer instructions prepended to every Codex
+# thread's developer instructions (and used as the Claude session system
+# prompt). Lets an embedding product apply its own standing instructions per
+# session without writing into the shared agent homes.
+BASE_INSTRUCTIONS_PATH_ENV = "SUPER_AGENTS_BASE_INSTRUCTIONS_PATH"
 
 SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent thread name:"
 LEGACY_SUPER_AGENT_IDENTITY_INSTRUCTION_PREFIX = "Super Agent name:"
@@ -19,6 +27,29 @@ def collaboration_mode(
     settings: JsonObject = {"model": model, "developer_instructions": developer_instructions}
     settings["reasoning_effort"] = reasoning_effort or "high"
     return {"mode": mode, "settings": settings}
+
+
+def base_instructions_text() -> str | None:
+    configured = os.environ.get(BASE_INSTRUCTIONS_PATH_ENV, "").strip()
+    if not configured:
+        return None
+    try:
+        text = Path(configured).expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return text.strip() or None
+
+
+def with_base_instructions(developer_instructions: str | None) -> str | None:
+    """Prepend the configured base instructions once (idempotent)."""
+    base = base_instructions_text()
+    if not base:
+        return developer_instructions
+    if not developer_instructions:
+        return base
+    if base in developer_instructions:
+        return developer_instructions
+    return f"{base}\n\n{developer_instructions}"
 
 
 def with_super_agent_identity_instructions(

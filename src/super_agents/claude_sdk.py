@@ -45,11 +45,9 @@ from super_agents.claude_logs import (
 from super_agents.claude_options import (  # noqa: F401  (constants re-exported for compatibility)
     CLAUDE_CONFIG_DIR_ENV,
     CLAUDE_CONFIG_FILENAME,
-    CLAUDE_INSTRUCTIONS_FILENAME,
     CLAUDE_PERMISSION_MODE,
     CLAUDE_SDK_ENV_OVERRIDES,
     CLAUDE_SERVICE_TIER_EFFORTS,
-    CLAUDE_SETTINGS_FILENAME,
 )
 from super_agents.claude_options import (
     agent_options as _agent_options,

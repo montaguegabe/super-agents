@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from .app_models import PendingServerRequest, PermissionRequestCallback
 from .app_permissions import (
     clear_shared_permission_request,
@@ -8,6 +10,13 @@ from .app_permissions import (
 )
 from .backend_config import normalize_backend
 from .state import JsonObject
+
+# Default per-thread permission posture applied when the caller does not pass
+# explicit overrides. Lets an embedding product run its sessions with a
+# specific approval/sandbox posture without writing it into the shared
+# ~/.codex config (which would also govern the user's own sessions).
+CODEX_APPROVAL_POLICY_ENV = "SUPER_AGENTS_CODEX_APPROVAL_POLICY"
+CODEX_SANDBOX_POLICY_ENV = "SUPER_AGENTS_CODEX_SANDBOX_POLICY"
 
 
 class PermissionClientMixin:
@@ -31,10 +40,15 @@ class PermissionClientMixin:
 
     def permission_overrides(self, input_data: JsonObject) -> JsonObject:
         result: JsonObject = {}
-        approval_policy = input_data.get("approvalPolicy")
+        approval_policy = input_data.get("approvalPolicy") or os.environ.get(CODEX_APPROVAL_POLICY_ENV, "").strip()
         if isinstance(approval_policy, str) and approval_policy:
             result["approvalPolicy"] = approval_policy
-        sandbox_policy = input_data.get("sandboxPolicy") or input_data.get("sandbox")
+        sandbox_policy = (
+            input_data.get("sandboxPolicy")
+            or input_data.get("sandbox")
+            or os.environ.get(CODEX_SANDBOX_POLICY_ENV, "").strip()
+            or None
+        )
         sandbox_type = input_data.get("sandboxType")
         if not sandbox_policy and sandbox_type == "dangerFullAccess":
             sandbox_policy = {"type": "dangerFullAccess"}

@@ -434,18 +434,21 @@ def test_super_agent_instructions_default_to_configured_path(monkeypatch, tmp_pa
     assert queue_input["developerInstructions"] == "The random animal is raccoon.\n"
 
 
-def test_super_agent_instructions_default_to_codex_home(monkeypatch, tmp_path: Path) -> None:
+def test_super_agent_instructions_ignore_codex_home(monkeypatch, tmp_path: Path) -> None:
+    """The shared ~/.codex is the user's own home; Openbase super agent
+    instructions resolve from the env path or ~/.openbase, never from
+    CODEX_HOME."""
     codex_home = tmp_path / "codex_home"
     codex_home.mkdir()
-    instructions_path = codex_home / "SUPER_AGENT_INSTRUCTIONS.md"
-    instructions_path.write_text("Use the Super Agent instructions.\n", encoding="utf-8")
+    (codex_home / "SUPER_AGENT_INSTRUCTIONS.md").write_text(
+        "Use the Super Agent instructions.\n", encoding="utf-8"
+    )
     monkeypatch.delenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
-    cleaned = clean_thread_input({"name": "new-agent"})
-
-    assert default_super_agent_instructions_path() == instructions_path
-    assert cleaned["developerInstructions"] == "Use the Super Agent instructions.\n"
+    assert default_super_agent_instructions_path() == (
+        Path.home() / ".openbase" / "instructions" / "SUPER_AGENT_INSTRUCTIONS.md"
+    )
 
 
 def test_explicit_developer_instructions_extend_super_agent_default(monkeypatch, tmp_path: Path) -> None:
@@ -3227,3 +3230,39 @@ async def test_terminal_notification_signals_turn_update(tmp_path: Path) -> None
         )
     finally:
         await client.close()
+
+
+def test_permission_overrides_default_from_environment(monkeypatch) -> None:
+    from super_agents.app_server_client import CodexAppServerClient
+
+    client = CodexAppServerClient.__new__(CodexAppServerClient)
+    monkeypatch.setenv("SUPER_AGENTS_CODEX_APPROVAL_POLICY", "never")
+    monkeypatch.setenv("SUPER_AGENTS_CODEX_SANDBOX_POLICY", "danger-full-access")
+
+    defaults = client.permission_overrides({})
+    explicit = client.permission_overrides(
+        {"approvalPolicy": "on-request", "sandboxPolicy": "workspace-write"}
+    )
+
+    assert defaults == {
+        "approvalPolicy": "never",
+        "sandboxPolicy": {"type": "dangerFullAccess"},
+    }
+    assert explicit == {
+        "approvalPolicy": "on-request",
+        "sandboxPolicy": {"type": "workspaceWrite"},
+    }
+
+
+def test_base_instructions_prepended_once(monkeypatch, tmp_path: Path) -> None:
+    from super_agents.app_protocol import with_base_instructions
+
+    instructions = tmp_path / "AGENTS.md"
+    instructions.write_text("Base instructions.\n", encoding="utf-8")
+    monkeypatch.setenv("SUPER_AGENTS_BASE_INSTRUCTIONS_PATH", str(instructions))
+
+    combined = with_base_instructions("Task-specific instructions.")
+
+    assert combined == "Base instructions.\n\nTask-specific instructions."
+    assert with_base_instructions(combined) == combined
+    assert with_base_instructions(None) == "Base instructions."

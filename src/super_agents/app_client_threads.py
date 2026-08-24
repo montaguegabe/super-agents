@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .app_formatting import turn_text_preview, without_none
 from .app_protocol import (
+    with_base_instructions,
     extract_model,
     extract_thread_cwd,
     extract_thread_id,
@@ -43,7 +44,7 @@ class ThreadLifecycleMixin:
             **self.permission_overrides(input_data),
         }
         if developer_instructions := with_super_agent_identity_instructions(
-            get_string(input_data, "developerInstructions"),
+            with_base_instructions(get_string(input_data, "developerInstructions")),
             name,
             agent_name=agent_name,
         ):
@@ -109,7 +110,7 @@ class ThreadLifecycleMixin:
             "config": await self._login_shell_config_override(),
         }
         if identity_instructions := with_super_agent_identity_instructions(
-            developer_instructions,
+            with_base_instructions(developer_instructions),
             label,
             thread_id,
             agent_name,

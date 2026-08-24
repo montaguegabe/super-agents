@@ -791,8 +791,6 @@ def default_super_agent_instructions() -> str | None:
 def default_super_agent_instructions_path() -> Path:
     if configured := os.environ.get("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH"):
         return Path(configured).expanduser()
-    if codex_home := os.environ.get("CODEX_HOME"):
-        return Path(codex_home).expanduser() / SUPER_AGENT_INSTRUCTIONS_FILENAME
     return Path.home() / ".openbase" / "instructions" / SUPER_AGENT_INSTRUCTIONS_FILENAME
 
 

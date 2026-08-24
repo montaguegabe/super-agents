@@ -14,6 +14,7 @@ from .app_formatting import (
 )
 from .app_models import LabelQueryInput, Mode, TurnState
 from .app_protocol import (
+    with_base_instructions,
     collaboration_mode,
     effective_reasoning_effort,
     extract_turn_id,
@@ -81,7 +82,9 @@ class TurnLifecycleMixin:
             session.agent_name if session and session.agent_name else "",
         )
         developer_instructions = with_super_agent_identity_instructions(
-            input_data.get("developerInstructions") if "developerInstructions" in input_data else None,
+            with_base_instructions(
+                input_data.get("developerInstructions") if "developerInstructions" in input_data else None
+            ),
             label,
             thread_id,
             agent_name,

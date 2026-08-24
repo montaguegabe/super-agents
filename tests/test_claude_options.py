@@ -140,3 +140,24 @@ def test_openbase_cloud_anthropic_base_url_strips_v1(monkeypatch) -> None:
     options = agent_options(_FAKE_SDK, "/tmp", None, None, resume=None)
 
     assert options.kwargs["env"]["ANTHROPIC_BASE_URL"] == "https://example.test/api/openbase/llm/anthropic"
+
+
+def test_base_instructions_env_sets_system_prompt(monkeypatch, tmp_path) -> None:
+    instructions = tmp_path / "AGENTS.md"
+    instructions.write_text("Base instructions.\n", encoding="utf-8")
+    monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude_code")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("SUPER_AGENTS_BASE_INSTRUCTIONS_PATH", str(instructions))
+    monkeypatch.setattr(
+        "super_agents.claude_options.claude_state_path",
+        lambda: tmp_path / "no-state.json",
+    )
+
+    options = agent_options(_FAKE_SDK, "/tmp", None, None, resume=None)
+
+    assert options.kwargs["system_prompt"] == {
+        "type": "file",
+        "path": str(instructions),
+    }
+    assert options.kwargs["setting_sources"] == ["user", "project"]
+    assert "settings" not in options.kwargs

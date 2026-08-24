@@ -19,8 +19,6 @@ CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 # --chrome. Values map to flag arguments; null means a bare flag.
 CLAUDE_EXTRA_ARGS_ENV = "SUPER_AGENTS_CLAUDE_EXTRA_ARGS"
 CLAUDE_CONFIG_FILENAME = ".claude.json"
-CLAUDE_SETTINGS_FILENAME = "settings.json"
-CLAUDE_INSTRUCTIONS_FILENAME = "CLAUDE.md"
 CLAUDE_SERVICE_TIER_EFFORTS = {
     "fast": "low",
     "standard": "high",
@@ -174,40 +172,55 @@ def claude_effort(reasoning_effort: str | None, service_tier: str | None) -> str
 
 def managed_claude_config_options() -> JsonObject:
     config_dir_value = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
-    if not config_dir_value:
-        return {}
 
-    config_dir = Path(config_dir_value).expanduser()
     options: JsonObject = {
-        "env": {CLAUDE_CONFIG_DIR_ENV: str(config_dir)},
-        # "user" scope resolves against CLAUDE_CONFIG_DIR (exported in "env"
-        # above), not the host's ~/.claude, so including it loads the managed
-        # config dir's skills/ and agents/ without leaking the host's personal
-        # settings into the session. Omitting "user" silently hides everything
-        # installed under CLAUDE_CONFIG_DIR that is user-scoped.
+        # "user" scope resolves against CLAUDE_CONFIG_DIR when set (exported
+        # below), otherwise the shared ~/.claude — loading that home's
+        # skills/, agents/, CLAUDE.md, and settings into the session.
+        # Omitting "user" silently hides everything user-scoped.
         "setting_sources": ["user", "project"],
     }
+    if config_dir_value:
+        config_dir = Path(config_dir_value).expanduser()
+        options["env"] = {CLAUDE_CONFIG_DIR_ENV: str(config_dir)}
 
-    settings_path = config_dir / CLAUDE_SETTINGS_FILENAME
-    if settings_path.exists():
-        options["settings"] = str(settings_path)
-
-    instructions_path = config_dir / CLAUDE_INSTRUCTIONS_FILENAME
-    if instructions_path.exists():
+    if system_prompt_path := _base_instructions_file():
         options["system_prompt"] = {
             "type": "file",
-            "path": str(instructions_path),
+            "path": str(system_prompt_path),
         }
 
-    mcp_servers = _managed_claude_mcp_servers(config_dir)
+    mcp_servers = _claude_mcp_servers(claude_state_path())
     if mcp_servers:
         options["mcp_servers"] = mcp_servers
 
     return options
 
 
-def _managed_claude_mcp_servers(config_dir: Path) -> JsonObject | None:
-    config_path = config_dir / CLAUDE_CONFIG_FILENAME
+def claude_state_path() -> Path:
+    """The Claude Code state file sessions read (mcpServers etc.).
+
+    With CLAUDE_CONFIG_DIR set the CLI reads ``$CLAUDE_CONFIG_DIR/.claude.json``;
+    otherwise the default state file is ``~/.claude.json`` (not inside
+    ``~/.claude``).
+    """
+    config_dir_value = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
+    if config_dir_value:
+        return Path(config_dir_value).expanduser() / CLAUDE_CONFIG_FILENAME
+    return Path.home() / CLAUDE_CONFIG_FILENAME
+
+
+def _base_instructions_file() -> Path | None:
+    from .app_protocol import BASE_INSTRUCTIONS_PATH_ENV
+
+    configured = os.environ.get(BASE_INSTRUCTIONS_PATH_ENV, "").strip()
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    return path if path.is_file() else None
+
+
+def _claude_mcp_servers(config_path: Path) -> JsonObject | None:
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
