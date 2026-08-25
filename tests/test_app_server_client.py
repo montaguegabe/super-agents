@@ -2557,6 +2557,50 @@ async def test_stuck_routine_is_marked_stale_and_runs_again(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_stale_daily_routine_retries_same_day(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-same-day-retry"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        from super_agents.app_routines import routine_local_date, routine_from_patch
+
+        today = routine_local_date(
+            routine_from_patch({"name": "probe", "timezone": "UTC"})
+        )
+        await client.save_routine(
+            {
+                "name": "killed-today",
+                "prompt": "Write the daily report.",
+                "time": "00:00",
+                "timezone": "UTC",
+                "threadId": "thread-routine",
+                "cwd": "/tmp/routine",
+                "lastRunDate": today,
+                "lastStartedAt": "2020-01-01T00:00:00.000Z",
+                "lastStatus": "started",
+                "lastThreadId": "thread-gone",
+                "lastTurnId": "turn-gone",
+            }
+        )
+
+        result = await client.run_due_routines()
+        assert result["count"] == 1
+        assert result["results"][0]["turnId"] == "turn-same-day-retry"
+
+        second = await client.run_due_routines()
+        assert second["count"] == 0
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_fresh_active_routine_run_is_not_marked_stale(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 

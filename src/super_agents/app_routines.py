@@ -96,7 +96,9 @@ def routine_is_due(routine: RoutineRecord) -> bool:
     except ValueError:
         return False
     run_key = now.date().isoformat()
-    if routine.last_run_date == run_key:
+    if routine.last_run_date == run_key and routine.last_status != "stale":
+        # A run healed to "stale" (crashed or lost mid-flight) may retry the
+        # same day; anything else ran today and stays at-most-once-per-day.
         return False
     return (now.hour, now.minute) >= (hour, minute)
 
