@@ -422,3 +422,21 @@ async def test_claude_model_routes_new_thread_to_claude_backend(
     assert explicit["backend"] == "openbase_cloud"
     assert gpt["backend"] == "codex"
     assert unknown["backend"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_cross_family_model_on_existing_thread_fails_actionably(
+    tmp_path: Path,
+    clients: dict[str, FakeBackendClient],
+) -> None:
+    """A follow-up turn asking for "fable" on a codex-owned thread must raise a
+    clear error instead of sending Codex a model it 400s on."""
+    client = make_client(tmp_path, clients, default="codex")
+    started = await client.start_thread({"name": "game", "model": "gpt-5.5"})
+    assert started["backend"] == "codex"
+
+    with pytest.raises(BackendResolutionError, match="NEW thread"):
+        await client.start_turn_by_label(
+            LabelQueryInput(thread_id=started["threadId"]),
+            {"prompt": "again", "model": "fable"},
+        )

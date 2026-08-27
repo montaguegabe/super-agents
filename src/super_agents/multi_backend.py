@@ -444,6 +444,15 @@ class MultiBackendClient:
         }
 
     def _turn_input_for(self, identity: str, turn_input: JsonObject) -> JsonObject:
+        requested = turn_input.get("model")
+        family = execution_backend_for_model(requested if isinstance(requested, str) else None)
+        if family is not None and family != execution_backend(identity):
+            raise BackendResolutionError(
+                f"Model {requested!r} runs on the {family} backend, but this thread "
+                f"lives on the {identity} backend, which cannot execute it. "
+                "Start a NEW thread (super_agents_start) with this model instead, "
+                "or drop the model to continue this thread on its own backend."
+            )
         if identity == self._default_backend:
             return turn_input
         model = turn_input.get("model")
