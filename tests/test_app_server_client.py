@@ -208,7 +208,7 @@ def test_turn_input_preserves_explicit_approval_and_sandbox(monkeypatch, tmp_pat
     cleaned = clean_turn_input(
         {
             "threadId": "thread-1",
-            "prompt": 'Wait, then run /Users/gabemontague/.local/bin/openbase-coder user say Dottie "Done".',
+            "prompt": 'Wait, then run /usr/local/bin/openbase-coder user say Dottie "Done".',
             "approvalPolicy": "never",
             "sandboxType": "dangerFullAccess",
         }
