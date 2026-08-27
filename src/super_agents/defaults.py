@@ -17,6 +17,7 @@ from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     configured_backend_from_environment,
     execution_backend,
     normalize_backend,
+    CLAUDE_MODEL_ALIASES,
 )
 
 JsonObject = dict[str, Any]
@@ -24,7 +25,6 @@ JsonObject = dict[str, Any]
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
 DEFAULT_CODEX_SERVICE_TIER = "standard"
-CLAUDE_MODEL_ALIASES = {"fable", "opus", "sonnet", "haiku"}
 DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "claude-sonnet-5"
 
 logger = logging.getLogger(__name__)

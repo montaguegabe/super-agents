@@ -11,6 +11,7 @@ from .backend_config import (
     CODEX_BACKEND,
     default_backend_from_environment,
     execution_backend,
+    execution_backend_for_model,
     normalize_backend,
 )
 from .backend_provenance import BackendProvenanceStore
@@ -115,9 +116,23 @@ class MultiBackendClient:
 
     async def start_thread(self, input_data: JsonObject) -> JsonObject:
         data = dict(input_data)
-        identity = self.resolve_backend(_optional_string(data.pop("backend", None)))
+        explicit_backend = _optional_string(data.pop("backend", None))
+        identity = self.resolve_backend(explicit_backend)
+        if explicit_backend is None:
+            # An explicit model names the runtime the caller wants: "fable"
+            # must not be handed to Codex just because Codex is the default.
+            identity = self._backend_for_model(_optional_string(data.get("model")), identity)
         result = await self.client_for(identity).start_thread(data)
         return self._remember_result(identity, result)
+
+    def _backend_for_model(self, model: str | None, fallback: str) -> str:
+        family = execution_backend_for_model(model)
+        if family is None or execution_backend(fallback) == family:
+            return fallback
+        for identity in self.engaged_backends():
+            if execution_backend(identity) == family:
+                return identity
+        return family
 
     async def resume_by_label(
         self,

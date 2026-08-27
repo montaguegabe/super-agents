@@ -54,6 +54,27 @@ def execution_backend(backend: str) -> str:
     return backend
 
 
+CLAUDE_MODEL_ALIASES = {"fable", "opus", "sonnet", "haiku"}
+_CODEX_MODEL_PREFIXES = ("gpt", "o1", "o3", "o4", "codex")
+
+
+def execution_backend_for_model(model: str | None) -> str | None:
+    """Which execution backend a model id/alias belongs to, or None if unknown.
+
+    Lets thread creation honor an explicit model choice (e.g. the dispatcher
+    asked for "fable") by routing to a backend that can actually run it,
+    instead of handing a Claude model to Codex and failing the turn.
+    """
+    if not model:
+        return None
+    normalized = model.strip().lower()
+    if normalized in CLAUDE_MODEL_ALIASES or normalized.startswith("claude"):
+        return CLAUDE_CODE_BACKEND
+    if normalized.startswith(_CODEX_MODEL_PREFIXES):
+        return CODEX_BACKEND
+    return None
+
+
 def configured_backend_from_environment() -> str:
     env_values = read_env_values(DEFAULT_ENV_FILE)
     return normalize_backend(os.environ.get(CODING_BACKEND_ENV_KEY) or env_values.get(CODING_BACKEND_ENV_KEY))

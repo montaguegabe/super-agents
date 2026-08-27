@@ -399,3 +399,26 @@ def test_same_codex_endpoint_is_rejected_but_distinct_endpoints_are_supported(
 
     assert second.client_for("codex").ws_url == "ws://127.0.0.1:4500"
     assert second.client_for("openbase_cloud_codex").ws_url == "ws://127.0.0.1:4600"
+
+
+@pytest.mark.asyncio
+async def test_claude_model_routes_new_thread_to_claude_backend(
+    tmp_path: Path,
+    clients: dict[str, FakeBackendClient],
+) -> None:
+    """The dispatcher incident: model "fable" with codex as the default backend
+    must start on the claude backend, not fail with Codex's invalid-model 400."""
+    client = make_client(tmp_path, clients, default="codex")
+
+    fable = await client.start_thread({"name": "fable-task", "model": "fable"})
+    explicit = await client.start_thread(
+        {"name": "cloud-fable", "model": "fable", "backend": "openbase_cloud"}
+    )
+    gpt = await client.start_thread({"name": "gpt-task", "model": "gpt-5.5"})
+    unknown = await client.start_thread({"name": "mystery", "model": "custom-model"})
+
+    assert fable["backend"] == "claude_code"
+    # An explicit backend always wins over model inference.
+    assert explicit["backend"] == "openbase_cloud"
+    assert gpt["backend"] == "codex"
+    assert unknown["backend"] == "codex"
