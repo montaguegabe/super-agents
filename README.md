@@ -45,7 +45,10 @@ python -m pip install super-agents
   [`codex app-server`](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
 - An MCP-compatible client such as Codex, Claude Desktop, or Openbase Coder
 
-By default, Super Agents connects to Codex at `ws://127.0.0.1:4500`.
+On macOS and Linux, Super Agents defaults to Codex's standard Unix control
+socket at `$CODEX_HOME/app-server-control/app-server-control.sock`. Windows
+retains the loopback WebSocket default until Codex provides an equivalent
+local daemon transport there.
 
 ## MCP Server
 
@@ -78,11 +81,11 @@ uv --directory /path/to/super-agents run super-agents-mcp
 
 Super Agents talks to the
 [Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
-over a websocket. Start Codex with a local websocket listener before using the
-MCP tools:
+over WebSocket frames. On Unix, start Codex on its standard Unix control socket
+before using the MCP tools:
 
 ```bash
-codex app-server --listen ws://127.0.0.1:4500
+codex app-server --listen unix://
 ```
 
 Openbase Coder users usually do not need to run this by hand; the
@@ -92,7 +95,7 @@ Openbase Coder users usually do not need to run this by hand; the
 
 Super Agents supports four configured backend identities:
 
-- `codex`: native Codex app-server over websocket.
+- `codex`: native Codex app-server over a Unix socket or TCP WebSocket.
 - `openbase_cloud`: Claude Code sessions through the Openbase Cloud Anthropic proxy.
 - `claude_code`: Claude Code sessions using local Claude auth/billing.
 - `openbase_cloud_codex`: Codex-compatible sessions routed through an
@@ -175,14 +178,18 @@ uv tool install super-agents
 codex mcp add super-agents -- super-agents-mcp
 ```
 
-If your Codex app-server is listening somewhere other than the default
-`ws://127.0.0.1:4500`, pass `SUPER_AGENTS_WS_URL` when registering the server:
+If your Codex app-server is listening somewhere other than the standard Unix
+socket, pass the neutral endpoint setting when registering the server:
 
 ```bash
 codex mcp add \
-  --env SUPER_AGENTS_WS_URL=ws://127.0.0.1:4500 \
+  --env SUPER_AGENTS_APP_SERVER_ENDPOINT=unix:///var/run/codex.sock \
   super-agents -- super-agents-mcp
 ```
+
+`SUPER_AGENTS_WS_URL` and `CODEX_APP_SERVER_URL` remain compatibility aliases
+for existing TCP WebSocket deployments. Conflicting values are rejected so two
+variables cannot silently select different app-server owners.
 
 Check that Codex can see the server:
 
@@ -200,12 +207,12 @@ uv tool install super-agents
 claude mcp add --scope user super-agents -- super-agents-mcp
 ```
 
-For a non-default Codex app-server websocket URL:
+For a non-default Codex app-server endpoint:
 
 ```bash
 claude mcp add \
   --scope user \
-  -e SUPER_AGENTS_WS_URL=ws://127.0.0.1:4500 \
+  -e SUPER_AGENTS_APP_SERVER_ENDPOINT=ws://127.0.0.1:4500 \
   super-agents -- super-agents-mcp
 ```
 
@@ -225,9 +232,11 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SUPER_AGENTS_WS_URL` | `ws://127.0.0.1:4500` | Codex app-server websocket URL |
-| `SUPER_AGENTS_CODEX_WS_URL` | unset | Identity-specific Codex endpoint; required to differ when local and Cloud Codex identities coexist |
-| `SUPER_AGENTS_OPENBASE_CLOUD_CODEX_WS_URL` | unset | Identity-specific Cloud Codex endpoint; required to differ when local and Cloud Codex identities coexist |
+| `SUPER_AGENTS_APP_SERVER_ENDPOINT` | `unix://` on Unix; `ws://127.0.0.1:4500` on Windows | Codex app-server endpoint (`unix://`, `unix://PATH`, `ws://`, or `wss://`) |
+| `SUPER_AGENTS_WS_URL` | unset | Deprecated compatibility alias for TCP WebSocket deployments |
+| `CODEX_APP_SERVER_URL` | unset | Openbase compatibility alias; must not conflict with another endpoint selector |
+| `SUPER_AGENTS_CODEX_APP_SERVER_ENDPOINT` | unset | Identity-specific Codex endpoint; required to differ when local and Cloud Codex identities coexist |
+| `SUPER_AGENTS_OPENBASE_CLOUD_CODEX_APP_SERVER_ENDPOINT` | unset | Identity-specific Cloud Codex endpoint; required to differ when local and Cloud Codex identities coexist |
 | `OPENBASE_CODING_BACKEND` | unset | Machine backend identity: `codex`, `openbase_cloud`, `claude_code`, or `openbase_cloud_codex` |
 | `SUPER_AGENTS_DEFAULT_BACKEND` | unset | Per-process default for newly launched threads; falls back to `OPENBASE_CODING_BACKEND` |
 | `OPENBASE_CODEX_BACKEND` | unset | Legacy fallback for `OPENBASE_CODING_BACKEND` |

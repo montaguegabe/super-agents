@@ -4,6 +4,7 @@ import os
 from typing import Any, Protocol
 
 from .app_models import LabelQueryInput, QueueCancelInput
+from .app_endpoint import AppServerEndpointError
 from .app_server_client import CodexAppServerClient
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     BACKEND_ALIASES,
@@ -84,9 +85,19 @@ def client_for_backend(backend: str) -> SuperAgentsClient:
         return ClaudeAgentSdkClient(backend_identity=identity)
     from super_agents.defaults import default_super_agents_model
 
-    backend_ws_url = os.environ.get(f"SUPER_AGENTS_{identity.upper()}_WS_URL")
+    endpoint_key = f"SUPER_AGENTS_{identity.upper()}_APP_SERVER_ENDPOINT"
+    legacy_key = f"SUPER_AGENTS_{identity.upper()}_WS_URL"
+    endpoint_value = os.environ.get(endpoint_key, "").strip()
+    legacy_value = os.environ.get(legacy_key, "").strip()
+    if endpoint_value and legacy_value and endpoint_value != legacy_value:
+        raise AppServerEndpointError(
+            f"Conflicting Codex app-server endpoints select different owners: "
+            f"{endpoint_key}={endpoint_value}, {legacy_key}={legacy_value}. "
+            "Configure exactly one endpoint."
+        )
+    backend_endpoint = endpoint_value or legacy_value or None
     return CodexAppServerClient(
-        ws_url=backend_ws_url,
+        endpoint=backend_endpoint,
         backend_identity=identity,
         default_model=default_super_agents_model(backend=identity),
     )

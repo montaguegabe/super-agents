@@ -12,10 +12,17 @@ from .app_models import (
     LabelQueryInput,
     ResolvedSession,
 )
-from .app_protocol import extract_threads, is_active_status, to_tracked_turn_status
+from .app_protocol import (
+    extract_threads,
+    find_latest_turn,
+    is_active_status,
+    normalize_thread_status,
+    normalize_turn_status,
+    to_tracked_turn_status,
+)
 from .app_queue import append_queued_turn, new_queued_turn
 from .app_sessions import required_label
-from .state import JsonObject
+from .state import JsonObject, get_string
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +284,7 @@ class LabelQueryMixin:
         except RuntimeError:
             return None
         status = str(progress.get("status") or "")
-        if is_active_status(status):
+        if is_active_status(status) or status == "unknown":
             return None
         refreshed_session = await self.get_session(resolved.session.thread_id)
         refreshed = ResolvedSession(
@@ -299,6 +306,14 @@ class LabelQueryMixin:
         return await self.start_or_queue_turn(target, turn_input)
 
     async def start_or_queue_turn(self, target: ResolvedSession, turn_input: JsonObject) -> JsonObject:
+        if target.status == "unknown":
+            target = await self._refresh_unknown_target(target)
+        if target.status == "unknown" and not self._is_known_empty_thread(target):
+            raise ValueError(
+                f"Thread {target.session.thread_id} has unknown/notLoaded ownership state. "
+                "No follow-up was started or resumed; inspect the active owner or explicitly "
+                "resume the thread before retrying."
+            )
         target_status_active = is_active_status(target.status)
         active_gate = self.thread_has_active_turn(target.session.thread_id)
         should_queue = target_status_active or active_gate
@@ -317,6 +332,44 @@ class LabelQueryMixin:
         if should_queue:
             return await self.enqueue_turn(target, turn_input)
         return await self._start_turn_immediately(target, turn_input, drain="started_immediately")
+
+    async def _refresh_unknown_target(self, target: ResolvedSession) -> ResolvedSession:
+        """Boundedly inspect an uncertain thread without changing ownership."""
+        try:
+            result = await self.read_thread(target.session.thread_id, True)
+        except Exception:
+            return target
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if not isinstance(thread, dict):
+            return target
+        latest = find_latest_turn(thread, active_only=True) or find_latest_turn(thread, active_only=False)
+        status = normalize_turn_status(latest) or normalize_thread_status(thread)
+        if status is None or status == "unknown":
+            return target
+        turn_id = get_string(latest, "id") if latest else None
+        await self.merge_session(
+            target.session.thread_id,
+            {
+                "threadId": target.session.thread_id,
+                "lastTurnId": turn_id,
+                "activeTurnId": turn_id if is_active_status(status) else None,
+                "lastStatus": status,
+            },
+            clear_fields=[] if is_active_status(status) else ["activeTurnId"],
+        )
+        refreshed = await self.get_session(target.session.thread_id)
+        return ResolvedSession(
+            session=refreshed or target.session,
+            turn_id=turn_id or target.turn_id,
+            status=status,
+        )
+
+    @staticmethod
+    def _is_known_empty_thread(target: ResolvedSession) -> bool:
+        session = target.session
+        return bool(
+            session.created_at and not session.last_turn_id and not session.active_turn_id and not session.turns
+        )
 
     async def _start_turn_immediately(
         self,

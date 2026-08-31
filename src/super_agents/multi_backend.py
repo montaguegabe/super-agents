@@ -90,7 +90,7 @@ class MultiBackendClient:
                 continue
             other_endpoint = getattr(self._clients[other_identity], "ws_url", None)
             if endpoint == other_endpoint:
-                env_key = f"SUPER_AGENTS_{identity.upper()}_WS_URL"
+                env_key = f"SUPER_AGENTS_{identity.upper()}_APP_SERVER_ENDPOINT"
                 raise BackendEndpointConflictError(
                     f"Backends {other_identity} and {identity} target the same Codex app-server endpoint "
                     f"({endpoint}). Configure a distinct {env_key} before using both identities in one process."

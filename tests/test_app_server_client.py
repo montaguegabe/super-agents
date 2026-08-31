@@ -440,9 +440,7 @@ def test_super_agent_instructions_ignore_codex_home(monkeypatch, tmp_path: Path)
     CODEX_HOME."""
     codex_home = tmp_path / "codex_home"
     codex_home.mkdir()
-    (codex_home / "SUPER_AGENT_INSTRUCTIONS.md").write_text(
-        "Use the Super Agent instructions.\n", encoding="utf-8"
-    )
+    (codex_home / "SUPER_AGENT_INSTRUCTIONS.md").write_text("Use the Super Agent instructions.\n", encoding="utf-8")
     monkeypatch.delenv("CODEX_SUPER_AGENT_INSTRUCTIONS_PATH", raising=False)
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
@@ -1399,7 +1397,7 @@ async def test_start_turn_by_name_on_running_thread_steers_prompt(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_start_turn_by_name_ignores_stale_runtime_last_turn(tmp_path: Path) -> None:
+async def test_start_turn_by_name_preserves_owner_when_status_is_unknown(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
@@ -1430,25 +1428,151 @@ async def test_start_turn_by_name_ignores_stale_runtime_last_turn(tmp_path: Path
             started_at="2026-06-18T16:00:00.000Z",
         )
 
-        result = await client.start_turn_by_label(
-            type_query(label="stale"),
-            {"label": "stale", "prompt": "new work"},
-        )
+        with pytest.raises(ValueError, match="unknown/notLoaded ownership state"):
+            await client.start_turn_by_label(
+                type_query(label="stale"),
+                {"label": "stale", "prompt": "new work"},
+            )
 
-        assert result["queued"] is False
-        assert result["startedImmediately"] is True
-        assert result["turnId"] == "turn-new"
         assert not any(message.get("method") == "turn/steer" for message in captured)
-        start_request = next(message for message in captured if message.get("method") == "turn/start")
-        assert start_request["params"]["threadId"] == "thread-stale"
-        assert start_request["params"]["input"] == [{"type": "text", "text": "new work"}]
+        assert not any(message.get("method") == "turn/start" for message in captured)
+        assert not any(message.get("method") == "thread/resume" for message in captured)
     finally:
         await client.close()
         await server.close()
 
 
 @pytest.mark.asyncio
-async def test_start_turn_by_name_ignores_queue_item_as_active_turn(tmp_path: Path) -> None:
+async def test_not_loaded_discovery_never_resumes_or_duplicates_owner(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            return {
+                "data": [
+                    {
+                        "id": "thread-tui",
+                        "name": "tui-agent",
+                        "cwd": "/tmp/project",
+                        "status": {"type": "notLoaded"},
+                    }
+                ]
+            }
+        if message.get("method") == "thread/read":
+            return {
+                "thread": {
+                    "id": "thread-tui",
+                    "name": "tui-agent",
+                    "cwd": "/tmp/project",
+                    "status": {"type": "notLoaded"},
+                    "turns": [],
+                }
+            }
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        with pytest.raises(ValueError, match="unknown/notLoaded ownership state"):
+            await client.start_turn_by_label(
+                type_query(label="tui-agent"),
+                {"label": "tui-agent", "prompt": "do not duplicate"},
+            )
+
+        methods = [message.get("method") for message in captured]
+        assert "thread/read" in methods
+        assert "thread/resume" not in methods
+        assert "turn/start" not in methods
+        assert "turn/steer" not in methods
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_not_loaded_read_failure_never_resumes_or_duplicates_owner(
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            return {
+                "data": [
+                    {
+                        "id": "thread-tui-transient",
+                        "name": "tui-transient",
+                        "cwd": "/tmp/project",
+                        "status": {"type": "notLoaded"},
+                    }
+                ]
+            }
+        if message.get("method") == "thread/read":
+            return {"__error__": {"message": "rollout temporarily unavailable"}}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        with pytest.raises(ValueError, match="unknown/notLoaded ownership state"):
+            await client.start_turn_by_label(
+                type_query(label="tui-transient"),
+                {"label": "tui-transient", "prompt": "do not duplicate"},
+            )
+
+        methods = [message.get("method") for message in captured]
+        assert "thread/read" in methods
+        assert "thread/resume" not in methods
+        assert "turn/start" not in methods
+        assert "turn/steer" not in methods
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_known_empty_thread_can_start_its_first_turn(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            return {"data": []}
+        if message.get("method") == "thread/read":
+            return {"thread": {"id": "thread-empty", "status": {"type": "notLoaded"}, "turns": []}}
+        if message.get("method") == "thread/resume":
+            return {"__error__": {"message": "no rollout found for thread id thread-empty"}}
+        if message.get("method") == "turn/start":
+            return {"turnId": "turn-first"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.remember_session(
+            "thread-empty",
+            {
+                "label": "empty",
+                "threadId": "thread-empty",
+                "cwd": "/tmp/project",
+                "createdAt": iso_now(),
+                "lastStatus": "unknown",
+            },
+        )
+
+        result = await client.start_turn_by_label(
+            type_query(label="empty"),
+            {"label": "empty", "prompt": "first turn"},
+        )
+
+        assert result["turnId"] == "turn-first"
+        assert len([message for message in captured if message.get("method") == "turn/start"]) == 1
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_by_name_does_not_replace_unknown_queue_owner(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
@@ -1473,26 +1597,23 @@ async def test_start_turn_by_name_ignores_queue_item_as_active_turn(tmp_path: Pa
             },
         )
 
-        result = await client.start_turn_by_label(
-            type_query(label="queue-id"),
-            {"label": "queue-id", "prompt": "follow up"},
-        )
+        with pytest.raises(ValueError, match="unknown/notLoaded ownership state"):
+            await client.start_turn_by_label(
+                type_query(label="queue-id"),
+                {"label": "queue-id", "prompt": "follow up"},
+            )
 
-        assert result["queued"] is False
-        assert result["startedImmediately"] is True
-        assert result["turnId"] == "turn-real"
         assert not client.queued_turn_summary()
         assert not any(message.get("method") == "turn/steer" for message in captured)
-        start_request = next(message for message in captured if message.get("method") == "turn/start")
-        assert start_request["params"]["threadId"] == "thread-queue-id"
-        assert start_request["params"]["input"] == [{"type": "text", "text": "follow up"}]
+        assert not any(message.get("method") == "turn/start" for message in captured)
+        assert not any(message.get("method") == "thread/resume" for message in captured)
     finally:
         await client.close()
         await server.close()
 
 
 @pytest.mark.asyncio
-async def test_start_turn_by_name_warns_and_starts_after_orphaned_active_turn(tmp_path: Path) -> None:
+async def test_start_turn_by_name_preserves_orphaned_unknown_owner(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
@@ -1531,17 +1652,15 @@ async def test_start_turn_by_name_warns_and_starts_after_orphaned_active_turn(tm
         assert client.session_status(session) == "unknown"
         assert client.session_view(session)["statusWarning"] == "stale_active_turn"
 
-        result = await client.start_turn_by_label(
-            type_query(label="orphan"),
-            {"label": "orphan", "prompt": "start fresh"},
-        )
+        with pytest.raises(ValueError, match="unknown/notLoaded ownership state"):
+            await client.start_turn_by_label(
+                type_query(label="orphan"),
+                {"label": "orphan", "prompt": "start fresh"},
+            )
 
-        assert result["queued"] is False
-        assert result["startedImmediately"] is True
-        assert result["turnId"] == "turn-new"
         assert not any(message.get("method") == "turn/steer" for message in captured)
-        start_request = next(message for message in captured if message.get("method") == "turn/start")
-        assert start_request["params"]["threadId"] == "thread-orphan"
+        assert not any(message.get("method") == "turn/start" for message in captured)
+        assert not any(message.get("method") == "thread/resume" for message in captured)
     finally:
         await client.close()
         await server.close()
@@ -2455,6 +2574,8 @@ async def test_routine_is_persisted_and_due_runner_starts_turn(tmp_path: Path) -
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/read":
+            return {"thread": {"id": "thread-routine", "status": {"type": "idle"}, "turns": []}}
         if message.get("method") == "turn/start":
             return {"turnId": "turn-routine"}
         return {"ok": True}
@@ -2516,6 +2637,8 @@ async def test_stuck_routine_is_marked_stale_and_runs_again(tmp_path: Path) -> N
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/read":
+            return {"thread": {"id": "thread-routine", "status": {"type": "idle"}, "turns": []}}
         if message.get("method") == "turn/start":
             return {"turnId": "turn-recovered"}
         return {"ok": True}
@@ -2561,6 +2684,8 @@ async def test_stale_daily_routine_retries_same_day(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/read":
+            return {"thread": {"id": "thread-routine", "status": {"type": "idle"}, "turns": []}}
         if message.get("method") == "turn/start":
             return {"turnId": "turn-same-day-retry"}
         return {"ok": True}
@@ -2570,9 +2695,7 @@ async def test_stale_daily_routine_retries_same_day(tmp_path: Path) -> None:
     try:
         from super_agents.app_routines import routine_local_date, routine_from_patch
 
-        today = routine_local_date(
-            routine_from_patch({"name": "probe", "timezone": "UTC"})
-        )
+        today = routine_local_date(routine_from_patch({"name": "probe", "timezone": "UTC"}))
         await client.save_routine(
             {
                 "name": "killed-today",
@@ -2703,6 +2826,8 @@ async def test_routine_marks_immediately_interrupted_turn_failed(tmp_path: Path)
     captured: list[dict[str, Any]] = []
 
     def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/read":
+            return {"thread": {"id": "thread-routine", "status": {"type": "idle"}, "turns": []}}
         if message.get("method") == "turn/start":
             return {"turnId": "turn-interrupted"}
         return {"ok": True}
@@ -3284,9 +3409,7 @@ def test_permission_overrides_default_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("SUPER_AGENTS_CODEX_SANDBOX_POLICY", "danger-full-access")
 
     defaults = client.permission_overrides({})
-    explicit = client.permission_overrides(
-        {"approvalPolicy": "on-request", "sandboxPolicy": "workspace-write"}
-    )
+    explicit = client.permission_overrides({"approvalPolicy": "on-request", "sandboxPolicy": "workspace-write"})
 
     assert defaults == {
         "approvalPolicy": "never",

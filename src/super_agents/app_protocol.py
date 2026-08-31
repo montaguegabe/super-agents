@@ -286,6 +286,8 @@ def normalize_turn_status(turn: JsonObject | None) -> str | None:
 def normalize_thread_status(thread: JsonObject) -> StoredStatus | None:
     raw_status = thread.get("status")
     if isinstance(raw_status, str):
+        if raw_status == "notLoaded":
+            return "unknown"
         if raw_status in {"active", "running", "inProgress"}:
             return "running"
         if raw_status == "idle":
@@ -296,6 +298,8 @@ def normalize_thread_status(thread: JsonObject) -> StoredStatus | None:
             return raw_status  # type: ignore[return-value]
     if isinstance(raw_status, dict):
         kind = get_string(raw_status, "type") or get_string(raw_status, "status")
+        if kind == "notLoaded":
+            return "unknown"
         if kind in {"active", "running", "inProgress"}:
             return "running"
         if kind == "idle":

@@ -8,8 +8,9 @@ import os
 import time
 from typing import Any
 
-import websockets
+from websockets.exceptions import InvalidHandshake
 
+from .app_endpoint import open_app_server_connection
 from .app_environment import _check_ready_sync, websocket_is_open
 from .app_formatting import as_object, text_preview
 from .app_models import PendingServerRequest, TurnState
@@ -101,16 +102,24 @@ class TransportClientMixin:
 
     async def _connect(self) -> None:
         if not await self.check_ready():
+            detail = f" ({self._last_connection_error})" if self._last_connection_error else ""
             raise RuntimeError(
                 "Codex app-server is not running or not reachable at "
-                f"{self.ws_url}. Start the Openbase-managed codex-app-server service."
+                f"{self.endpoint.description}{detail}. Start the Openbase-managed "
+                "codex-app-server service."
             )
+        connect_kwargs: dict[str, Any] = {"max_size": websocket_max_size()}
+        if self.endpoint.is_unix:
+            connect_kwargs["open_timeout"] = 5
         self._ws = await asyncio.wait_for(
-            websockets.connect(self.ws_url, max_size=websocket_max_size()),
+            open_app_server_connection(
+                self.endpoint,
+                **connect_kwargs,
+            ),
             timeout=5,
         )
         self._reader_task = asyncio.create_task(self._reader_loop())
-        await self.request(
+        self._initialize_result = await self.request(
             "initialize",
             {
                 "clientInfo": {"name": "super-agents-mcp", "title": "Super Agents MCP", "version": "0.1.0"},
@@ -118,13 +127,77 @@ class TransportClientMixin:
             },
         )
         await self.send({"method": "initialized", "params": {}})
+        self._last_connection_error = None
 
     async def check_ready(self) -> bool:
+        if self.endpoint.is_unix:
+            return await self._check_unix_ready()
         ready_url = self.ws_url.replace("ws:", "http:", 1).replace("wss:", "https:", 1).rstrip("/") + "/readyz"
         try:
-            return await asyncio.to_thread(_check_ready_sync, ready_url)
-        except Exception:
+            ready = await asyncio.to_thread(_check_ready_sync, ready_url)
+            self._last_connection_error = None if ready else "HTTP readiness probe failed"
+            return ready
+        except Exception as exc:
+            self._last_connection_error = str(exc) or type(exc).__name__
             return False
+
+    async def _check_unix_ready(self) -> bool:
+        connection = None
+        try:
+            connection = await asyncio.wait_for(
+                open_app_server_connection(
+                    self.endpoint,
+                    max_size=websocket_max_size(),
+                    open_timeout=5,
+                ),
+                timeout=5,
+            )
+            await connection.send(
+                json.dumps(
+                    {
+                        "id": 0,
+                        "method": "initialize",
+                        "params": {
+                            "clientInfo": {
+                                "name": "super-agents-readiness",
+                                "title": "Super Agents readiness probe",
+                                "version": "0.1.0",
+                            },
+                            "capabilities": {"experimentalApi": True},
+                        },
+                    }
+                )
+            )
+            while True:
+                raw = await asyncio.wait_for(connection.recv(), timeout=5)
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+                message = json.loads(raw)
+                if not isinstance(message, dict) or message.get("id") != 0:
+                    continue
+                if message.get("error"):
+                    raise RuntimeError(f"initialize failed: {json.dumps(message['error'])}")
+                await connection.send(json.dumps({"method": "initialized", "params": {}}))
+                self._last_connection_error = None
+                return True
+        except FileNotFoundError:
+            self._last_connection_error = f"Unix control socket is missing at {self.endpoint.description}"
+        except PermissionError:
+            self._last_connection_error = f"Permission denied opening Unix control socket {self.endpoint.description}"
+        except ConnectionRefusedError:
+            self._last_connection_error = (
+                f"Unix control socket {self.endpoint.description} exists but is not accepting connections"
+            )
+        except InvalidHandshake:
+            self._last_connection_error = (
+                f"Unix control socket {self.endpoint.description} did not accept a WebSocket handshake"
+            )
+        except Exception as exc:
+            self._last_connection_error = str(exc) or type(exc).__name__
+        finally:
+            if connection is not None:
+                await connection.close()
+        return False
 
     async def request(
         self,
@@ -181,8 +254,9 @@ class TransportClientMixin:
 
     async def _reader_loop(self) -> None:
         assert self._ws is not None
+        connection = self._ws
         try:
-            async for raw in self._ws:
+            async for raw in connection:
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8")
                 self.handle_message(str(raw))
@@ -190,7 +264,13 @@ class TransportClientMixin:
             raise
         except Exception as exc:
             self.reject_pending(exc)
-            self._ws = None
+        finally:
+            if self._ws is connection:
+                self._ws = None
+            if self._reader_task is asyncio.current_task():
+                self._reader_task = None
+            if self._pending:
+                self.reject_pending(RuntimeError("Codex app-server connection closed."))
 
     def handle_message(self, raw: str) -> None:
         try:

@@ -14,6 +14,11 @@ from .app_client_tags import TagsFavoritesMixin
 from .app_client_threads import ThreadLifecycleMixin
 from .app_client_transport import TransportClientMixin
 from .app_client_turns import TurnLifecycleMixin
+from .app_endpoint import (
+    DEFAULT_WEBSOCKET_ENDPOINT,
+    AppServerEndpoint,
+    configured_app_server_endpoint,
+)
 from .app_environment import (
     LOGIN_ENV_TIMEOUT_SECONDS,
     login_shell_environment,
@@ -122,7 +127,7 @@ from .defaults import default_super_agents_model
 from .backend_config import CODEX_BACKEND, execution_backend, normalize_backend
 from .state import JsonObject
 
-DEFAULT_WS_URL = "ws://127.0.0.1:4500"
+DEFAULT_WS_URL = DEFAULT_WEBSOCKET_ENDPOINT
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_STATE_FILE = Path.home() / ".super-agents" / "state.json"
 DEFAULT_QUEUE_DIR = Path.home() / ".super-agents" / "queues"
@@ -255,11 +260,17 @@ class CodexAppServerClient(
         approval_requests_file: str | Path | None = None,
         queue_dir: str | Path | None = None,
         backend_identity: str | None = None,
+        endpoint: str | None = None,
     ) -> None:
         self.backend = normalize_backend(backend_identity or CODEX_BACKEND)
         if execution_backend(self.backend) != CODEX_BACKEND:
             raise ValueError(f"{self.backend} is not a Codex-compatible backend.")
-        self.ws_url = ws_url or os.environ.get("SUPER_AGENTS_WS_URL") or DEFAULT_WS_URL
+        if ws_url and endpoint:
+            raise ValueError("Pass either ws_url or endpoint, not both.")
+        self.endpoint: AppServerEndpoint = configured_app_server_endpoint(endpoint or ws_url)
+        # Compatibility alias for callers that still inspect ``ws_url``. It
+        # may now contain a unix:// endpoint rather than a TCP WebSocket URL.
+        self.ws_url = self.endpoint.value
         self.state_file = Path(state_file or os.environ.get("SUPER_AGENTS_STATE_FILE") or DEFAULT_STATE_FILE)
         self.queue_dir = Path(
             queue_dir or os.environ.get("SUPER_AGENTS_QUEUE_DIR") or self.state_file.parent / "queues"
@@ -285,14 +296,21 @@ class CodexAppServerClient(
         self._permission_callback_tasks: set[asyncio.Task[None]] = set()
         self._permission_decision_tasks: set[asyncio.Task[None]] = set()
         self._merge_session_tasks: set[asyncio.Task[None]] = set()
+        self._initialize_result: JsonObject = {}
+        self._last_connection_error: str | None = None
 
     async def status(self) -> JsonObject:
         ready = await self.check_ready()
         return {
             "backend": self.backend,
             "ready": ready,
-            "websocketUrl": self.ws_url,
+            "transport": self.endpoint.transport,
+            "endpointSource": self.endpoint.source,
+            "appServerEndpoint": self.endpoint.description,
+            "websocketUrl": self.ws_url if not self.endpoint.is_unix else None,
             "websocketConnected": websocket_is_open(self._ws),
+            "appServerVersion": self._initialize_result.get("userAgent"),
+            "lastConnectionError": self._last_connection_error,
             "managedProcess": False,
             "pendingRequests": [request.to_json() for request in self._pending_server_requests.values()],
             "pendingPermissionRequests": [request.to_json() for request in self.pending_permission_requests()],
