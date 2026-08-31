@@ -6,7 +6,12 @@ import os
 
 from .app_formatting import without_none
 from .app_models import LabelQueryInput
-from .app_protocol import extract_thread_id, is_active_status
+from .app_protocol import (
+    extract_thread_id,
+    find_turn,
+    is_active_status,
+    normalize_turn_status,
+)
 from .app_routines import (
     DEFAULT_ROUTINE_TIMEZONE,
     parse_routine_command_timeout_seconds,
@@ -300,13 +305,38 @@ class RoutineClientMixin:
 
     async def reconcile_routine_terminal_statuses(self) -> None:
         async with self._state_lock:
+            initial_state = read_state_file(self.state_file)
+            active_routines = [
+                routine
+                for routine in initial_state.routines.values()
+                if routine_has_active_run(routine)
+            ]
+
+        resolved_statuses: dict[tuple[str, str | None, str | None], str | None] = {}
+        thread_results: dict[str, JsonObject | None] = {}
+        for routine in active_routines:
+            key = (routine.name, routine.last_thread_id, routine.last_turn_id)
+            local_status = self._resolved_routine_turn_status(initial_state, routine)
+            if local_status in {"completed", "failed", "cancelled"}:
+                resolved_statuses[key] = local_status
+                continue
+            resolved_statuses[key] = await self._read_routine_turn_status(
+                routine,
+                thread_results,
+            )
+
+        async with self._state_lock:
             state = read_state_file(self.state_file)
             now = iso_now()
             changed = False
             for routine in state.routines.values():
                 if not routine_has_active_run(routine):
                     continue
-                status = self._resolved_routine_turn_status(state, routine)
+                key = (routine.name, routine.last_thread_id, routine.last_turn_id)
+                status = resolved_statuses.get(key) or self._resolved_routine_turn_status(
+                    state,
+                    routine,
+                )
                 if status in {"completed", "failed", "cancelled"}:
                     patch: JsonObject = {
                         **routine.to_json(),
@@ -339,6 +369,32 @@ class RoutineClientMixin:
                     changed = True
             if changed:
                 write_state_file(self.state_file, state)
+
+    async def _read_routine_turn_status(
+        self,
+        routine: RoutineRecord,
+        thread_results: dict[str, JsonObject | None],
+    ) -> str | None:
+        thread_id = routine.last_thread_id
+        turn_id = routine.last_turn_id
+        if not thread_id or not turn_id:
+            return None
+        if thread_id not in thread_results:
+            try:
+                thread_results[thread_id] = await self.read_thread(thread_id, include_turns=True)
+            except Exception:
+                logger.debug(
+                    "routine_reconcile thread_read_failed name=%s thread_id=%s",
+                    routine.name,
+                    thread_id,
+                    exc_info=True,
+                )
+                thread_results[thread_id] = None
+        result = thread_results[thread_id]
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if not isinstance(thread, dict):
+            return None
+        return normalize_turn_status(find_turn(thread, turn_id))
 
     def _resolved_routine_turn_status(self, state: StateFile, routine: RoutineRecord) -> str | None:
         if not routine.last_thread_id or not routine.last_turn_id:
