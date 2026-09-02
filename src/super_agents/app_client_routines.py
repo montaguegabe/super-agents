@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 
+from .app_events import render_event_prompt_context
 from .app_formatting import without_none
 from .app_models import LabelQueryInput
 from .app_protocol import (
@@ -162,24 +164,39 @@ class RoutineClientMixin:
 
             return update_state_file(self.state_file, update)
 
-    async def run_routine(self, routine: RoutineRecord, *, force: bool = False) -> JsonObject:
+    async def run_routine(
+        self,
+        routine: RoutineRecord,
+        *,
+        force: bool = False,
+        event: JsonObject | None = None,
+    ) -> JsonObject:
         if not routine.enabled and not force:
             return {"name": routine.name, "skipped": True, "reason": "disabled"}
         run_date = routine_local_date(routine)
         run_at = routine.last_run_at or iso_now()
+        # Event-driven runs leave lastRunDate/lastRunAt alone so they never
+        # displace or delay the routine's own scheduled runs.
+        schedule_marks = (
+            {}
+            if event is not None
+            else {
+                "lastRunDate": run_date,
+                "lastRunAt": run_at if routine.schedule_type == "interval" else routine.last_run_at,
+            }
+        )
         try:
             result = (
-                await self.run_command_routine(routine)
+                await self.run_command_routine(routine, event=event)
                 if routine.kind == "command"
-                else await self.run_agent_routine(routine)
+                else await self.run_agent_routine(routine, event=event)
             )
             await asyncio.sleep(0)
             launch_status, launch_error = self.routine_launch_status(routine, result)
             await self.record_routine_run(
                 routine.name,
                 {
-                    "lastRunDate": run_date,
-                    "lastRunAt": run_at if routine.schedule_type == "interval" else routine.last_run_at,
+                    **schedule_marks,
                     "lastStartedAt": iso_now(),
                     "lastThreadId": get_string(result, "threadId"),
                     "lastTurnId": get_string(result, "turnId"),
@@ -192,8 +209,7 @@ class RoutineClientMixin:
             await self.record_routine_run(
                 routine.name,
                 {
-                    "lastRunDate": run_date,
-                    "lastRunAt": run_at if routine.schedule_type == "interval" else routine.last_run_at,
+                    **schedule_marks,
                     "lastStartedAt": iso_now(),
                     "lastStatus": "failed",
                     "lastError": str(exc),
@@ -202,7 +218,10 @@ class RoutineClientMixin:
             logger.exception("Failed to run Super Agents routine name=%s", routine.name)
             return {"name": routine.name, "ran": False, "error": str(exc)}
 
-    async def run_agent_routine(self, routine: RoutineRecord) -> JsonObject:
+    async def run_agent_routine(self, routine: RoutineRecord, event: JsonObject | None = None) -> JsonObject:
+        turn_input = routine_turn_input(routine)
+        if event is not None:
+            turn_input["prompt"] = f"{routine.prompt}{render_event_prompt_context(event)}"
         if routine.fresh_thread_per_run:
             thread_name = routine_fresh_thread_name(routine)
             agent_name = await self.routine_fresh_thread_agent_name(routine)
@@ -222,16 +241,16 @@ class RoutineClientMixin:
             if not thread_id:
                 raise RuntimeError(f"Could not start thread for routine {routine.name}.")
             return await self.start_turn(
-                {**routine_turn_input(routine), "threadId": thread_id, "name": thread_name, "label": thread_name}
+                {**turn_input, "threadId": thread_id, "name": thread_name, "label": thread_name}
             )
         if routine.thread_id:
             target = await self.resolve_queue_target(LabelQueryInput(thread_id=routine.thread_id, cwd=routine.cwd))
-            return await self.start_or_queue_turn(target, routine_turn_input(routine))
+            return await self.start_or_queue_turn(target, turn_input)
         if routine.target_name:
             target = await self.resolve_queue_target(
                 LabelQueryInput(label=routine.target_name, cwd=routine.cwd, prefer="latest_any")
             )
-            return await self.start_or_queue_turn(target, routine_turn_input(routine))
+            return await self.start_or_queue_turn(target, turn_input)
         thread_result = await self.start_thread(
             without_none(
                 {
@@ -246,16 +265,19 @@ class RoutineClientMixin:
         thread_id = extract_thread_id(thread_result)
         if not thread_id:
             raise RuntimeError(f"Could not start thread for routine {routine.name}.")
-        return await self.start_turn({**routine_turn_input(routine), "threadId": thread_id, "label": routine.name})
+        return await self.start_turn({**turn_input, "threadId": thread_id, "label": routine.name})
 
-    async def run_command_routine(self, routine: RoutineRecord) -> JsonObject:
+    async def run_command_routine(self, routine: RoutineRecord, event: JsonObject | None = None) -> JsonObject:
         if not routine.command:
             raise RuntimeError(f"Command routine {routine.name} is missing a command.")
         timeout = parse_routine_command_timeout_seconds(routine.command_timeout_seconds)
+        env = os.environ.copy()
+        if event is not None:
+            env["SUPER_AGENTS_EVENT_JSON"] = json.dumps(event)
         process = await asyncio.create_subprocess_shell(
             routine.command,
             cwd=routine.cwd or None,
-            env=os.environ.copy(),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -307,9 +329,7 @@ class RoutineClientMixin:
         async with self._state_lock:
             initial_state = read_state_file(self.state_file)
             active_routines = [
-                routine
-                for routine in initial_state.routines.values()
-                if routine_has_active_run(routine)
+                routine for routine in initial_state.routines.values() if routine_has_active_run(routine)
             ]
 
         resolved_statuses: dict[tuple[str, str | None, str | None], str | None] = {}

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .app_client_events import EventClientMixin
 from .app_client_labels import LabelQueryMixin
 from .app_client_permissions import PermissionClientMixin
 from .app_client_routines import RoutineClientMixin
@@ -123,8 +124,8 @@ from .app_time import (
     turn_key,
     turn_recency,
 )
-from .defaults import default_super_agents_model
 from .backend_config import CODEX_BACKEND, execution_backend, normalize_backend
+from .defaults import default_super_agents_model
 from .state import JsonObject
 
 DEFAULT_WS_URL = DEFAULT_WEBSOCKET_ENDPOINT
@@ -249,6 +250,7 @@ class CodexAppServerClient(
     TagsFavoritesMixin,
     LabelQueryMixin,
     RoutineClientMixin,
+    EventClientMixin,
     SessionClientMixin,
 ):
     def __init__(
