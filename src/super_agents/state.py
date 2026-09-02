@@ -98,6 +98,50 @@ class SessionRecord:
 
 
 @dataclass(slots=True)
+class TriggerRecord:
+    id: str
+    type: str = "webhook"
+    enabled: bool = True
+    description: str | None = None
+    token: str | None = None
+    hmac_secret: str | None = None
+    hmac_header: str | None = None
+    relay_endpoint_id: str | None = None
+    relay_url: str | None = None
+    sender_path: str | None = None
+    sender_allowlist: list[str] | None = None
+    filters: list[JsonObject] | None = None
+    created_at: str | None = None
+    last_event_at: str | None = None
+    last_event_id: str | None = None
+    event_count: int | None = None
+    recent_event_ids: list[str] | None = None
+
+    def to_json(self) -> JsonObject:
+        return without_none(
+            {
+                "id": self.id,
+                "type": self.type,
+                "enabled": self.enabled,
+                "description": self.description,
+                "token": self.token,
+                "hmacSecret": self.hmac_secret,
+                "hmacHeader": self.hmac_header,
+                "relayEndpointId": self.relay_endpoint_id,
+                "relayUrl": self.relay_url,
+                "senderPath": self.sender_path,
+                "senderAllowlist": self.sender_allowlist,
+                "filters": self.filters,
+                "createdAt": self.created_at,
+                "lastEventAt": self.last_event_at,
+                "lastEventId": self.last_event_id,
+                "eventCount": self.event_count,
+                "recentEventIds": self.recent_event_ids,
+            }
+        )
+
+
+@dataclass(slots=True)
 class RoutineRecord:
     name: str
     prompt: str
@@ -121,6 +165,7 @@ class RoutineRecord:
     developer_instructions: str | None = None
     command: str | None = None
     command_timeout_seconds: int | None = None
+    triggers: list[TriggerRecord] | None = None
     created_at: str | None = None
     last_run_date: str | None = None
     last_run_at: str | None = None
@@ -154,6 +199,7 @@ class RoutineRecord:
                 "developerInstructions": self.developer_instructions,
                 "command": self.command,
                 "commandTimeoutSeconds": self.command_timeout_seconds,
+                "triggers": [trigger.to_json() for trigger in self.triggers] if self.triggers else None,
                 "createdAt": self.created_at,
                 "updatedAt": self.updated_at,
                 "lastRunDate": self.last_run_date,
@@ -366,6 +412,7 @@ def routine_record_from_json(
         developer_instructions=get_string(value, "developerInstructions"),
         command=get_string(value, "command"),
         command_timeout_seconds=get_positive_int(value, "commandTimeoutSeconds"),
+        triggers=as_trigger_record_list(value.get("triggers")),
         created_at=get_string(value, "createdAt"),
         updated_at=get_string(value, "updatedAt") or default_updated_at,
         last_run_date=get_string(value, "lastRunDate"),
@@ -376,6 +423,58 @@ def routine_record_from_json(
         last_status=get_string(value, "lastStatus"),
         last_error=get_string(value, "lastError"),
     )
+
+
+def as_trigger_record_list(value: Any) -> list[TriggerRecord] | None:
+    if not isinstance(value, list):
+        return None
+    triggers = [trigger for trigger in (trigger_record_from_json(item) for item in value) if trigger is not None]
+    return triggers or None
+
+
+def trigger_record_from_json(value: Any) -> TriggerRecord | None:
+    if not isinstance(value, dict):
+        return None
+    trigger_id = get_string(value, "id")
+    if not trigger_id:
+        return None
+    return TriggerRecord(
+        id=trigger_id,
+        type=as_trigger_type(get_string(value, "type")),
+        enabled=value.get("enabled") if isinstance(value.get("enabled"), bool) else True,
+        description=get_string(value, "description"),
+        token=get_string(value, "token"),
+        hmac_secret=get_string(value, "hmacSecret"),
+        hmac_header=get_string(value, "hmacHeader"),
+        relay_endpoint_id=get_string(value, "relayEndpointId"),
+        relay_url=get_string(value, "relayUrl"),
+        sender_path=get_string(value, "senderPath"),
+        sender_allowlist=as_string_list(value.get("senderAllowlist")),
+        filters=as_json_object_list(value.get("filters")),
+        created_at=get_string(value, "createdAt"),
+        last_event_at=get_string(value, "lastEventAt"),
+        last_event_id=get_string(value, "lastEventId"),
+        event_count=value.get("eventCount") if isinstance(value.get("eventCount"), int) else None,
+        recent_event_ids=as_string_list(value.get("recentEventIds")),
+    )
+
+
+def as_trigger_type(value: str | None) -> str:
+    return value if value in {"webhook"} else "webhook"
+
+
+def as_string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    items = [item for item in value if isinstance(item, str)]
+    return items or None
+
+
+def as_json_object_list(value: Any) -> list[JsonObject] | None:
+    if not isinstance(value, list):
+        return None
+    items = [item for item in value if isinstance(item, dict)]
+    return items or None
 
 
 def get_string(value: JsonObject, key: str) -> str | None:
