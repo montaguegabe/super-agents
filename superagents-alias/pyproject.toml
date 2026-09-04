@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "superagents"
+version = "0.1.14"
+description = "Alias for the super-agents package. Installs super-agents; this will become the canonical name."
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "super-agents>=0.1.13",
+]
+
+[project.urls]
+Repository = "https://github.com/montaguegabe/super-agents"
+Issues = "https://github.com/montaguegabe/super-agents/issues"
+
+[project.optional-dependencies]
+claude = [
+  "super-agents[claude]>=0.1.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/superagents"]
