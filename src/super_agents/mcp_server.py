@@ -20,7 +20,7 @@ from .app_client_transport import CONTROL_PLANE_DIAGNOSTICS_ENV, control_plane_d
 from .app_models import QueueCancelInput
 from .app_server_client import LabelQueryInput
 from .backend_clients import SuperAgentsClient, multi_client_from_environment
-from .backend_config import BACKENDS, normalize_backend
+from .backend_config import BACKENDS, normalize_backend, resolve_model
 from .defaults import (
     default_service_tier,
     default_super_agents_model,
@@ -187,7 +187,11 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
     return ToolDefinition(
         name="super_agents_start",
         title="Start Super Agents Thread",
-        description="Create a named Super Agents thread on the configured backend.",
+        description=(
+            "Create a named Super Agents thread. Model-first: pass model (e.g. fable, sol, astra, "
+            "opus) and the thread is routed to a backend that can run it; backend is an optional "
+            "advanced override. Unknown model slugs are rejected with suggestions."
+        ),
         input_schema=object_schema(
             {
                 "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
@@ -199,6 +203,14 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
                 "agentName": {
                     "type": "string",
                     "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
+                },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Model slug or provider-prefixed id (fable, sol, astra, opus, openai-sol, "
+                        "claude-fable-5, ...). Chooses the thread's backend automatically; defaults "
+                        "to the caller's model when known, else the configured default."
+                    ),
                 },
                 **backend_option_properties(),
                 **permission_option_properties(include_sandbox=True),
@@ -674,9 +686,10 @@ def backend_option_properties() -> JsonObject:
             "type": "string",
             "enum": sorted(BACKENDS),
             "description": (
-                "Configured backend identity. On thread creation, overrides "
-                "SUPER_AGENTS_DEFAULT_BACKEND and the machine configuration. "
-                "On name-based operations, disambiguates identical names."
+                "Optional advanced override. Usually omit this: passing model alone routes to a "
+                "compatible backend automatically, and an explicit backend that cannot run the "
+                "requested model fails immediately. On name-based operations, disambiguates "
+                "identical names."
             ),
         }
     }
@@ -721,6 +734,7 @@ def clean_thread_input(input_data: JsonObject) -> JsonObject:
             "developerInstructions": developer_instructions_or_default(input_data),
             "name": optional_string(input_data, "name"),
             "agentName": optional_string(input_data, "agentName"),
+            "model": canonical_model(input_data),
             "backend": optional_backend(input_data),
             "approvalPolicy": optional_string(input_data, "approvalPolicy"),
             "sandbox": optional_string(input_data, "sandbox"),
@@ -746,7 +760,7 @@ def clean_turn_input(input_data: JsonObject, *, backend: str | None = None) -> J
             "prompt": prompt,
             "cwd": optional_string(input_data, "cwd"),
             "mode": optional_mode(input_data, "mode") or "default",
-            "model": optional_string(input_data, "model") or default_super_agents_model(backend=backend),
+            "model": canonical_model(input_data) or default_super_agents_model(backend=backend),
             "reasoningEffort": optional_string(input_data, "reasoningEffort")
             or default_super_agents_reasoning_effort(),
             "serviceTier": optional_string(input_data, "serviceTier") or default_service_tier(),
@@ -861,6 +875,19 @@ def clean_cancel_queued_turn_input(input_data: JsonObject) -> QueueCancelInput:
 def optional_backend(input_data: JsonObject) -> str | None:
     backend = optional_string(input_data, "backend")
     return normalize_backend(backend) if backend else None
+
+
+def canonical_model(input_data: JsonObject) -> str | None:
+    """Validate and canonicalize a requested model before anything starts.
+
+    Raises for unknown slugs (with suggestions) so a bad model value fails
+    the tool call instead of starting a turn that errors at runtime.
+    """
+    model = optional_string(input_data, "model")
+    if not model:
+        return None
+    canonical, _backend = resolve_model(model)
+    return canonical
 
 
 async def answer_request(client: SuperAgentsClient, input_data: JsonObject) -> JsonObject:

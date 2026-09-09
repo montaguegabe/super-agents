@@ -23,6 +23,8 @@ METADATA_TEXT_KEYS = {
     "subtype",
     "kind",
     "reasoningeffort",
+    "itemsview",
+    "historymode",
     "createdat",
     "startedat",
     "completedat",
@@ -193,9 +195,10 @@ def compact_turn_summary(
     max_items: int,
     max_output_chars: int,
 ) -> JsonObject:
-    from .app_protocol import normalize_turn_status
+    from .app_protocol import normalize_turn_status, turn_error_message
 
     status = normalize_turn_status(persisted_turn) or (tracked_turn.status if tracked_turn else None)
+    error_message = turn_error_message(persisted_turn)
     result = without_none(
         {
             "id": get_string(persisted_turn, "id") if persisted_turn else None,
@@ -203,7 +206,8 @@ def compact_turn_summary(
             "reasoningEffort": tracked_turn.reasoning_effort if tracked_turn else None,
             "startedAt": scalar_field(persisted_turn, "startedAt"),
             "completedAt": scalar_field(persisted_turn, "completedAt"),
-            "lastUsefulMessage": turn_text_preview(persisted_turn),
+            "lastError": error_message,
+            "lastUsefulMessage": error_message or turn_text_preview(persisted_turn),
             "eventCount": len(tracked_turn.events) if tracked_turn else None,
             "pendingRequestCount": len(tracked_turn.pending_requests) if tracked_turn else None,
         }

@@ -23,6 +23,7 @@ from .app_protocol import (
     is_likely_stale,
     normalize_thread_status,
     to_tracked_turn_status,
+    turn_error_message,
 )
 from .app_protocol import (
     is_queue_item_id as _is_queue_item_id,
@@ -416,6 +417,7 @@ class SessionClientMixin:
                 "statusWarning": status_warning,
                 "preview": get_string(thread, "preview"),
                 "lastUsefulMessage": session.last_useful_message if session else None,
+                "lastError": session.last_error if session else None,
                 "pendingRequestCount": self.pending_request_count(thread_id, running_turn_id) if thread_id else None,
             }
         )
@@ -452,6 +454,7 @@ class SessionClientMixin:
                 or is_likely_stale(status, session.last_event_at or session.updated_at),
                 "statusWarning": status_warning,
                 "lastUsefulMessage": session.last_useful_message,
+                "lastError": session.last_error,
                 "pendingRequestCount": self.pending_request_count(session.thread_id, running_turn_id),
             }
         )
@@ -478,6 +481,7 @@ class SessionClientMixin:
                 "turnId": item.get("runningTurnId") or item.get("lastTurnId"),
                 "reasoningEffort": item.get("reasoningEffort"),
                 "status": item.get("status"),
+                "lastError": item.get("lastError"),
                 "isFavorite": item.get("isFavorite"),
                 "favoritedAt": item.get("favoritedAt"),
                 "tags": item.get("tags"),
@@ -626,6 +630,8 @@ class SessionClientMixin:
             if tracked_status in {"completed", "failed", "cancelled"}
             else None
         )
+        error_message = turn_error_message(persisted_turn)
+        last_useful_message = error_message or turn_text_preview(persisted_turn)
         await self.merge_session(
             thread_id,
             {
@@ -634,7 +640,8 @@ class SessionClientMixin:
                 "lastTurnId": turn_id,
                 "lastStatus": tracked_status,
                 "lastFinishedAt": finished_at,
-                "lastUsefulMessage": turn_text_preview(persisted_turn),
+                "lastUsefulMessage": last_useful_message,
+                "lastError": error_message,
                 "turns": {
                     turn_id: turn_patch(
                         turn_id,
@@ -643,7 +650,8 @@ class SessionClientMixin:
                         started_at=tracked_turn.started_at if tracked_turn else iso_now(),
                         updated_at=iso_now(),
                         finished_at=finished_at,
-                        last_useful_message=turn_text_preview(persisted_turn),
+                        last_useful_message=last_useful_message,
+                        last_error=error_message,
                         pending_request_ids=[request.id for request in pending_requests],
                         event_count=len(tracked_turn.events) if tracked_turn else 0,
                     )

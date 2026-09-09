@@ -34,6 +34,7 @@ class TurnSummary:
     finished_at: str | None = None
     prompt_preview: str | None = None
     last_useful_message: str | None = None
+    last_error: str | None = None
     pending_request_ids: list[str | int] | None = None
     event_count: int | None = None
 
@@ -49,6 +50,7 @@ class TurnSummary:
                 "finishedAt": self.finished_at,
                 "promptPreview": self.prompt_preview,
                 "lastUsefulMessage": self.last_useful_message,
+                "lastError": self.last_error,
                 "pendingRequestIds": self.pending_request_ids,
                 "eventCount": self.event_count,
             }
@@ -71,6 +73,7 @@ class SessionRecord:
     last_finished_at: str | None = None
     last_status: StoredStatus | None = None
     last_useful_message: str | None = None
+    last_error: str | None = None
     last_event_at: str | None = None
     turns: dict[str, TurnSummary] | None = None
 
@@ -90,6 +93,7 @@ class SessionRecord:
                 "lastFinishedAt": self.last_finished_at,
                 "lastStatus": self.last_status,
                 "lastUsefulMessage": self.last_useful_message,
+                "lastError": self.last_error,
                 "lastEventAt": self.last_event_at,
                 "turns": {key: value.to_json() for key, value in self.turns.items()} if self.turns else None,
                 "updatedAt": self.updated_at,
@@ -312,6 +316,7 @@ def as_session_record_map(value: Any) -> dict[str, SessionRecord]:
             last_finished_at=get_string(raw_session, "lastFinishedAt"),
             last_status=as_stored_status(get_string(raw_session, "lastStatus")),
             last_useful_message=get_string(raw_session, "lastUsefulMessage"),
+            last_error=get_string(raw_session, "lastError"),
             last_event_at=get_string(raw_session, "lastEventAt"),
             turns=as_turn_summary_map(raw_session.get("turns")),
             updated_at=updated_at,
@@ -343,6 +348,7 @@ def as_turn_summary_map(value: Any) -> dict[str, TurnSummary] | None:
             finished_at=get_string(raw_turn, "finishedAt"),
             prompt_preview=get_string(raw_turn, "promptPreview"),
             last_useful_message=get_string(raw_turn, "lastUsefulMessage"),
+            last_error=get_string(raw_turn, "lastError"),
             pending_request_ids=as_string_or_number_array(raw_turn.get("pendingRequestIds")),
             event_count=raw_turn.get("eventCount") if isinstance(raw_turn.get("eventCount"), int) else None,
         )

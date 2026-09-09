@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from .app_models import LabelQueryInput, QueueCancelInput
+from .app_time import parse_iso_ms
 from .backend_clients import client_for_backend
 from .backend_config import (
     CLAUDE_CODE_BACKEND,
@@ -20,19 +21,42 @@ from .backend_routing import (
     BackendEndpointConflictError,
     BackendNotFoundError,
     BackendResolutionError,
+)
+from .backend_routing import (
     annotated_items as _annotated_items,
+)
+from .backend_routing import (
     backend_has_local_state as _backend_has_local_state,
+)
+from .backend_routing import (
     client_has_pending_request as _client_has_pending_request,
+)
+from .backend_routing import (
     collect_result_ids as _collect_result_ids,
+)
+from .backend_routing import (
     optional_string as _optional_string,
+)
+from .backend_routing import (
     require_one_backend as _require_one_backend,
+)
+from .backend_routing import (
     session_matches as _session_matches,
+)
+from .backend_routing import (
     session_thread_id as _session_thread_id,
 )
 from .defaults import default_super_agents_model
 
 JsonObject = dict[str, Any]
 RoutedOperation = Callable[[Any], Awaitable[JsonObject]]
+
+
+def _interaction_recency(item: JsonObject) -> int:
+    return parse_iso_ms(
+        item.get("lastEventAt") or item.get("updatedAt") or item.get("updated_at") or item.get("lastFinishedAt") or ""
+    )
+
 
 _STATUS_LIST_KEYS = (
     "pendingRequests",
@@ -118,10 +142,19 @@ class MultiBackendClient:
         data = dict(input_data)
         explicit_backend = _optional_string(data.pop("backend", None))
         identity = self.resolve_backend(explicit_backend)
+        model = _optional_string(data.get("model"))
         if explicit_backend is None:
             # An explicit model names the runtime the caller wants: "fable"
             # must not be handed to Codex just because Codex is the default.
-            identity = self._backend_for_model(_optional_string(data.get("model")), identity)
+            identity = self._backend_for_model(model, identity)
+        else:
+            family = execution_backend_for_model(model)
+            if family is not None and family != execution_backend(identity):
+                raise BackendResolutionError(
+                    f"Model {model!r} runs on the {family} backend, but backend={identity} was "
+                    "explicitly requested and cannot execute it. Drop the backend argument to "
+                    "route by model, or pick a compatible model."
+                )
         result = await self.client_for(identity).start_thread(data)
         return self._remember_result(identity, result)
 
@@ -280,6 +313,10 @@ class MultiBackendClient:
         sessions: list[JsonObject] = []
         for identity in self.engaged_backends():
             sessions.extend(await self._sessions_for_backend(identity))
+        # Most recently interacted-with first across every backend; without
+        # this, per-backend concatenation buries today's sessions on one
+        # backend below stale sessions from another.
+        sessions.sort(key=_interaction_recency, reverse=True)
         return sessions
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
@@ -436,6 +473,7 @@ class MultiBackendClient:
             result = await getattr(self.client_for(identity), method)(query)
             remembered = self._remember_result(identity, result)
             agents.extend(_annotated_items(remembered.get("agents"), identity))
+        agents.sort(key=_interaction_recency, reverse=True)
         return {
             "backend": self._default_backend,
             "engagedBackends": identities,

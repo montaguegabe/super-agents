@@ -159,13 +159,16 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "high",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
     # The process environment is never mutated; the key is blanked for the
     # spawned CLI through the SDK env option instead.
     assert FakeClaudeSDKClient.env_seen
     assert all(seen is True for _stage, seen in FakeClaudeSDKClient.env_seen)
-    assert FakeClaudeSDKClient.options_seen[-1].kwargs["env"] == {"ANTHROPIC_API_KEY": ""}
+    assert FakeClaudeSDKClient.options_seen[-1].kwargs["env"] == {
+        "ANTHROPIC_API_KEY": "",
+        "AGENT_MODEL": "sonnet",
+    }
     assert os.environ["ANTHROPIC_API_KEY"] == "must-not-reach-sdk"
     assert store.get_turn(result["turnId"]).status == "completed"
     assert store.get_turn(result["turnId"]).last_useful_message.endswith("\n\nhello")
@@ -206,7 +209,7 @@ async def test_local_and_cloud_claude_clients_keep_distinct_sdk_options(
 
     local_options, cloud_options = [item.kwargs for item in FakeClaudeSDKClient.options_seen]
     assert local_options["model"] == "sonnet"
-    assert local_options["env"] == {"ANTHROPIC_API_KEY": ""}
+    assert local_options["env"] == {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"}
     assert cloud_options["model"] == "claude-sonnet-5"
     assert cloud_options["env"]["ANTHROPIC_AUTH_TOKEN"] == "cloud-machine-token"
     assert cloud_options["env"]["ANTHROPIC_BASE_URL"].endswith("/api/openbase/llm/anthropic")
@@ -243,7 +246,7 @@ async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "low",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "low"
 
@@ -273,7 +276,7 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "xhigh",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "xhigh"
 
@@ -299,7 +302,7 @@ async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "low",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "high"
     assert store.get_turn(result["turnId"]).service_tier == "fast"
@@ -327,7 +330,7 @@ async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "high",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
     assert store.get_turn(result["turnId"]).service_tier == "standard"
 
@@ -353,7 +356,7 @@ async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "xhigh",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
 
 
@@ -755,7 +758,7 @@ async def test_claude_sdk_steer_by_label_uses_native_active_turn_steering(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "high",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
 
 
@@ -837,7 +840,7 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
         "effort": "low",
-        "env": {"ANTHROPIC_API_KEY": ""},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
 

@@ -29,6 +29,7 @@ def turn_patch(
     started_at: str | None = None,
     finished_at: str | None = None,
     last_useful_message: str | None = None,
+    last_error: str | None = None,
     pending_request_ids: list[str | int] | None = None,
     event_count: int | None = None,
     mode: str | None = None,
@@ -57,6 +58,7 @@ def turn_patch(
         "finishedAt": finished_at,
         "promptPreview": prompt_preview,
         "lastUsefulMessage": last_useful_message,
+        "lastError": last_error,
         "pendingRequestIds": pending_request_ids,
         "eventCount": event_count,
     }
@@ -97,6 +99,7 @@ def session_from_patch(value: JsonObject) -> SessionRecord:
                         finished_at=get_string(raw, "finishedAt"),
                         prompt_preview=get_string(raw, "promptPreview"),
                         last_useful_message=get_string(raw, "lastUsefulMessage"),
+                        last_error=get_string(raw, "lastError"),
                         pending_request_ids=[
                             item
                             for item in raw.get("pendingRequestIds", [])
@@ -122,6 +125,7 @@ def session_from_patch(value: JsonObject) -> SessionRecord:
         last_finished_at=get_string(value, "lastFinishedAt"),
         last_status=as_stored_status(get_string(value, "lastStatus")),
         last_useful_message=get_string(value, "lastUsefulMessage"),
+        last_error=get_string(value, "lastError"),
         last_event_at=get_string(value, "lastEventAt"),
         turns=turns,
         updated_at=get_string(value, "updatedAt") or iso_now(),

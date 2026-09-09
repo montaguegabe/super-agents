@@ -37,10 +37,11 @@ class ThreadLifecycleMixin:
         await self.ensure_connected()
         name = super_agent_label(input_data.get("name") or input_data.get("label"))
         agent_name = super_agent_label(input_data.get("agentName"))
+        model = input_data.get("model") or self.default_model
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
-            "model": input_data.get("model") or self.default_model,
-            "config": await self._login_shell_config_override(),
+            "model": model,
+            "config": await self._login_shell_config_override(None, model if isinstance(model, str) else None),
             **self.permission_overrides(input_data),
         }
         if developer_instructions := with_super_agent_identity_instructions(

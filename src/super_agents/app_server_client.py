@@ -232,14 +232,18 @@ __all__ = [
 ]
 
 
-async def login_shell_config_override(thread_id: str | None = None) -> JsonObject:
+async def login_shell_config_override(thread_id: str | None = None, model: str | None = None) -> JsonObject:
     env = await login_shell_environment()
     set_values = {key: value for key in ["PATH", "SHELL", "HOME", "USER", "LOGNAME"] if (value := env.get(key))}
-    # Expose the thread id to spawned shells under the vendor-neutral name so
-    # tooling attributes work to the agent session regardless of backend.
-    # Overrides any stale value inherited from the app-server's own parent.
+    # Expose the thread id and model to spawned shells under vendor-neutral
+    # names so tooling attributes work to the agent session regardless of
+    # backend, and agents that spawn Super Agents inherit their own model as
+    # the child default. Overrides any stale value inherited from the
+    # app-server's own parent.
     if thread_id:
         set_values["AGENT_SESSION_ID"] = thread_id
+    if model:
+        set_values["AGENT_MODEL"] = str(model)
     return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
 
 
@@ -352,5 +356,5 @@ class CodexAppServerClient(
                 return
             await self._connect()
 
-    async def _login_shell_config_override(self, thread_id: str | None = None) -> JsonObject:
-        return await login_shell_config_override(thread_id)
+    async def _login_shell_config_override(self, thread_id: str | None = None, model: str | None = None) -> JsonObject:
+        return await login_shell_config_override(thread_id, model)

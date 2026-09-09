@@ -101,9 +101,30 @@ Super Agents supports four configured backend identities:
 - `openbase_cloud_codex`: Codex-compatible sessions routed through an
   Openbase Cloud integration.
 
+Launching is model-first: pass `model` to `super_agents_start` (or a turn
+tool) and the thread routes to a backend that can run it — `fable`, `opus`,
+`sonnet`, and `haiku` route to Claude Code; `gpt-5.5`, `gpt-5`, `sol`, and
+`astra` route to Codex. Provider-style aliases normalize to canonical slugs
+(`openai-sol`, `open-ai-sol`, `openai/sol` → `sol`; `claude-fable-5`,
+`anthropic-fable` → `fable`), and provider-prefixed ids newer than the
+catalog (`gpt-*`, `claude-*`) pass through to their family. A bare unknown
+slug is rejected before anything starts, with suggestions. Extend the
+catalog without a release via `SUPER_AGENTS_EXTRA_MODELS`, e.g.
+`{"codex": ["new-model"]}`.
+
+When `model` is omitted, the default is the caller's own model when the
+environment carries it (`SUPER_AGENTS_CALLER_MODEL`, then the
+vendor-neutral `AGENT_MODEL` — which Super Agents itself injects into agent
+shells alongside `AGENT_SESSION_ID`, so agents that spawn Super Agents
+default their children to the model they run on), provided it is compatible
+with the selected backend; otherwise the configured `backend_models`
+default applies.
+
 The MCP server can mix these identities per thread. Pass `backend` to
-`super_agents_start` to override the launch default. If it is omitted,
-`SUPER_AGENTS_DEFAULT_BACKEND` wins when set, then `OPENBASE_CODING_BACKEND`.
+`super_agents_start` only as an advanced override — an explicit backend that
+cannot execute the requested model fails immediately. If it is omitted,
+model routing wins, then `SUPER_AGENTS_DEFAULT_BACKEND` when set, then
+`OPENBASE_CODING_BACKEND`.
 Explicit and default identities are persisted against returned thread, turn,
 and approval-request ids, so follow-up operations keep using the owning
 backend after a server restart. If the same name exists on multiple backends,
@@ -159,6 +180,12 @@ Set `OPENBASE_CODING_BACKEND=claude_code` to make `super-agents-mcp` use
 this backend. `OPENBASE_CODEX_BACKEND` is still read as a legacy fallback.
 Follow-up turns preserve live SDK conversation context while the MCP process
 remains running; persisted metadata and logs survive restarts.
+
+Session listings on this backend index the local Claude home
+(`CLAUDE_CONFIG_DIR`, default `~/.claude`) by last interaction: transcript
+files the user touched recently — including Claude Code sessions started
+outside Super Agents — are registered and kept fresh, and all listings sort
+most-recently-interacted first across backends.
 
 On this backend, `start_thread` reuses an existing session with the same
 `name` (refreshing its cwd, instructions, and model). Library callers that
@@ -243,6 +270,9 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | `SUPER_AGENTS_STATE_FILE` | `~/.super-agents/state.json` | Local session metadata file |
 | `SUPER_AGENTS_BACKEND_PROVENANCE_FILE` | `~/.super-agents/backend-provenance.json` | Configured-backend ownership for thread, turn, and approval ids |
 | `SUPER_AGENTS_CLAUDE_PERMISSION_MODE` | `bypassPermissions` | Claude SDK permission mode. Gated modes route tool requests through the native approval store. |
+| `SUPER_AGENTS_CALLER_MODEL` | unset | Caller's model; becomes the default for launched agents when backend-compatible |
+| `AGENT_MODEL` | unset | Vendor-neutral fallback for the caller's model; injected into agent shells on turn start |
+| `SUPER_AGENTS_EXTRA_MODELS` | unset | JSON map of extra model slugs per execution backend, e.g. `{"codex": ["new-model"]}` |
 
 Openbase-specific defaults:
 

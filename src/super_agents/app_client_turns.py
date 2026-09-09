@@ -153,7 +153,7 @@ class TurnLifecycleMixin:
             "model": model,
             "serviceTier": input_data.get("serviceTier") or "standard",
             **self.permission_overrides(input_data),
-            "config": await self._login_shell_config_override(thread_id),
+            "config": await self._login_shell_config_override(thread_id, model if isinstance(model, str) else None),
             "collaborationMode": collaboration_mode(
                 mode,
                 str(model),

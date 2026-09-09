@@ -66,6 +66,9 @@ def agent_options(
 ) -> Any:
     managed_options = managed_claude_config_options()
     permission_mode = resolve_permission_mode()
+    # AGENT_MODEL mirrors the Codex-side shell injection: agents that spawn
+    # Super Agents inherit their own model as the child default.
+    model_env = {"AGENT_MODEL": str(model)} if model else {}
     kwargs: JsonObject = {
         "cwd": cwd,
         "permission_mode": permission_mode,
@@ -74,6 +77,7 @@ def agent_options(
             **managed_options.get("env", {}),
             **CLAUDE_SDK_ENV_OVERRIDES,
             **openbase_cloud_claude_env(backend),
+            **model_env,
         },
     }
     if permission_mode != "bypassPermissions":

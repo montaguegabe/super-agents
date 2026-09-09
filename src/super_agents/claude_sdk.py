@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from super_agents.agent_store import Session, Store, Turn, iso_now
-from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import (
     DEFAULT_ACTIVE_AGENTS_LIMIT,
@@ -30,6 +29,9 @@ from super_agents.app_protocol import (
     with_super_agent_identity_instructions,
 )
 from super_agents.app_sessions import required_label
+from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
+from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
+from super_agents.claude_home_index import refresh_last_interaction_index
 from super_agents.claude_logs import (
     append_log,
 )
@@ -58,8 +60,8 @@ from super_agents.claude_options import (
 from super_agents.claude_options import (
     openbase_cloud_claude_model as _openbase_cloud_claude_model,
 )
-from super_agents.claude_permissions import CLAUDE_APPROVAL_METHOD, can_use_tool_handler
 from super_agents.claude_orphans import OrphanReconciliationMixin
+from super_agents.claude_permissions import CLAUDE_APPROVAL_METHOD, can_use_tool_handler
 from super_agents.claude_prompts import (
     combine_developer_instructions as _combine_developer_instructions,
 )
@@ -72,7 +74,6 @@ from super_agents.defaults import (
     default_super_agents_model,
     default_super_agents_reasoning_effort,
 )
-from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
@@ -308,6 +309,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     async def sessions(self) -> list[JsonObject]:
         self._reconcile_orphaned_turns_once()
+        refresh_last_interaction_index(self.store)
         return [self._session_view(session) for session in self.store.list_sessions(include_inactive=True)]
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
@@ -1017,6 +1019,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         if query.thread_id or query.label:
             sessions = [self._resolve_session(query)]
         else:
+            refresh_last_interaction_index(self.store)
             sessions = self.store.list_sessions(include_inactive=True, status=query.status)
         if query.cwd:
             cwd = str(Path(query.cwd).expanduser())

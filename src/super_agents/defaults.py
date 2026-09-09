@@ -8,19 +8,27 @@ from typing import Any
 
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     CLAUDE_CODE_BACKEND,
+    CLAUDE_MODEL_ALIASES,
     CODEX_BACKEND,
     CODEX_COMPATIBLE_BACKENDS,
     CODING_BACKEND_ENV_KEY,
     DEFAULT_ENV_FILE,
     OPENBASE_CLOUD_BACKEND,
+    UnknownModelError,
     backend_from_environment,
     configured_backend_from_environment,
     execution_backend,
     normalize_backend,
-    CLAUDE_MODEL_ALIASES,
+    resolve_model,
 )
 
 JsonObject = dict[str, Any]
+
+# The caller's own model, when the embedding harness passes it through.
+# AGENT_MODEL is the vendor-neutral sibling of AGENT_SESSION_ID (injected
+# into agent shells), so agents that spawn Super Agents default their
+# children to the model they themselves run on.
+CALLER_MODEL_ENV_KEYS = ("SUPER_AGENTS_CALLER_MODEL", "AGENT_MODEL")
 
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
@@ -47,10 +55,35 @@ def default_service_tier() -> str:
     return DEFAULT_CODEX_SERVICE_TIER
 
 
+def caller_model() -> str | None:
+    for key in CALLER_MODEL_ENV_KEYS:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _caller_model_for_backend(selected_backend: str) -> str | None:
+    """The caller's model when it can run on the selected backend, else None."""
+    requested = caller_model()
+    if not requested:
+        return None
+    try:
+        canonical, family = resolve_model(requested)
+    except (UnknownModelError, ValueError):
+        return None
+    if family is not None and family != selected_backend:
+        return None
+    return canonical
+
+
 def default_super_agents_model(*, backend: str | None = None) -> str | None:
-    payload = default_dispatcher_config()
     configured_backend = normalize_backend(backend or configured_backend_from_environment())
     selected_backend = execution_backend(configured_backend)
+    inherited = _caller_model_for_backend(selected_backend)
+    if inherited:
+        return inherited
+    payload = default_dispatcher_config()
     configured_model = _backend_model(
         payload,
         "super_agents",

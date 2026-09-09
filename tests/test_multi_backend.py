@@ -411,9 +411,7 @@ async def test_claude_model_routes_new_thread_to_claude_backend(
     client = make_client(tmp_path, clients, default="codex")
 
     fable = await client.start_thread({"name": "fable-task", "model": "fable"})
-    explicit = await client.start_thread(
-        {"name": "cloud-fable", "model": "fable", "backend": "openbase_cloud"}
-    )
+    explicit = await client.start_thread({"name": "cloud-fable", "model": "fable", "backend": "openbase_cloud"})
     gpt = await client.start_thread({"name": "gpt-task", "model": "gpt-5.5"})
     unknown = await client.start_thread({"name": "mystery", "model": "custom-model"})
 
@@ -440,3 +438,16 @@ async def test_cross_family_model_on_existing_thread_fails_actionably(
             LabelQueryInput(thread_id=started["threadId"]),
             {"prompt": "again", "model": "fable"},
         )
+
+
+@pytest.mark.asyncio
+async def test_explicit_backend_incompatible_with_model_fails_at_start(
+    tmp_path: Path,
+    clients: dict[str, FakeBackendClient],
+) -> None:
+    """backend is an advanced override: pairing it with a model the backend
+    cannot run must fail before any thread is created."""
+    client = make_client(tmp_path, clients, default="codex")
+
+    with pytest.raises(BackendResolutionError, match="cannot execute"):
+        await client.start_thread({"name": "bad-pair", "model": "fable", "backend": "codex"})

@@ -23,6 +23,7 @@ from .app_permissions import (
 from .app_protocol import (
     extract_notification_thread_id,
     extract_notification_turn_id,
+    turn_error_message,
 )
 from .app_sessions import turn_patch
 from .app_time import iso_now, turn_key
@@ -502,8 +503,12 @@ class TransportClientMixin:
         turn.events.append({"method": method, "params": params, "receivedAt": received_at})
         if len(turn.events) > 200:
             turn.events.pop(0)
+        error_message = turn_error_message(params)
         if method == "turn/completed":
-            turn.status = "completed"
+            # A "completed" lifecycle with a non-null error payload is a
+            # failed turn (e.g. a model the account cannot run); recording
+            # it as completed hides that the agent did no work.
+            turn.status = "failed" if error_message else "completed"
             turn.finished_at = iso_now()
         elif method == "turn/failed":
             turn.status = "failed"
@@ -525,8 +530,11 @@ class TransportClientMixin:
                 received_at,
             )
 
-        last_useful_message = text_preview(params) or method
+        last_useful_message = error_message or text_preview(params) or method
         clear_fields = ["activeTurnId"] if turn.status in {"completed", "failed", "cancelled"} else []
+        if clear_fields and not error_message:
+            # A clean terminal turn supersedes any prior turn's error.
+            clear_fields = [*clear_fields, "lastError"]
         merge_task = self._schedule_merge_session(
             thread_id,
             {
@@ -537,6 +545,7 @@ class TransportClientMixin:
                 "lastEventAt": received_at,
                 "lastFinishedAt": turn.finished_at,
                 "lastUsefulMessage": last_useful_message,
+                "lastError": error_message,
                 "turns": {
                     turn_id: turn_patch(
                         turn_id,
@@ -544,6 +553,7 @@ class TransportClientMixin:
                         turn=turn,
                         updated_at=received_at,
                         last_useful_message=last_useful_message,
+                        last_error=error_message,
                     )
                 },
             },

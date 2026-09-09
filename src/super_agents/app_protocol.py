@@ -272,8 +272,63 @@ def collect_turns(value: Any) -> list[JsonObject]:
     return turns
 
 
+def turn_error_message(value: JsonObject | None) -> str | None:
+    """Human-readable error carried by a turn or turn notification, if any.
+
+    The app server reports failed turns as lifecycle-"completed" with a
+    non-null ``error`` payload; without reading it, dead turns (e.g. a model
+    the account cannot run) surface as successful completions.
+    """
+    if not isinstance(value, dict):
+        return None
+    error = value.get("error")
+    if error is None:
+        for key in ("turn", "payload", "item"):
+            nested = value.get(key)
+            if isinstance(nested, dict) and nested.get("error") is not None:
+                error = nested["error"]
+                break
+    if error is None:
+        return None
+    if isinstance(error, str):
+        return _unwrap_error_message(error)
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("detail") or error.get("text")
+        if isinstance(message, str) and message.strip():
+            return _unwrap_error_message(message)
+        return "Turn failed with an unspecified error."
+    return None
+
+
+def _unwrap_error_message(message: str) -> str | None:
+    text = message.strip()
+    if not text:
+        return None
+    # Provider errors often arrive as a JSON envelope in the message string;
+    # surface the innermost human message when one exists.
+    if text.startswith("{"):
+        import json
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        while isinstance(payload, dict):
+            inner = payload.get("error")
+            message_value = payload.get("message")
+            if isinstance(inner, dict):
+                payload = inner
+                continue
+            if isinstance(message_value, str) and message_value.strip():
+                return message_value.strip()
+            break
+    return text
+
+
 def normalize_turn_status(turn: JsonObject | None) -> str | None:
     status = get_string(turn, "status") if turn else None
+    if turn is not None and turn.get("error") is not None and status not in {"interrupted", "canceled", "cancelled"}:
+        return "failed"
     if not status:
         return None
     if status in {"inProgress", "active"}:
