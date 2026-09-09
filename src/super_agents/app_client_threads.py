@@ -8,11 +8,11 @@ from pathlib import Path
 
 from .app_formatting import turn_text_preview, without_none
 from .app_protocol import (
-    with_base_instructions,
     extract_model,
     extract_thread_cwd,
     extract_thread_id,
     super_agent_label,
+    with_base_instructions,
     with_super_agent_identity_instructions,
 )
 from .app_time import iso_now, path_basename
@@ -107,7 +107,7 @@ class ThreadLifecycleMixin:
         await self.ensure_connected()
         params: JsonObject = {
             "threadId": thread_id,
-            "config": await self._login_shell_config_override(),
+            "config": await self._login_shell_config_override(thread_id),
         }
         if identity_instructions := with_super_agent_identity_instructions(
             with_base_instructions(developer_instructions),

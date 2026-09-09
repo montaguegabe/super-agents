@@ -14,7 +14,6 @@ from .app_formatting import (
 )
 from .app_models import LabelQueryInput, Mode, TurnState
 from .app_protocol import (
-    with_base_instructions,
     collaboration_mode,
     effective_reasoning_effort,
     extract_turn_id,
@@ -23,6 +22,7 @@ from .app_protocol import (
     normalize_turn_status,
     super_agent_label,
     to_tracked_turn_status,
+    with_base_instructions,
     with_super_agent_identity_instructions,
 )
 from .app_sessions import turn_patch
@@ -153,7 +153,7 @@ class TurnLifecycleMixin:
             "model": model,
             "serviceTier": input_data.get("serviceTier") or "standard",
             **self.permission_overrides(input_data),
-            "config": await self._login_shell_config_override(),
+            "config": await self._login_shell_config_override(thread_id),
             "collaborationMode": collaboration_mode(
                 mode,
                 str(model),

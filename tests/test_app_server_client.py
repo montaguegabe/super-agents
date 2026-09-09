@@ -716,12 +716,14 @@ async def test_start_turn_sets_super_agent_identity_environment(
         assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in resume_env
         assert "OPENBASE_SUPER_AGENT_LABEL" not in resume_env
         assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in resume_env
+        assert resume_env["AGENT_SESSION_ID"] == "thread-1"
 
         start_request = next(message for message in captured if message.get("method") == "turn/start")
         set_env = start_request["params"]["config"]["shell_environment_policy"]["set"]
         assert "OPENBASE_SUPER_AGENT_THREAD_ID" not in set_env
         assert "OPENBASE_SUPER_AGENT_LABEL" not in set_env
         assert "OPENBASE_SUPER_AGENT_AGENT_NAME" not in set_env
+        assert set_env["AGENT_SESSION_ID"] == "thread-1"
         assert set_env["PATH"] == "/usr/bin"
         assert (
             start_request["params"]["collaborationMode"]["settings"]["developer_instructions"]
