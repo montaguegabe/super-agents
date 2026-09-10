@@ -228,13 +228,42 @@ def extract_compact_items(
     if not isinstance(raw_items, list):
         return []
     if final_only:
-        raw_items = raw_items[-1:]
+        raw_items = _final_compact_source_items(raw_items, max_items=max_items)
     compacted: list[JsonObject] = []
     for item in raw_items[:max_items]:
         if not isinstance(item, dict):
             continue
         compacted.append(compact_json(item, max_chars=max_output_chars, max_items=max_items, include_diff=False))
     return compacted
+
+
+def _final_compact_source_items(raw_items: list[Any], *, max_items: int) -> list[Any]:
+    final_items: list[Any] = []
+    for item in reversed(raw_items):
+        if not isinstance(item, dict):
+            continue
+        if _is_final_useful_item(item):
+            final_items.append(item)
+            if len(final_items) >= max_items:
+                break
+    if not final_items:
+        return raw_items[-1:]
+    return list(reversed(final_items))
+
+
+def _is_final_useful_item(item: JsonObject) -> bool:
+    role = _message_role(item)
+    if role in ASSISTANT_ROLE_VALUES:
+        return bool(_find_message_text(item))
+    if role in USER_ROLE_VALUES:
+        return False
+    payload = item.get("payload")
+    if isinstance(payload, dict) and _role_value(payload.get("type")) in {
+        "taskcomplete",
+        "turncompleted",
+    }:
+        return bool(find_turn_useful_text(item))
+    return False
 
 
 def compact_json(value: Any, *, max_chars: int, max_items: int, include_diff: bool) -> JsonObject:

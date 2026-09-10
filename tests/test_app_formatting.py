@@ -1,4 +1,9 @@
-from super_agents.app_formatting import find_turn_useful_text, find_useful_text, turn_text_preview
+from super_agents.app_formatting import (
+    extract_compact_items,
+    find_turn_useful_text,
+    find_useful_text,
+    turn_text_preview,
+)
 
 
 def test_find_useful_text_ignores_metadata_only_agent_message() -> None:
@@ -114,3 +119,34 @@ def test_turn_text_preview_does_not_return_user_only_prompt() -> None:
 
     assert find_turn_useful_text(turn) is None
     assert turn_text_preview(turn) is None
+
+
+def test_final_only_compact_items_keeps_recent_assistant_messages() -> None:
+    turn = {
+        "items": [
+            {"type": "userMessage", "text": "What happened with LinkedIn?"},
+            {
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "The planning agent did not appear to send LinkedIn messages, but it did read and import LinkedIn conversations into the CRM.",
+            },
+            {"type": "toolCall", "message": "metadata that should not be spoken"},
+            {
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "Yes, the session I found is the AI Tinkerers one.",
+            },
+        ]
+    }
+
+    compacted = extract_compact_items(
+        turn,
+        final_only=True,
+        max_items=5,
+        max_output_chars=4000,
+    )
+
+    assert [item["text"] for item in compacted] == [
+        "The planning agent did not appear to send LinkedIn messages, but it did read and import LinkedIn conversations into the CRM.",
+        "Yes, the session I found is the AI Tinkerers one.",
+    ]
