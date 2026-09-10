@@ -149,6 +149,7 @@ class Store:
                     last_useful_message text,
                     backend_session_id text,
                     backend text,
+                    transcript_title text,
                     last_client_instance text,
                     last_exit_code integer,
                     log_path text,
@@ -191,6 +192,8 @@ class Store:
                 conn.execute("alter table sessions add column last_client_instance text")
             if "backend" not in session_columns:
                 conn.execute("alter table sessions add column backend text")
+            if "transcript_title" not in session_columns:
+                conn.execute("alter table sessions add column transcript_title text")
             if self.backend:
                 conn.execute(
                     "update sessions set backend = ? where backend is null",
@@ -312,6 +315,12 @@ class Store:
             "backend_session_id",
             "last_client_instance",
             "last_exit_code",
+            # A rename recorded in the backend's own transcript (for example
+            # Claude Code's /rename). `name` follows it; `transcript_title`
+            # remembers what was synced so store-side renames are not
+            # re-clobbered by unchanged transcript titles.
+            "name",
+            "transcript_title",
             # Explicit updated_at lets administrative writes (for example
             # orphan reconciliation) preserve the session's real last-activity
             # time instead of bumping it to "now".

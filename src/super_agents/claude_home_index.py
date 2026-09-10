@@ -9,6 +9,16 @@ last-interaction time (file mtime): newly interacted-with sessions are
 registered into the store, and already-registered sessions get their
 ``updated_at`` refreshed, so listings sorted by update time reflect what the
 user actually touched most recently.
+
+Session names honor user renames. Claude Code's /rename appends a
+``custom-title`` entry to the transcript; the latest one names the session,
+falling back to a preview of the first user prompt. Refresh sweeps re-read the
+title so renames made after registration propagate, tracking the last synced
+title in ``transcript_title`` so a store-side rename (``super_agents_rename``)
+is only overridden by a *newer* transcript rename, never re-clobbered by an
+unchanged one. ``transcript_title`` is NULL only for rows written before title
+sync existed; those get a one-time backfill scan even when idle, recording ""
+when no title exists so the scan is not repeated.
 """
 
 from __future__ import annotations
@@ -66,9 +76,20 @@ def _sweep(store: Store) -> int:
         interacted_at = _iso_from_epoch(mtime)
         existing = _session_for_backend_id(store, backend_session_id)
         if existing is not None:
-            if existing.updated_at and existing.updated_at >= interacted_at:
+            session, synced_title = existing
+            fresh = not session.updated_at or session.updated_at < interacted_at
+            if not fresh and synced_title is not None:
                 continue
-            store.update_session(existing.id, updated_at=interacted_at)
+            # Idle rows only reach here for the one-time title backfill; keep
+            # their real last-activity time instead of bumping it to "now".
+            updates: dict[str, object] = {"updated_at": interacted_at if fresh else session.updated_at}
+            title = _latest_custom_title(path) or ""
+            if title != synced_title:
+                updates["transcript_title"] = title
+                if title and title != session.name:
+                    with store.connect() as conn:
+                        updates["name"] = _unique_session_name(conn, title, exclude_id=session.id)
+            store.update_session(session.id, **updates)
             changed += 1
             continue
         registered = _register_transcript_session(store, path, backend_session_id, interacted_at)
@@ -94,7 +115,8 @@ def _transcripts_by_recency(projects_dir: Path) -> list[tuple[Path, float]]:
     return transcripts
 
 
-def _session_for_backend_id(store: Store, backend_session_id: str) -> Session | None:
+def _session_for_backend_id(store: Store, backend_session_id: str) -> tuple[Session, str | None] | None:
+    """(session, last synced transcript title) or None when unregistered."""
     with store.connect() as conn:
         row = conn.execute(
             "select * from sessions where backend_session_id = ?",
@@ -104,7 +126,7 @@ def _session_for_backend_id(store: Store, backend_session_id: str) -> Session | 
         return None
     from super_agents.agent_store import row_to_session
 
-    return row_to_session(row)
+    return row_to_session(row), row["transcript_title"]
 
 
 def _register_transcript_session(
@@ -117,21 +139,23 @@ def _register_transcript_session(
     if parsed is None:
         return False
     name, cwd, created_at = parsed
+    custom_title = _latest_custom_title(path)
     session_id = f"claude_{backend_session_id.replace('-', '')}"
     with store.connect() as conn:
         if conn.execute("select 1 from sessions where id = ?", (session_id,)).fetchone():
             return False
-        unique_name = _unique_session_name(conn, name)
+        unique_name = _unique_session_name(conn, custom_title or name)
         conn.execute(
             """
             insert into sessions (
-                id, name, cwd, command_json, status, backend, last_observed_state,
+                id, name, transcript_title, cwd, command_json, status, backend, last_observed_state,
                 backend_session_id, created_at, updated_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 unique_name,
+                custom_title or "",
                 cwd or str(Path.home()),
                 json.dumps(["claude", "--resume", backend_session_id]),
                 # Idle local sessions read as completed; activity is conveyed
@@ -203,14 +227,42 @@ def _user_text(entry: dict) -> str | None:
     return text
 
 
-def _unique_session_name(conn, base_name: str) -> str:
+def _latest_custom_title(path: Path) -> str | None:
+    """Last user-set title from the transcript's ``custom-title`` entries.
+
+    /rename appends these, so the newest one wins. The substring pre-filter
+    keeps the scan cheap on large transcripts that were never renamed.
+    """
+    title: str | None = None
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if '"custom-title"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict) or entry.get("type") != "custom-title":
+                    continue
+                value = entry.get("customTitle")
+                if isinstance(value, str) and value.strip():
+                    title = value.strip()
+    except OSError:
+        return None
+    return preview(title, limit=80)
+
+
+def _unique_session_name(conn, base_name: str, exclude_id: str | None = None) -> str:
     candidate = base_name
     suffix = 2
-    while conn.execute("select 1 from sessions where name = ?", (candidate,)).fetchone():
+    while True:
+        row = conn.execute("select id from sessions where name = ?", (candidate,)).fetchone()
+        if row is None or row["id"] == exclude_id:
+            return candidate
         suffix_text = f" ({suffix})"
         candidate = f"{base_name[: 80 - len(suffix_text)]}{suffix_text}"
         suffix += 1
-    return candidate
 
 
 def _iso_from_epoch(epoch_seconds: float) -> str:
