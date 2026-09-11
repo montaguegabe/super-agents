@@ -357,4 +357,6 @@ class CodexAppServerClient(
             await self._connect()
 
     async def _login_shell_config_override(self, thread_id: str | None = None, model: str | None = None) -> JsonObject:
-        return await login_shell_config_override(thread_id, model)
+        from .config_profiles import codex_profile_config, merge_config
+
+        return merge_config(codex_profile_config(self.backend), await login_shell_config_override(thread_id, model))

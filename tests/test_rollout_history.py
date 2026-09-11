@@ -207,3 +207,29 @@ async def test_read_thread_leaves_loaded_threads_untouched(tmp_path: Path) -> No
     result = await client.read_thread("t-1", True)
 
     assert result["thread"]["turns"] == []
+
+
+@pytest.mark.asyncio
+async def test_read_thread_falls_back_when_turn_listing_is_unsupported(tmp_path: Path) -> None:
+    rollout = _write_rollout(tmp_path / "rollout.jsonl", SAMPLE_RECORDS)
+
+    class UnsupportedTurnsClient(RolloutFallbackClient):
+        async def request(self, method, params=None, **kwargs):
+            assert method == "thread/read"
+            if params["includeTurns"]:
+                raise RuntimeError('{"code": -32601, "message": "list_turns is not supported yet"}')
+            return {"thread": self._thread}
+
+    client = UnsupportedTurnsClient({"id": "test-thread", "path": str(rollout)})
+    result = await client.read_thread("test-thread", True)
+    assert [turn["id"] for turn in result["thread"]["turns"]] == ["turn-1", "turn-2"]
+
+
+@pytest.mark.asyncio
+async def test_read_thread_does_not_hide_other_errors():
+    class BrokenClient(RolloutFallbackClient):
+        async def request(self, method, params=None, **kwargs):
+            raise RuntimeError("permission denied")
+
+    with pytest.raises(RuntimeError, match="permission denied"):
+        await BrokenClient({}).read_thread("test-thread", True)

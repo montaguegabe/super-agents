@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .config_profiles import codex_profile_config
+
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
     CLAUDE_CODE_BACKEND,
     CLAUDE_MODEL_ALIASES,
@@ -93,6 +95,8 @@ def default_super_agents_model(*, backend: str | None = None) -> str | None:
         "super_agents",
         backend=selected_backend,
     )
+    if not configured_model and selected_backend == CODEX_BACKEND:
+        configured_model = codex_profile_config(configured_backend).get("model")
     if configured_backend == OPENBASE_CLOUD_BACKEND and not configured_model:
         configured_model = DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL
     return _model_for_backend(

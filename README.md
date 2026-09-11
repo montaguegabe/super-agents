@@ -273,6 +273,12 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | `SUPER_AGENTS_CALLER_MODEL` | unset | Caller's model; becomes the default for launched agents when backend-compatible |
 | `AGENT_MODEL` | unset | Vendor-neutral fallback for the caller's model; injected into agent shells on turn start |
 | `SUPER_AGENTS_EXTRA_MODELS` | unset | JSON map of extra model slugs per execution backend, e.g. `{"codex": ["new-model"]}` |
+| `SUPER_AGENTS_CODEX_PROFILE_PATH` | unset | Optional TOML profile applied to Codex thread configuration, never daemon launch arguments |
+| `SUPER_AGENTS_OPENBASE_CLOUD_CODEX_PROFILE_PATH` | unset | Backend-specific Codex profile; falls back to the generic Codex profile |
+| `SUPER_AGENTS_CLAUDE_SETTINGS_PATH` | unset | Optional Claude session settings JSON, passed through the SDK's `settings` option |
+| `SUPER_AGENTS_CLAUDE_MCP_CONFIG_PATH` | unset | Optional JSON `mcpServers` map merged into each Claude session |
+
+Profiles are opt-in for embedding applications. Selected files must exist and parse successfully. They do not rewrite user configuration or relocate authentication and history. Codex's runtime `--profile` flag is not accepted by `app-server`; the client loads TOML into per-thread config instead. Native file hooks are not guaranteed to execute from app-server config overrides; Super Agents supplies its thread identity through developer instructions and shell environment independently.
 
 Openbase-specific defaults:
 

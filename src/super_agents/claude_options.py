@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .backend_config import OPENBASE_CLOUD_BACKEND, configured_backend_from_environment, normalize_backend
+from .config_profiles import CLAUDE_MCP_CONFIG_PATH_ENV, CLAUDE_SETTINGS_PATH_ENV
 
 JsonObject = dict[str, Any]
 
@@ -188,6 +189,13 @@ def managed_claude_config_options() -> JsonObject:
         config_dir = Path(config_dir_value).expanduser()
         options["env"] = {CLAUDE_CONFIG_DIR_ENV: str(config_dir)}
 
+    if settings_path := os.environ.get(CLAUDE_SETTINGS_PATH_ENV):
+        path = Path(settings_path).expanduser()
+        # Validate before spawning: Claude print mode can silently ignore a
+        # missing or malformed settings file.
+        _read_profile_object(path)
+        options["settings"] = str(path)
+
     if system_prompt_path := _base_instructions_file():
         options["system_prompt"] = {
             "type": "file",
@@ -195,10 +203,23 @@ def managed_claude_config_options() -> JsonObject:
         }
 
     mcp_servers = _claude_mcp_servers(claude_state_path())
+    if profile_mcp_path := os.environ.get(CLAUDE_MCP_CONFIG_PATH_ENV):
+        profile = _read_profile_object(Path(profile_mcp_path).expanduser())
+        profile_servers = profile.get("mcpServers", {})
+        if not isinstance(profile_servers, dict):
+            raise ValueError("Claude profile mcpServers must be an object")
+        mcp_servers = {**(mcp_servers or {}), **profile_servers}
     if mcp_servers:
         options["mcp_servers"] = mcp_servers
 
     return options
+
+
+def _read_profile_object(path: Path) -> JsonObject:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Profile must contain a JSON object: {path}")
+    return payload
 
 
 def claude_state_path() -> Path:

@@ -173,7 +173,19 @@ class ThreadLifecycleMixin:
     async def read_thread(self, thread_id: str, include_turns: bool = True) -> JsonObject:
         started = time.monotonic()
         await self.ensure_connected()
-        result = await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns})
+        try:
+            result = await self.request("thread/read", {"threadId": thread_id, "includeTurns": include_turns})
+        except RuntimeError as exc:
+            if not include_turns or "list_turns is not supported yet" not in str(exc):
+                raise
+            # Some Codex builds expose metadata but cannot hydrate a newly
+            # created thread's turns. Read its existing rollout without
+            # resuming it or changing the user's session configuration.
+            result = await self.request("thread/read", {"threadId": thread_id, "includeTurns": False})
+            thread = result.get("thread")
+            if isinstance(thread, dict):
+                path = thread.get("path")
+                thread["turns"] = await asyncio.to_thread(rollout_fallback_turns, path) if path else []
         thread = result.get("thread") if isinstance(result, dict) else None
         if needs_rollout_turn_fallback(thread, include_turns):
             turns = await asyncio.to_thread(rollout_fallback_turns, thread["path"])
