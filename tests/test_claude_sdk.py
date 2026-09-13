@@ -158,6 +158,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "high",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -245,6 +246,7 @@ async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "low",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -275,6 +277,7 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "xhigh",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -301,6 +304,7 @@ async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "low",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -329,6 +333,7 @@ async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "high",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -355,6 +360,7 @@ async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "xhigh",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -582,7 +588,11 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
         "effort": "high",
         "env": {"CLAUDE_CONFIG_DIR": str(config_dir), "ANTHROPIC_API_KEY": ""},
         "setting_sources": ["user", "project"],
-        "system_prompt": {"type": "file", "path": str(instructions_path)},
+        "system_prompt": {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": "Openbase instructions\n",
+        },
         "mcp_servers": mcp_servers,
     }
 
@@ -757,6 +767,7 @@ async def test_claude_sdk_steer_by_label_uses_native_active_turn_steering(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "high",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
     }
@@ -839,6 +850,7 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
         "setting_sources": ["user", "project"],
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "low",
         "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",

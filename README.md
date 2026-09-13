@@ -275,6 +275,7 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 | `SUPER_AGENTS_EXTRA_MODELS` | unset | JSON map of extra model slugs per execution backend, e.g. `{"codex": ["new-model"]}` |
 | `SUPER_AGENTS_CODEX_PROFILE_PATH` | unset | Optional TOML profile applied to Codex thread configuration, never daemon launch arguments |
 | `SUPER_AGENTS_OPENBASE_CLOUD_CODEX_PROFILE_PATH` | unset | Backend-specific Codex profile; falls back to the generic Codex profile |
+| `SUPER_AGENTS_CLAUDE_SYSTEM_PROMPT_MODE` | `append` | How the base instructions file shapes the Claude system prompt: `append` keeps the stock `claude_code` preset and appends the file's text; `replace` substitutes the file contents for the whole prompt |
 | `SUPER_AGENTS_CLAUDE_SETTINGS_PATH` | unset | Optional Claude session settings JSON, passed through the SDK's `settings` option |
 | `SUPER_AGENTS_CLAUDE_MCP_CONFIG_PATH` | unset | Optional JSON `mcpServers` map merged into each Claude session |
 

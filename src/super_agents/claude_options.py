@@ -19,6 +19,12 @@ CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 # JSON object of extra Claude Code CLI flags, e.g. {"chrome": null} for
 # --chrome. Values map to flag arguments; null means a bare flag.
 CLAUDE_EXTRA_ARGS_ENV = "SUPER_AGENTS_CLAUDE_EXTRA_ARGS"
+# How the base instructions file shapes the Claude system prompt: "append"
+# (default) keeps the stock claude_code preset prompt — the one the models are
+# tuned against — and appends the file's text; "replace" substitutes the file
+# contents for the entire system prompt.
+CLAUDE_SYSTEM_PROMPT_MODE_ENV = "SUPER_AGENTS_CLAUDE_SYSTEM_PROMPT_MODE"
+CLAUDE_SYSTEM_PROMPT_MODES = ("append", "replace")
 CLAUDE_CONFIG_FILENAME = ".claude.json"
 CLAUDE_SERVICE_TIER_EFFORTS = {
     "fast": "low",
@@ -196,11 +202,8 @@ def managed_claude_config_options() -> JsonObject:
         _read_profile_object(path)
         options["settings"] = str(path)
 
-    if system_prompt_path := _base_instructions_file():
-        options["system_prompt"] = {
-            "type": "file",
-            "path": str(system_prompt_path),
-        }
+    if system_prompt := _system_prompt_option():
+        options["system_prompt"] = system_prompt
 
     mcp_servers = _claude_mcp_servers(claude_state_path())
     if profile_mcp_path := os.environ.get(CLAUDE_MCP_CONFIG_PATH_ENV):
@@ -233,6 +236,38 @@ def claude_state_path() -> Path:
     if config_dir_value:
         return Path(config_dir_value).expanduser() / CLAUDE_CONFIG_FILENAME
     return Path.home() / CLAUDE_CONFIG_FILENAME
+
+
+def _system_prompt_option() -> JsonObject | None:
+    """Build the Claude system prompt from the base instructions file.
+
+    Append mode (default) layers the instructions onto the stock claude_code
+    preset. With no instructions file it still returns the bare preset: the
+    SDK's None default produces an *empty* system prompt, so omitting the
+    option would silently strip the stock prompt too. Replace mode restores
+    the legacy behavior of substituting the file contents for the whole
+    prompt (and with no file, the SDK default applies).
+    """
+    path = _base_instructions_file()
+    if _system_prompt_mode() == "replace":
+        if path is None:
+            return None
+        return {"type": "file", "path": str(path)}
+    preset: JsonObject = {"type": "preset", "preset": "claude_code"}
+    if path is not None:
+        preset["append"] = path.read_text(encoding="utf-8")
+    return preset
+
+
+def _system_prompt_mode() -> str:
+    raw = os.environ.get(CLAUDE_SYSTEM_PROMPT_MODE_ENV, "").strip().lower()
+    if not raw:
+        return "append"
+    if raw not in CLAUDE_SYSTEM_PROMPT_MODES:
+        raise ValueError(
+            f"{CLAUDE_SYSTEM_PROMPT_MODE_ENV} must be one of {'/'.join(CLAUDE_SYSTEM_PROMPT_MODES)}, got: {raw}"
+        )
+    return raw
 
 
 def _base_instructions_file() -> Path | None:
