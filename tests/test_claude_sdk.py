@@ -582,7 +582,8 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
 
     await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
 
-    assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+    options = FakeClaudeSDKClient.options_seen[-1].kwargs
+    assert options == {
         "cwd": str(tmp_path),
         "permission_mode": "bypassPermissions",
         "effort": "high",
@@ -593,8 +594,13 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
             "preset": "claude_code",
             "append": "Openbase instructions\n",
         },
-        "mcp_servers": mcp_servers,
+        "mcp_servers": options["mcp_servers"],
     }
+    in_process = options["mcp_servers"]["super-agents"]
+    assert in_process["type"] == "sdk"
+    assert in_process["name"] == "super-agents"
+    assert in_process["instance"].name == "super-agents"
+    assert options["mcp_servers"]["other-server"] == mcp_servers["other-server"]
 
 
 @pytest.mark.asyncio

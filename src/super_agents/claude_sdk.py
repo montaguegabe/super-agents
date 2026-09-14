@@ -32,6 +32,7 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_home_index import refresh_last_interaction_index
+from super_agents.claude_inprocess_mcp import replace_super_agents_stdio_server
 from super_agents.claude_logs import (
     append_log,
 )
@@ -896,6 +897,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             ),
             backend=self.backend,
         )
+        replace_super_agents_stdio_server(options, client=self)
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
         self._sdk_clients[session.id] = client
