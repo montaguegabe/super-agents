@@ -78,7 +78,7 @@ def test_explicit_cloud_identity_overrides_process_backend(monkeypatch) -> None:
         backend="openbase_cloud",
     )
 
-    assert options.kwargs["model"] == "claude-sonnet-5"
+    assert options.kwargs["model"] == "claude-haiku-4-5"
     assert options.kwargs["env"]["ANTHROPIC_AUTH_TOKEN"] == "machine-token"
 
 
@@ -92,14 +92,14 @@ def test_openbase_cloud_backend_pins_claude_aliases(monkeypatch) -> None:
     assert options.kwargs["model"] == "claude-fable-5"
 
 
-def test_openbase_cloud_backend_defaults_unset_model_to_sonnet(monkeypatch) -> None:
+def test_openbase_cloud_backend_defaults_unset_model_to_haiku(monkeypatch) -> None:
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "openbase_cloud")
     monkeypatch.setenv(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "machine-token")
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
     options = agent_options(_FAKE_SDK, "/tmp", None, None, resume=None)
 
-    assert options.kwargs["model"] == "claude-sonnet-5"
+    assert options.kwargs["model"] == "claude-haiku-4-5"
 
 
 def test_local_claude_backend_leaves_unset_model_to_sdk(monkeypatch) -> None:

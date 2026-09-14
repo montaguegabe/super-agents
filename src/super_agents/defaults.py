@@ -35,7 +35,7 @@ CALLER_MODEL_ENV_KEYS = ("SUPER_AGENTS_CALLER_MODEL", "AGENT_MODEL")
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
 DEFAULT_CODEX_SERVICE_TIER = "standard"
-DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "claude-sonnet-5"
+DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "claude-haiku-4-5"
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +82,6 @@ def _caller_model_for_backend(selected_backend: str) -> str | None:
 def default_super_agents_model(*, backend: str | None = None) -> str | None:
     configured_backend = normalize_backend(backend or configured_backend_from_environment())
     selected_backend = execution_backend(configured_backend)
-    inherited = _caller_model_for_backend(selected_backend)
-    if inherited:
-        return inherited
     payload = default_dispatcher_config()
     configured_model = _backend_model(
         payload,
@@ -95,6 +92,11 @@ def default_super_agents_model(*, backend: str | None = None) -> str | None:
         "super_agents",
         backend=selected_backend,
     )
+    # The role-specific Settings choice is authoritative. Caller inheritance
+    # is only a fallback for standalone/unconfigured use; otherwise changing
+    # the dispatcher model would silently override "Default super agent".
+    if not configured_model:
+        configured_model = _caller_model_for_backend(selected_backend)
     if not configured_model and selected_backend == CODEX_BACKEND:
         configured_model = codex_profile_config(configured_backend).get("model")
     if configured_backend == OPENBASE_CLOUD_BACKEND and not configured_model:

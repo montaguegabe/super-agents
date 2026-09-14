@@ -188,9 +188,10 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
         name="super_agents_start",
         title="Start Super Agents Thread",
         description=(
-            "Create a named Super Agents thread. Model-first: pass model (e.g. fable, sol, astra, "
-            "opus) and the thread is routed to a backend that can run it; backend is an optional "
-            "advanced override. Unknown model slugs are rejected with suggestions."
+            "Create a named Super Agents thread. Usually omit model so the configured Super Agents "
+            "default is honored. Pass model (e.g. fable, sol, astra, opus) only when the user asks "
+            "for an override; the thread is then routed to a backend that can run it. Backend is an "
+            "optional advanced override. Unknown model slugs are rejected with suggestions."
         ),
         input_schema=object_schema(
             {
@@ -208,8 +209,9 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
                     "type": "string",
                     "description": (
                         "Model slug or provider-prefixed id (fable, sol, astra, opus, openai-sol, "
-                        "claude-fable-5, ...). Chooses the thread's backend automatically; defaults "
-                        "to the caller's model when known, else the configured default."
+                        "claude-fable-5, ...). Override only when the user requests a model; otherwise "
+                        "omit this field to honor the configured Super Agents default. An override "
+                        "chooses the thread's backend automatically."
                     ),
                 },
                 **backend_option_properties(),

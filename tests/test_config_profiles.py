@@ -47,6 +47,19 @@ def test_profile_model_is_fallback_below_explicit_role(tmp_path, monkeypatch):
     assert default_super_agents_model(backend="codex") == "role-model"
 
 
+def test_role_model_is_authoritative_over_caller_model(tmp_path, monkeypatch):
+    from super_agents.defaults import default_super_agents_model
+
+    roles = tmp_path / "dispatcher-config.json"
+    roles.write_text(
+        json.dumps({"backend_models": {"claude_code": {"super_agents": "haiku"}}})
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(roles))
+    monkeypatch.setenv("AGENT_MODEL", "opus")
+
+    assert default_super_agents_model(backend="claude_code") == "haiku"
+
+
 def test_claude_settings_and_mcp_are_session_scoped(tmp_path, monkeypatch):
     config_dir = tmp_path / "claude"
     config_dir.mkdir()

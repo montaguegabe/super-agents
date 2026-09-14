@@ -397,7 +397,7 @@ def test_openbase_cloud_uses_cloud_claude_model_defaults(monkeypatch, tmp_path: 
     assert default_super_agents_model() == "openbase-claude"
 
 
-def test_openbase_cloud_defaults_to_sonnet_when_unconfigured(monkeypatch, tmp_path: Path) -> None:
+def test_openbase_cloud_defaults_to_haiku_when_unconfigured(monkeypatch, tmp_path: Path) -> None:
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(json.dumps({}), encoding="utf-8")
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
@@ -405,8 +405,8 @@ def test_openbase_cloud_defaults_to_sonnet_when_unconfigured(monkeypatch, tmp_pa
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 
-    assert cleaned["model"] == "claude-sonnet-5"
-    assert default_super_agents_model() == "claude-sonnet-5"
+    assert cleaned["model"] == "claude-haiku-4-5"
+    assert default_super_agents_model() == "claude-haiku-4-5"
 
 
 def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:
@@ -3168,6 +3168,10 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert "favorite" in by_name["super_agents_recent"].input_schema["properties"]
     assert "approvalPolicy" in by_name["super_agents_start"].input_schema["properties"]
     assert "sandbox" in by_name["super_agents_start"].input_schema["properties"]
+    assert "Usually omit model" in by_name["super_agents_start"].description
+    assert "honor the configured Super Agents default" in (
+        by_name["super_agents_start"].input_schema["properties"]["model"]["description"]
+    )
     assert "approvalPolicy" in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "sandboxType" in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "approvalPolicy" in by_name["super_agents_queue_turn"].input_schema["properties"]
