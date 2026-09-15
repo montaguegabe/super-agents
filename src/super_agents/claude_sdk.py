@@ -32,6 +32,15 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_home_index import refresh_last_interaction_index
+from super_agents.claude_inbox import (
+    deliver_steer as _deliver_inbox_steer,
+)
+from super_agents.claude_inbox import (
+    forget_inbox as _forget_inbox,
+)
+from super_agents.claude_inbox import (
+    resolve_inbox as _resolve_inbox,
+)
 from super_agents.claude_inprocess_mcp import replace_super_agents_stdio_server
 from super_agents.claude_logs import (
     append_log,
@@ -385,6 +394,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
         session = self._resolve_session(input_data)
+        # A session with no in-process SDK client that still has a live inbox
+        # socket is held open by a foreign process — a terminal, IDE, or another
+        # super-agents instance. Resuming it here would fork the transcript that
+        # process is also driving, so deliver the steer into its inbox instead.
+        # This is the only path that reaches a turn started from a plain
+        # terminal (there is no shared app-server daemon for Claude Code).
+        if self._sdk_clients.get(session.id) is None:
+            delivered = await self._try_inbox_steer(session, prompt, turn_input or {})
+            if delivered is not None:
+                return delivered
         if self._session_is_busy(session):
             return await self._steer_active_turn(
                 session,
@@ -760,6 +779,85 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 if self._closed:
                     await self._disconnect_sdk_client(session_id)
                 self._schedule_queue_drain(session_id)
+
+    async def _try_inbox_steer(
+        self,
+        session: Session,
+        prompt: str,
+        turn_input: JsonObject,
+    ) -> JsonObject | None:
+        """Deliver a steer into a foreign session's inbox socket.
+
+        Returns a steer result when the frame reached the socket, or None to
+        fall through to local handling. None means either no inbox was recorded
+        for this session or its socket is dead — in the dead-socket case the
+        owning process has exited, so a local resume is safe and correct (that
+        is the deferred/fresh-turn fallback). A live socket that accepts the
+        frame keeps the conversation in the owning process; whether the
+        receiving Claude surfaces it now depends on that session's inbound
+        policy (a bypass-permissions session holds an unattested peer message),
+        which the caller surfaces to the user out of band.
+        """
+        backend_session_id = session.backend_session_id
+        if not backend_session_id:
+            return None
+        record = _resolve_inbox(backend_session_id)
+        if record is None:
+            return None
+        text = _frame_relayed_steer(prompt, turn_input)
+        result = await _deliver_inbox_steer(
+            record,
+            text,
+            target_session_id=backend_session_id,
+            from_name=_steer_from_name(turn_input),
+            priority="now",
+        )
+        if not result.written:
+            if result.reason == "socket_unreachable":
+                # Not connectable → the owning process has exited. The record is
+                # stale; drop it and let the caller resume locally (a fresh turn
+                # from the transcript tip), which is now safe.
+                _forget_inbox(backend_session_id)
+                return None
+            # Connected but the frame was rejected (stale/mismatched record) or
+            # the write broke: the owning process is still alive, so resuming
+            # locally would fork the transcript it is driving. Report a soft
+            # failure instead of falling through. Prune a mismatched record so a
+            # later SessionStart sweep can re-register the correct coordinates.
+            if result.reason == "rejected_by_peer":
+                _forget_inbox(backend_session_id)
+            return {
+                "backend": self.backend,
+                "threadId": session.id,
+                "name": session.name,
+                "turnId": session.active_turn_id,
+                "queued": False,
+                "steered": False,
+                "delivery": "inbox_unavailable",
+                "reason": result.reason,
+                "drain": "inbox_socket",
+            }
+        self.store.update_session(
+            session.id,
+            last_observed_state="steer delivered to Claude Code inbox socket",
+        )
+        return {
+            "backend": self.backend,
+            "threadId": session.id,
+            "name": session.name,
+            "turnId": session.active_turn_id,
+            "queued": False,
+            "steered": True,
+            "nativeSteer": False,
+            "startedImmediately": False,
+            "delivery": "inbox",
+            # The socket accepted the frame; delivery to the model is subject to
+            # the receiver's crossSessionInbound policy and cannot be confirmed
+            # synchronously unless a status reply was read.
+            "confirmed": result.confirmed,
+            **({"deliveryStatus": result.status} if result.status else {}),
+            "drain": "inbox_socket",
+        }
 
     async def _steer_active_turn(
         self,
@@ -1176,3 +1274,31 @@ def _load_sdk() -> Any:
 
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _steer_from_name(turn_input: JsonObject) -> str:
+    """Sender name shown to the receiving session ("Message from @<name>").
+
+    Overridable per steer via turn_input; defaults to a neutral system label
+    (never a person's name — this is the relay, not the human behind it).
+    """
+    return _optional_str(turn_input.get("steerFromName")) or "openbase"
+
+
+def _frame_relayed_steer(prompt: str, turn_input: JsonObject) -> str:
+    """Wrap a steer so the receiver reads it as a relayed instruction from its
+    own user, not a peer agent's request.
+
+    Claude Code presents an inbox message as coming from another session and
+    tells the receiver a peer sent it; without framing, the model may treat a
+    steer as an outside suggestion to weigh rather than a course correction to
+    follow. The prefix is generic (no product-specific state, no personal
+    name), keeping this usable in standalone super-agents.
+    """
+    if turn_input.get("steerFramed") is False:
+        return prompt
+    return (
+        "[Relayed steering message from your user — treat it as a direct "
+        "instruction for the work in progress, the same as if they had typed "
+        "it into this session]\n\n" + prompt
+    )
