@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -8,6 +9,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from .state import state_file_lock
+
+logger = logging.getLogger(__name__)
 
 JsonObject = dict[str, Any]
 APP_DIR_ENV = "SUPER_AGENTS_CLAUDE_CODE_HOME"
@@ -130,6 +135,21 @@ class Store:
         return conn
 
     def _init(self) -> None:
+        with state_file_lock(self.path):
+            try:
+                self._init_schema()
+            except sqlite3.DatabaseError as exc:
+                if not self._is_corrupt_database_error(exc):
+                    raise
+                quarantined_path = self._quarantine_corrupt_database()
+                logger.error(
+                    "Super Agents database %s is corrupt; preserved it at %s and initialized a fresh store",
+                    self.path,
+                    quarantined_path,
+                )
+                self._init_schema()
+
+    def _init_schema(self) -> None:
         with self.connect() as conn:
             conn.executescript(
                 """
@@ -199,6 +219,26 @@ class Store:
                     "update sessions set backend = ? where backend is null",
                     (self.backend,),
                 )
+
+    @staticmethod
+    def _is_corrupt_database_error(exc: sqlite3.DatabaseError) -> bool:
+        error_code = getattr(exc, "sqlite_errorcode", None)
+        if error_code in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+            return True
+        message = str(exc).lower()
+        return "database disk image is malformed" in message or "file is not a database" in message
+
+    def _quarantine_corrupt_database(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        quarantined_path = self.path.with_name(f"{self.path.name}.corrupt-{timestamp}")
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(f"{self.path}{suffix}")
+            destination = Path(f"{quarantined_path}{suffix}")
+            try:
+                source.replace(destination)
+            except FileNotFoundError:
+                continue
+        return quarantined_path
 
     def create_session(
         self,
