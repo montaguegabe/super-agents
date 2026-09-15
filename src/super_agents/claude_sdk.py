@@ -709,6 +709,19 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 # receive_response(). Drop the client so the next turn
                 # resumes from the transcript tip on a clean stream.
                 await self._disconnect_sdk_client(session_id)
+                if _unresumable_session_error(exc):
+                    # The recorded backend session no longer exists on disk
+                    # (e.g. its transcript was orphaned by a config-directory
+                    # move), so resuming it fails identically on every turn —
+                    # forever. Drop the pointer so the next turn starts a
+                    # fresh backend session instead of replaying this failure
+                    # on every request.
+                    append_log(
+                        session.log_path,
+                        f"[{iso_now()}] RECOVER clearing unresumable backend session "
+                        f"{session.backend_session_id}; the next turn starts fresh\n",
+                    )
+                    self.store.update_session(session_id, backend_session_id=None)
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
@@ -1091,6 +1104,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 def _is_noop_result(message: Any) -> bool:
     """A ResultMessage that ran no model turns (e.g. a resume handshake)."""
     return getattr(message, "num_turns", None) == 0
+
+
+# Claude Code's exact wording when `--resume <id>` targets a session whose
+# transcript is gone (deleted, or orphaned by a CLAUDE_CONFIG_DIR change).
+# This failure is deterministic and permanent for that id, unlike transient
+# launch/stream errors, which must NOT clear the resume pointer.
+_UNRESUMABLE_SESSION_MARKER = "no conversation found with session id"
+
+
+def _unresumable_session_error(exc: BaseException) -> bool:
+    return _UNRESUMABLE_SESSION_MARKER in str(exc).lower()
 
 
 def _load_sdk() -> Any:

@@ -1257,3 +1257,18 @@ async def test_claude_sdk_startup_sweep_preserves_last_activity_time(
     session = store.get_session(started["threadId"])
     assert session.status == "failed"
     assert session.updated_at == old
+
+
+def test_unresumable_session_error_detection() -> None:
+    """Only the deterministic missing-transcript resume failure clears the
+    pointer; transient launch/stream errors must never do so."""
+    from super_agents.claude_sdk import _unresumable_session_error
+
+    assert _unresumable_session_error(
+        RuntimeError(
+            "Command failed with exit code 1: No conversation found with "
+            "session ID: ee69d7eb-c602-47dd-bd41-7b11e41695ee"
+        )
+    )
+    assert not _unresumable_session_error(RuntimeError("stream disconnected"))
+    assert not _unresumable_session_error(TimeoutError("turn timed out"))
