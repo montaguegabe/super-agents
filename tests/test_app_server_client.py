@@ -3505,3 +3505,58 @@ def test_base_instructions_prepended_once(monkeypatch, tmp_path: Path) -> None:
     assert combined == "Base instructions.\n\nTask-specific instructions."
     assert with_base_instructions(combined) == combined
     assert with_base_instructions(None) == "Base instructions."
+
+
+@pytest.mark.asyncio
+async def test_sessions_merges_state_records_missing_from_native_page(
+    tmp_path: Path,
+) -> None:
+    """A fresh named thread must resolve even when thread/list omits it.
+
+    thread/list returns a bounded page in thread-creation order, so a thread
+    created moments ago (or one beyond the page window) can be missing from
+    the native listing. Name routing then failed with "No configured backend
+    owns name ..." right after super_agents_start (2026-09-15 dispatcher
+    incident).
+    """
+
+    class PagedListClient(ReadyClient):
+        async def list_threads(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "data": [
+                    {
+                        "id": "thread-old",
+                        "name": "old-task",
+                        "cwd": "/tmp/project",
+                        "createdAt": 1,
+                        "updatedAt": 1,
+                        "status": {"type": "notLoaded"},
+                    }
+                ]
+            }
+
+    client = PagedListClient("ws://unused", tmp_path / "state.json", "gpt-test")
+    await client.remember_session(
+        "thread-fresh",
+        {
+            "label": "diagnose-fresh-task",
+            "agentName": "Connie",
+            "cwd": "/tmp/project",
+            "lastStatus": "unknown",
+        },
+    )
+
+    sessions = await client.sessions()
+    by_thread = {item.get("threadId"): item for item in sessions}
+
+    assert set(by_thread) == {"thread-old", "thread-fresh"}
+    fresh = by_thread["thread-fresh"]
+    assert fresh.get("label") == "diagnose-fresh-task"
+
+    # The state record must not duplicate a thread the native page covers.
+    await client.remember_session(
+        "thread-old",
+        {"label": "old-task", "cwd": "/tmp/project", "lastStatus": "unknown"},
+    )
+    sessions = await client.sessions()
+    assert [item.get("threadId") for item in sessions].count("thread-old") == 1

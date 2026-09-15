@@ -38,13 +38,21 @@ class LabelQueryMixin:
         except Exception:
             threads = {}
         native_threads = extract_threads(threads)
-        if native_threads:
-            return [self.thread_view(thread) for thread in native_threads]
+        views = [self.thread_view(thread) for thread in native_threads]
+        # thread/list is a bounded page in thread-creation order, so a thread
+        # created moments ago (or one beyond the page window) can be missing
+        # from the native listing even though this client just registered it.
+        # Merge in state-store sessions the page did not cover; without this,
+        # name routing right after super_agents_start fails with
+        # "No configured backend owns name ...".
         state = await self.read_state()
-        return [
+        covered = {view.get("threadId") for view in views}
+        views.extend(
             self.session_view(session)
             for session in sorted(state.sessions.values(), key=lambda item: item.updated_at, reverse=True)
-        ]
+            if session.thread_id not in covered
+        )
+        return views
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         query = input_data or LabelQueryInput()
