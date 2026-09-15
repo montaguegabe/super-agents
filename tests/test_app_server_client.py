@@ -53,6 +53,27 @@ class DelayedResponseClient(ReadyClient):
         asyncio.create_task(respond_later())
 
 
+class RecordingRequestClient(CodexAppServerClient):
+    def __init__(self, *args: Any, responses: list[dict[str, Any]], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.responses = list(responses)
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def ensure_connected(self) -> None:
+        return None
+
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout_seconds: float = 30,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.requests.append((method, params or {}))
+        return self.responses.pop(0)
+
+
 def test_websocket_max_size_defaults_above_codex_default(monkeypatch) -> None:
     monkeypatch.delenv("SUPER_AGENTS_WEBSOCKET_MAX_SIZE", raising=False)
 
@@ -63,6 +84,51 @@ def test_websocket_max_size_can_be_disabled(monkeypatch) -> None:
     monkeypatch.setenv("SUPER_AGENTS_WEBSOCKET_MAX_SIZE", "unlimited")
 
     assert websocket_max_size() is None
+
+
+@pytest.mark.asyncio
+async def test_read_thread_page_uses_bounded_codex_history_requests(
+    tmp_path: Path,
+) -> None:
+    client = RecordingRequestClient(
+        "ws://unused",
+        tmp_path / "state.json",
+        "gpt-test",
+        responses=[
+            {"thread": {"id": "thread-large", "cwd": "/tmp/project"}},
+            {
+                "data": [{"id": "turn-2", "status": "completed"}],
+                "nextCursor": "next-page",
+                "backwardsCursor": "newer-page",
+            },
+        ],
+    )
+
+    result = await client.read_thread_page(
+        "thread-large",
+        limit=25,
+        cursor="current-page",
+    )
+
+    assert client.requests == [
+        (
+            "thread/read",
+            {"threadId": "thread-large", "includeTurns": False},
+        ),
+        (
+            "thread/turns/list",
+            {
+                "threadId": "thread-large",
+                "limit": 25,
+                "cursor": "current-page",
+                "itemsView": "summary",
+                "sortDirection": "desc",
+            },
+        ),
+    ]
+    assert result["thread"]["turns"] == [{"id": "turn-2", "status": "completed"}]
+    assert result["thread"]["historyNextCursor"] == "next-page"
+    assert result["thread"]["historyBackwardsCursor"] == "newer-page"
 
 
 def test_default_model_ignores_model_env(monkeypatch, tmp_path: Path) -> None:

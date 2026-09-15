@@ -198,3 +198,57 @@ class ThreadLifecycleMixin:
             int((time.monotonic() - started) * 1000),
         )
         return result
+
+    async def read_thread_page(
+        self,
+        thread_id: str,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        items_view: str = "summary",
+        sort_direction: str = "desc",
+    ) -> JsonObject:
+        """Read thread metadata plus one bounded page of retained turns.
+
+        Paginated Codex threads can be hundreds of megabytes on disk. Asking
+        ``thread/read`` to inline every turn can therefore exceed the app-server
+        transport limit before a caller has a chance to trim the result.
+        ``thread/turns/list`` performs that bound inside Codex and is the
+        supported history path for paginated threads.
+        """
+        started = time.monotonic()
+        await self.ensure_connected()
+        result = await self.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": False},
+        )
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if not isinstance(thread, dict):
+            return result
+
+        page = await self.request(
+            "thread/turns/list",
+            without_none(
+                {
+                    "threadId": thread_id,
+                    "limit": limit,
+                    "cursor": cursor,
+                    "itemsView": items_view,
+                    "sortDirection": sort_direction,
+                }
+            ),
+        )
+        turns = page.get("data") if isinstance(page, dict) else None
+        thread["turns"] = turns if isinstance(turns, list) else []
+        thread["historyNextCursor"] = page.get("nextCursor")
+        thread["historyBackwardsCursor"] = page.get("backwardsCursor")
+        thread["historyItemsView"] = items_view
+        logger.info(
+            "dispatch_timing stage=super_agents_thread_page_response "
+            "thread_id=%s turn_count=%d has_next=%s elapsed_ms=%d",
+            thread_id,
+            len(thread["turns"]),
+            bool(thread["historyNextCursor"]),
+            int((time.monotonic() - started) * 1000),
+        )
+        return result
