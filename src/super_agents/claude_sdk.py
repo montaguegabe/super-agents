@@ -958,6 +958,11 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         replace_super_agents_stdio_server(options, client=self)
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
+        if disallowed_tools:
+            logger.info(
+                "dispatch_timing stage=super_agent_tool_policy_connected thread_id=%s disallowed_tools=%s",
+                session.id, ",".join(disallowed_tools),
+            )
         self._sdk_clients[session.id] = client
         self._sdk_client_tool_policies[session.id] = disallowed_tools
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
