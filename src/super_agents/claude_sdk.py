@@ -130,7 +130,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # The CLI may coalesce rapid queries into one response, so extra
         # reads are bounded by this timeout instead of blocking forever.
         self._session_pending_results: dict[str, int] = {}
+        self._session_interrupted_steer_followups: set[str] = set()
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
+        self._interrupted_steer_start_timeout_seconds = 90.0
         self._orphan_sweep_done = False
         # Identifies this client instance in the shared store so instances in
         # other processes can tell their cached CLI's conversation leaf is
@@ -618,6 +620,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 # emit a no-op ResultMessage (num_turns == 0) from the resume
                 # handshake; those don't count against any query.
                 consumed_any_result = False
+                last_result_message: Any = None
                 while self._session_pending_results.get(session_id, 0) > 0:
                     result_message: Any = None
                     stream = sdk_client.receive_response()
@@ -626,9 +629,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                             try:
                                 first_message = await asyncio.wait_for(
                                     stream.__anext__(),
-                                    timeout=self._steer_drain_timeout_seconds,
+                                    timeout=(self._interrupted_steer_start_timeout_seconds
+                                        if session_id in self._session_interrupted_steer_followups
+                                        else self._steer_drain_timeout_seconds),
                                 )
                             except (TimeoutError, StopAsyncIteration):
+                                if session_id in self._session_interrupted_steer_followups:
+                                    raise RuntimeError("Interrupted steer did not begin its follow-up response; task completion is unverified.")
                                 # No further response is coming: the
                                 # remaining queries were coalesced into an
                                 # already-consumed response. Reset on a
@@ -636,6 +643,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                                 self._clear_pending_results(session_id)
                                 await self._disconnect_sdk_client(session_id)
                                 break
+                            self._session_interrupted_steer_followups.discard(session_id)
                             messages = _chain_async(first_message, stream)
                         else:
                             messages = stream
@@ -671,6 +679,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         self._clear_pending_results(session_id)
                         break
                     if not _is_noop_result(result_message):
+                        last_result_message = result_message
                         consumed_any_result = True
                         self._consume_pending_result(session_id)
                     if self._turn_was_cancelled(turn_id):
@@ -684,6 +693,10 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     await self._disconnect_sdk_client(session_id)
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
+                    if last_result_message is None:
+                        raise RuntimeError("Claude Code stream ended without a terminal result; task completion is unverified.")
+                    if getattr(last_result_message, "is_error", False):
+                        raise RuntimeError("Claude Code returned an error result; task completion is unverified.")
                     self.store.update_turn(
                         turn_id,
                         status="completed",
@@ -787,9 +800,15 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # leaving it to shift the next turn's answer (off-by-one).
         self._register_pending_result(session.id)
         try:
+            if turn_input.get("interruptCurrentWork") is True:
+                self._session_interrupted_steer_followups.add(session.id)
+                await sdk_client.interrupt()
+                logger.info("dispatch_timing stage=super_agent_steer_interrupt_ack thread_id=%s turn_id=%s", session.id, active_turn_id)
             await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
+            logger.info("dispatch_timing stage=super_agent_steer_correction_sent thread_id=%s turn_id=%s interrupted=%s", session.id, active_turn_id, turn_input.get("interruptCurrentWork") is True)
         except BaseException:
             self._consume_pending_result(session.id)
+            self._session_interrupted_steer_followups.discard(session.id)
             raise
         self._record_session_leaf_owner(session.id)
         current_turn = self.store.get_turn(active_turn_id)
@@ -809,6 +828,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             "queued": False,
             "steered": True,
             "nativeSteer": True,
+            "interruptedCurrentWork": turn_input.get("interruptCurrentWork") is True,
             "startedImmediately": False,
             "drain": "steered_active_turn",
         }
@@ -936,6 +956,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     def _clear_pending_results(self, session_id: str) -> None:
         self._session_pending_results.pop(session_id, None)
+        self._session_interrupted_steer_followups.discard(session_id)
 
     async def _disconnect_sdk_client(self, session_id: str) -> None:
         # A dropped client means a fresh stream on the next connect; any
@@ -1103,7 +1124,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
 def _is_noop_result(message: Any) -> bool:
     """A ResultMessage that ran no model turns (e.g. a resume handshake)."""
-    return getattr(message, "num_turns", None) == 0
+    return getattr(message, "num_turns", None) == 0 and not getattr(message, "is_error", False)
 
 
 # Claude Code's exact wording when `--resume <id>` targets a session whose

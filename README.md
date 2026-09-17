@@ -151,6 +151,8 @@ running `super-agents-mcp`.
 
 ## Claude Code Backend
 
+Normal steering sends a correction into the active conversation while running tools finish. When a correction explicitly stops or replaces that tool work, call `super_agents_steer` with `interruptCurrentWork: true`. On Claude-compatible backends this interrupts the tool and submits the correction on the same conversation and active turn. Progress remains pending until the corrective response finishes; a submission acknowledgment is not proof that the work changed. Error results, missing terminal results and interrupted follow-ups that never begin are reported as failed rather than successful completion. Use a queued turn for independent follow-up work.
+
 The Claude Code backend uses the `claude-agent-sdk` package directly. It does
 not run a local Anthropic Messages API adapter, does not expose `/v1/responses`,
 and does not require Codex app-server. Direct `claude_code` billing/auth comes
