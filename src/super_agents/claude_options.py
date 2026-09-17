@@ -71,6 +71,7 @@ def agent_options(
     resume: str | None,
     can_use_tool: Any | None = None,
     backend: str | None = None,
+    disallowed_tools: tuple[str, ...] = (),
 ) -> Any:
     managed_options = managed_claude_config_options()
     permission_mode = resolve_permission_mode()
@@ -100,6 +101,8 @@ def agent_options(
         kwargs["resume"] = resume
     if extra_args := claude_extra_args():
         kwargs["extra_args"] = extra_args
+    if disallowed_tools:
+        kwargs["disallowed_tools"] = list(disallowed_tools)
     return sdk.ClaudeAgentOptions(**kwargs)
 
 

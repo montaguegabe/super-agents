@@ -93,6 +93,32 @@ class FakeSdk:
     ClaudeSDKClient = FakeClaudeSDKClient
 
 
+@pytest.mark.asyncio
+async def test_embedding_tool_policy_is_session_scoped_and_reconnects_on_change(tmp_path):
+    store = Store(tmp_path / "policy.sqlite3")
+    blocked = {"router": ("Agent", "Task")}
+    client = ClaudeAgentSdkClient(
+        store=store,
+        sdk_loader=fake_sdk_loader,
+        disallowed_tools_for_session=lambda session: blocked.get(session.name, ()),
+    )
+    router = await client.start_thread({"name": "router", "cwd": str(tmp_path)})
+    worker = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
+    sdk = fake_sdk_loader()
+    first = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
+    assert first.options.kwargs["disallowed_tools"] == ["Agent", "Task"]
+    child = await client._sdk_client_for(store.get_session(worker["threadId"]), None, None, None, sdk)
+    assert "disallowed_tools" not in child.options.kwargs
+    same = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
+    assert same is first
+    blocked["router"] = ("Agent",)
+    replacement = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
+    assert replacement is not first
+    assert not first.connected
+    assert replacement.options.kwargs["disallowed_tools"] == ["Agent"]
+    await client.close()
+
+
 def fake_sdk_loader() -> FakeSdk:
     return FakeSdk()
 

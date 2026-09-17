@@ -111,6 +111,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         approval_requests_file: str | Path | None = None,
         approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
         backend_identity: str | None = None,
+        disallowed_tools_for_session: Callable[[Session], tuple[str, ...]] | None = None,
     ) -> None:
         self.backend = normalize_backend(backend_identity or CLAUDE_CODE_BACKEND)
         if execution_backend(self.backend) != CLAUDE_CODE_BACKEND:
@@ -119,6 +120,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         self.store.scope_backend(self.backend)
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
+        self._disallowed_tools_for_session = disallowed_tools_for_session
+        self._sdk_client_tool_policies: dict[str, tuple[str, ...]] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
@@ -629,13 +632,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                             try:
                                 first_message = await asyncio.wait_for(
                                     stream.__anext__(),
-                                    timeout=(self._interrupted_steer_start_timeout_seconds
+                                    timeout=(
+                                        self._interrupted_steer_start_timeout_seconds
                                         if session_id in self._session_interrupted_steer_followups
-                                        else self._steer_drain_timeout_seconds),
+                                        else self._steer_drain_timeout_seconds
+                                    ),
                                 )
                             except (TimeoutError, StopAsyncIteration):
                                 if session_id in self._session_interrupted_steer_followups:
-                                    raise RuntimeError("Interrupted steer did not begin its follow-up response; task completion is unverified.")
+                                    raise RuntimeError(
+                                        "Interrupted steer did not begin its follow-up response; task completion is unverified."
+                                    )
                                 # No further response is coming: the
                                 # remaining queries were coalesced into an
                                 # already-consumed response. Reset on a
@@ -694,7 +701,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
                     if last_result_message is None:
-                        raise RuntimeError("Claude Code stream ended without a terminal result; task completion is unverified.")
+                        raise RuntimeError(
+                            "Claude Code stream ended without a terminal result; task completion is unverified."
+                        )
                     if getattr(last_result_message, "is_error", False):
                         raise RuntimeError("Claude Code returned an error result; task completion is unverified.")
                     self.store.update_turn(
@@ -803,9 +812,18 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             if turn_input.get("interruptCurrentWork") is True:
                 self._session_interrupted_steer_followups.add(session.id)
                 await sdk_client.interrupt()
-                logger.info("dispatch_timing stage=super_agent_steer_interrupt_ack thread_id=%s turn_id=%s", session.id, active_turn_id)
+                logger.info(
+                    "dispatch_timing stage=super_agent_steer_interrupt_ack thread_id=%s turn_id=%s",
+                    session.id,
+                    active_turn_id,
+                )
             await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
-            logger.info("dispatch_timing stage=super_agent_steer_correction_sent thread_id=%s turn_id=%s interrupted=%s", session.id, active_turn_id, turn_input.get("interruptCurrentWork") is True)
+            logger.info(
+                "dispatch_timing stage=super_agent_steer_correction_sent thread_id=%s turn_id=%s interrupted=%s",
+                session.id,
+                active_turn_id,
+                turn_input.get("interruptCurrentWork") is True,
+            )
         except BaseException:
             self._consume_pending_result(session.id)
             self._session_interrupted_steer_followups.discard(session.id)
@@ -900,6 +918,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         sdk: Any,
     ) -> Any:
         effective_effort = _claude_effort(reasoning_effort, service_tier)
+        policy = self._disallowed_tools_for_session
+        disallowed_tools = tuple(policy(session)) if policy else ()
         existing = self._sdk_clients.get(session.id)
         if existing is not None and not self._owns_session_leaf(session):
             # A client instance in another process ran the last turn, so this
@@ -909,7 +929,11 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             # reconnect so the resume adopts the new tip.
             await self._disconnect_sdk_client(session.id)
             existing = None
-        if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
+        if (
+            existing is not None
+            and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier)
+            and self._sdk_client_tool_policies.get(session.id, ()) == disallowed_tools
+        ):
             resolved_model = _openbase_cloud_claude_model(model, self.backend)
             if resolved_model and hasattr(existing, "set_model"):
                 await existing.set_model(resolved_model)
@@ -929,11 +953,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 lambda session_id=session.id: self._active_turn_id(session_id),
             ),
             backend=self.backend,
+            disallowed_tools=disallowed_tools,
         )
         replace_super_agents_stdio_server(options, client=self)
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
         self._sdk_clients[session.id] = client
+        self._sdk_client_tool_policies[session.id] = disallowed_tools
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
         self._record_session_leaf_owner(session.id)
         return client
@@ -963,6 +989,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # unconsumed responses died with the old stream.
         self._clear_pending_results(session_id)
         client = self._sdk_clients.pop(session_id, None)
+        self._sdk_client_tool_policies.pop(session_id, None)
         self._sdk_client_efforts.pop(session_id, None)
         if client is None:
             return

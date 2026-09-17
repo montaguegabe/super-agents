@@ -413,6 +413,8 @@ stdio MCP server.
 
 ## Development
 
+Python embeddings of `ClaudeAgentSdkClient` may supply `disallowed_tools_for_session`, a callback receiving the session and returning a tuple of SDK tool names to exclude. The default excludes none. Policies are evaluated per session, and changing a policy reconnects that session's SDK client rather than reusing outdated tool options. This supports routing-only clients without restricting separately managed worker sessions.
+
 From this repository:
 
 ```bash
