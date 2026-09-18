@@ -38,6 +38,11 @@ def _jsonable_message(message: Any) -> Any:
 
 
 def message_preview(message: Any) -> str:
+    # SDK UserMessage includes tool/skill results as TextBlocks too. Those
+    # blocks are input to the assistant, never its reply or progress report.
+    # Check the field's presence: ordinary user messages have a None value.
+    if hasattr(message, "tool_use_result") or getattr(message, "parent_tool_use_id", None):
+        return ""
     result = getattr(message, "result", None)
     if isinstance(result, str) and result.strip():
         return result.strip()
