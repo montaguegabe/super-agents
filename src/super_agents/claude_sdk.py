@@ -132,6 +132,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         self._disallowed_tools_for_session = disallowed_tools_for_session
         self._sdk_client_tool_policies: dict[str, tuple[str, ...]] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
+        self._sdk_client_models: dict[str, str | None] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
@@ -1033,8 +1034,14 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             and self._sdk_client_tool_policies.get(session.id, ()) == disallowed_tools
         ):
             resolved_model = _openbase_cloud_claude_model(model, self.backend)
-            if resolved_model and hasattr(existing, "set_model"):
+            # Reasserting the same model adds a control-protocol round trip
+            # before every voice follow-up and can time out without submitting
+            # the user's request. Only change a connected client's model when
+            # the effective model actually changed.
+            if (resolved_model and resolved_model != self._sdk_client_models.get(session.id)
+                and hasattr(existing, "set_model")):
                 await existing.set_model(resolved_model)
+                self._sdk_client_models[session.id] = resolved_model
             self._record_session_leaf_owner(session.id)
             return existing
         await self._disconnect_sdk_client(session.id)
@@ -1064,6 +1071,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         self._sdk_clients[session.id] = client
         self._sdk_client_tool_policies[session.id] = disallowed_tools
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
+        self._sdk_client_models[session.id] = _openbase_cloud_claude_model(model, self.backend)
         self._record_session_leaf_owner(session.id)
         return client
 
@@ -1094,6 +1102,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         client = self._sdk_clients.pop(session_id, None)
         self._sdk_client_tool_policies.pop(session_id, None)
         self._sdk_client_efforts.pop(session_id, None)
+        self._sdk_client_models.pop(session_id, None)
         if client is None:
             return
         disconnect = getattr(client, "disconnect", None)

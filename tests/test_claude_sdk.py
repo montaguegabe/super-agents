@@ -979,6 +979,41 @@ async def test_claude_sdk_reuses_cached_client_for_consecutive_turns(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_same_model_followup_does_not_send_control_request(tmp_path: Path, monkeypatch) -> None:
+    async def stalled_control(self, model=None):
+        raise TimeoutError("Control request timeout: set_model")
+
+    monkeypatch.setattr(FakeClaudeSDKClient, "set_model", stalled_control)
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "haiku"})
+    for prompt in ("one", "two"):
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
+            {"prompt": prompt, "model": "haiku"})
+        await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    assert len(FakeClaudeSDKClient.options_seen) == 1
+    await client.close()
+    assert client._sdk_client_models == {}
+
+
+@pytest.mark.asyncio
+async def test_changed_model_is_applied_once_to_cached_client(tmp_path: Path, monkeypatch) -> None:
+    changes = []
+    async def change_model(self, model=None):
+        changes.append(model)
+    monkeypatch.setattr(FakeClaudeSDKClient, "set_model", change_model)
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    for index, model in enumerate(("haiku", "sonnet", "sonnet")):
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
+            {"prompt": str(index), "model": model})
+        await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    assert changes == ["sonnet"]
+    assert len(FakeClaudeSDKClient.options_seen) == 1
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_close_disconnects_cached_clients(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
