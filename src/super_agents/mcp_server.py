@@ -469,13 +469,16 @@ def _tool_super_agents_steer(client: SuperAgentsClient) -> ToolDefinition:
             "If no active turn exists, starts a new turn on the same thread."
         ),
         input_schema=object_schema(
-            {**name_query_properties(include_output_options=False), "prompt": {"type": "string"}},
+            {**name_query_properties(include_output_options=False), "prompt": {"type": "string"},
+                "interruptCurrentWork": {"type": "boolean", "default": False,
+                    "description": "For Claude-compatible active turns, interrupt running tools before applying a correction that explicitly stops or replaces their current work. Normal steering leaves tools running."}},
             ["name", "prompt"],
         ),
         handler=lambda input_data: client.steer_by_label(
             clean_name_query_input(input_data),
             required_string(input_data, "prompt"),
-            {"_mcpCallId": optional_string(input_data, "_mcpCallId")},
+            {"_mcpCallId": optional_string(input_data, "_mcpCallId"),
+                "interruptCurrentWork": optional_boolean_or_none(input_data, "interruptCurrentWork") is True},
         ),
     )
 

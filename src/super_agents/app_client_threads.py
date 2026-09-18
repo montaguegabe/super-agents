@@ -6,6 +6,11 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from .app_client_turns import (
+    RESUME_TIMEOUT_SECONDS,
+    _raise_if_resume_wedged,
+    _record_resume_wedge,
+)
 from .app_formatting import turn_text_preview, without_none
 from .app_protocol import (
     extract_model,
@@ -106,6 +111,7 @@ class ThreadLifecycleMixin:
             thread_id,
         )
         await self.ensure_connected()
+        _raise_if_resume_wedged(thread_id)
         params: JsonObject = {
             "threadId": thread_id,
             "config": await self._login_shell_config_override(thread_id),
@@ -117,10 +123,15 @@ class ThreadLifecycleMixin:
             agent_name,
         ):
             params["developerInstructions"] = identity_instructions
-        result = await self.request(
-            "thread/resume",
-            params,
-        )
+        try:
+            result = await self.request(
+                "thread/resume",
+                params,
+                timeout_seconds=RESUME_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            _record_resume_wedge(thread_id)
+            raise
         await self.merge_session(
             thread_id,
             {

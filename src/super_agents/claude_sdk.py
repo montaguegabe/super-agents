@@ -32,6 +32,15 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_home_index import refresh_last_interaction_index
+from super_agents.claude_inbox import (
+    deliver_steer as _deliver_inbox_steer,
+)
+from super_agents.claude_inbox import (
+    forget_inbox as _forget_inbox,
+)
+from super_agents.claude_inbox import (
+    resolve_inbox as _resolve_inbox,
+)
 from super_agents.claude_inprocess_mcp import replace_super_agents_stdio_server
 from super_agents.claude_logs import (
     append_log,
@@ -111,6 +120,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         approval_requests_file: str | Path | None = None,
         approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
         backend_identity: str | None = None,
+        disallowed_tools_for_session: Callable[[Session], tuple[str, ...]] | None = None,
     ) -> None:
         self.backend = normalize_backend(backend_identity or CLAUDE_CODE_BACKEND)
         if execution_backend(self.backend) != CLAUDE_CODE_BACKEND:
@@ -119,7 +129,10 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         self.store.scope_backend(self.backend)
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
+        self._disallowed_tools_for_session = disallowed_tools_for_session
+        self._sdk_client_tool_policies: dict[str, tuple[str, ...]] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
+        self._sdk_client_models: dict[str, str | None] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
@@ -130,7 +143,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # The CLI may coalesce rapid queries into one response, so extra
         # reads are bounded by this timeout instead of blocking forever.
         self._session_pending_results: dict[str, int] = {}
+        self._session_interrupted_steer_followups: set[str] = set()
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
+        self._interrupted_steer_start_timeout_seconds = 90.0
         self._orphan_sweep_done = False
         # Identifies this client instance in the shared store so instances in
         # other processes can tell their cached CLI's conversation leaf is
@@ -380,6 +395,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
         session = self._resolve_session(input_data)
+        # A session with no in-process SDK client that still has a live inbox
+        # socket is held open by a foreign process — a terminal, IDE, or another
+        # super-agents instance. Resuming it here would fork the transcript that
+        # process is also driving, so deliver the steer into its inbox instead.
+        # This is the only path that reaches a turn started from a plain
+        # terminal (there is no shared app-server daemon for Claude Code).
+        if self._sdk_clients.get(session.id) is None:
+            delivered = await self._try_inbox_steer(session, prompt, turn_input or {})
+            if delivered is not None:
+                return delivered
         if self._session_is_busy(session):
             return await self._steer_active_turn(
                 session,
@@ -618,6 +643,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 # emit a no-op ResultMessage (num_turns == 0) from the resume
                 # handshake; those don't count against any query.
                 consumed_any_result = False
+                last_result_message: Any = None
                 while self._session_pending_results.get(session_id, 0) > 0:
                     result_message: Any = None
                     stream = sdk_client.receive_response()
@@ -626,9 +652,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                             try:
                                 first_message = await asyncio.wait_for(
                                     stream.__anext__(),
-                                    timeout=self._steer_drain_timeout_seconds,
+                                    timeout=(
+                                        self._interrupted_steer_start_timeout_seconds
+                                        if session_id in self._session_interrupted_steer_followups
+                                        else self._steer_drain_timeout_seconds
+                                    ),
                                 )
                             except (TimeoutError, StopAsyncIteration):
+                                if session_id in self._session_interrupted_steer_followups:
+                                    raise RuntimeError(
+                                        "Interrupted steer did not begin its follow-up response; task completion is unverified."
+                                    )
                                 # No further response is coming: the
                                 # remaining queries were coalesced into an
                                 # already-consumed response. Reset on a
@@ -636,6 +670,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                                 self._clear_pending_results(session_id)
                                 await self._disconnect_sdk_client(session_id)
                                 break
+                            self._session_interrupted_steer_followups.discard(session_id)
                             messages = _chain_async(first_message, stream)
                         else:
                             messages = stream
@@ -671,6 +706,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         self._clear_pending_results(session_id)
                         break
                     if not _is_noop_result(result_message):
+                        last_result_message = result_message
                         consumed_any_result = True
                         self._consume_pending_result(session_id)
                     if self._turn_was_cancelled(turn_id):
@@ -684,6 +720,12 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     await self._disconnect_sdk_client(session_id)
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
+                    if last_result_message is None:
+                        raise RuntimeError(
+                            "Claude Code stream ended without a terminal result; task completion is unverified."
+                        )
+                    if getattr(last_result_message, "is_error", False):
+                        raise RuntimeError("Claude Code returned an error result; task completion is unverified.")
                     self.store.update_turn(
                         turn_id,
                         status="completed",
@@ -739,6 +781,85 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     await self._disconnect_sdk_client(session_id)
                 self._schedule_queue_drain(session_id)
 
+    async def _try_inbox_steer(
+        self,
+        session: Session,
+        prompt: str,
+        turn_input: JsonObject,
+    ) -> JsonObject | None:
+        """Deliver a steer into a foreign session's inbox socket.
+
+        Returns a steer result when the frame reached the socket, or None to
+        fall through to local handling. None means either no inbox was recorded
+        for this session or its socket is dead — in the dead-socket case the
+        owning process has exited, so a local resume is safe and correct (that
+        is the deferred/fresh-turn fallback). A live socket that accepts the
+        frame keeps the conversation in the owning process; whether the
+        receiving Claude surfaces it now depends on that session's inbound
+        policy (a bypass-permissions session holds an unattested peer message),
+        which the caller surfaces to the user out of band.
+        """
+        backend_session_id = session.backend_session_id
+        if not backend_session_id:
+            return None
+        record = _resolve_inbox(backend_session_id)
+        if record is None:
+            return None
+        text = _frame_relayed_steer(prompt, turn_input)
+        result = await _deliver_inbox_steer(
+            record,
+            text,
+            target_session_id=backend_session_id,
+            from_name=_steer_from_name(turn_input),
+            priority="now",
+        )
+        if not result.written:
+            if result.reason == "socket_unreachable":
+                # Not connectable → the owning process has exited. The record is
+                # stale; drop it and let the caller resume locally (a fresh turn
+                # from the transcript tip), which is now safe.
+                _forget_inbox(backend_session_id)
+                return None
+            # Connected but the frame was rejected (stale/mismatched record) or
+            # the write broke: the owning process is still alive, so resuming
+            # locally would fork the transcript it is driving. Report a soft
+            # failure instead of falling through. Prune a mismatched record so a
+            # later SessionStart sweep can re-register the correct coordinates.
+            if result.reason == "rejected_by_peer":
+                _forget_inbox(backend_session_id)
+            return {
+                "backend": self.backend,
+                "threadId": session.id,
+                "name": session.name,
+                "turnId": session.active_turn_id,
+                "queued": False,
+                "steered": False,
+                "delivery": "inbox_unavailable",
+                "reason": result.reason,
+                "drain": "inbox_socket",
+            }
+        self.store.update_session(
+            session.id,
+            last_observed_state="steer delivered to Claude Code inbox socket",
+        )
+        return {
+            "backend": self.backend,
+            "threadId": session.id,
+            "name": session.name,
+            "turnId": session.active_turn_id,
+            "queued": False,
+            "steered": True,
+            "nativeSteer": False,
+            "startedImmediately": False,
+            "delivery": "inbox",
+            # The socket accepted the frame; delivery to the model is subject to
+            # the receiver's crossSessionInbound policy and cannot be confirmed
+            # synchronously unless a status reply was read.
+            "confirmed": result.confirmed,
+            **({"deliveryStatus": result.status} if result.status else {}),
+            "drain": "inbox_socket",
+        }
+
     async def _steer_active_turn(
         self,
         session: Session,
@@ -787,9 +908,24 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         # leaving it to shift the next turn's answer (off-by-one).
         self._register_pending_result(session.id)
         try:
+            if turn_input.get("interruptCurrentWork") is True:
+                self._session_interrupted_steer_followups.add(session.id)
+                await sdk_client.interrupt()
+                logger.info(
+                    "dispatch_timing stage=super_agent_steer_interrupt_ack thread_id=%s turn_id=%s",
+                    session.id,
+                    active_turn_id,
+                )
             await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
+            logger.info(
+                "dispatch_timing stage=super_agent_steer_correction_sent thread_id=%s turn_id=%s interrupted=%s",
+                session.id,
+                active_turn_id,
+                turn_input.get("interruptCurrentWork") is True,
+            )
         except BaseException:
             self._consume_pending_result(session.id)
+            self._session_interrupted_steer_followups.discard(session.id)
             raise
         self._record_session_leaf_owner(session.id)
         current_turn = self.store.get_turn(active_turn_id)
@@ -809,6 +945,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             "queued": False,
             "steered": True,
             "nativeSteer": True,
+            "interruptedCurrentWork": turn_input.get("interruptCurrentWork") is True,
             "startedImmediately": False,
             "drain": "steered_active_turn",
         }
@@ -880,6 +1017,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         sdk: Any,
     ) -> Any:
         effective_effort = _claude_effort(reasoning_effort, service_tier)
+        policy = self._disallowed_tools_for_session
+        disallowed_tools = tuple(policy(session)) if policy else ()
         existing = self._sdk_clients.get(session.id)
         if existing is not None and not self._owns_session_leaf(session):
             # A client instance in another process ran the last turn, so this
@@ -889,10 +1028,20 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             # reconnect so the resume adopts the new tip.
             await self._disconnect_sdk_client(session.id)
             existing = None
-        if existing is not None and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier):
+        if (
+            existing is not None
+            and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier)
+            and self._sdk_client_tool_policies.get(session.id, ()) == disallowed_tools
+        ):
             resolved_model = _openbase_cloud_claude_model(model, self.backend)
-            if resolved_model and hasattr(existing, "set_model"):
+            # Reasserting the same model adds a control-protocol round trip
+            # before every voice follow-up and can time out without submitting
+            # the user's request. Only change a connected client's model when
+            # the effective model actually changed.
+            if (resolved_model and resolved_model != self._sdk_client_models.get(session.id)
+                and hasattr(existing, "set_model")):
                 await existing.set_model(resolved_model)
+                self._sdk_client_models[session.id] = resolved_model
             self._record_session_leaf_owner(session.id)
             return existing
         await self._disconnect_sdk_client(session.id)
@@ -909,12 +1058,20 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 lambda session_id=session.id: self._active_turn_id(session_id),
             ),
             backend=self.backend,
+            disallowed_tools=disallowed_tools,
         )
         replace_super_agents_stdio_server(options, client=self)
         client = sdk.ClaudeSDKClient(options=options)
         await client.connect()
+        if disallowed_tools:
+            logger.info(
+                "dispatch_timing stage=super_agent_tool_policy_connected thread_id=%s disallowed_tools=%s",
+                session.id, ",".join(disallowed_tools),
+            )
         self._sdk_clients[session.id] = client
+        self._sdk_client_tool_policies[session.id] = disallowed_tools
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
+        self._sdk_client_models[session.id] = _openbase_cloud_claude_model(model, self.backend)
         self._record_session_leaf_owner(session.id)
         return client
 
@@ -936,13 +1093,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     def _clear_pending_results(self, session_id: str) -> None:
         self._session_pending_results.pop(session_id, None)
+        self._session_interrupted_steer_followups.discard(session_id)
 
     async def _disconnect_sdk_client(self, session_id: str) -> None:
         # A dropped client means a fresh stream on the next connect; any
         # unconsumed responses died with the old stream.
         self._clear_pending_results(session_id)
         client = self._sdk_clients.pop(session_id, None)
+        self._sdk_client_tool_policies.pop(session_id, None)
         self._sdk_client_efforts.pop(session_id, None)
+        self._sdk_client_models.pop(session_id, None)
         if client is None:
             return
         disconnect = getattr(client, "disconnect", None)
@@ -1103,7 +1263,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
 def _is_noop_result(message: Any) -> bool:
     """A ResultMessage that ran no model turns (e.g. a resume handshake)."""
-    return getattr(message, "num_turns", None) == 0
+    return getattr(message, "num_turns", None) == 0 and not getattr(message, "is_error", False)
 
 
 # Claude Code's exact wording when `--resume <id>` targets a session whose
@@ -1123,3 +1283,31 @@ def _load_sdk() -> Any:
 
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _steer_from_name(turn_input: JsonObject) -> str:
+    """Sender name shown to the receiving session ("Message from @<name>").
+
+    Overridable per steer via turn_input; defaults to a neutral system label
+    (never a person's name — this is the relay, not the human behind it).
+    """
+    return _optional_str(turn_input.get("steerFromName")) or "openbase"
+
+
+def _frame_relayed_steer(prompt: str, turn_input: JsonObject) -> str:
+    """Wrap a steer so the receiver reads it as a relayed instruction from its
+    own user, not a peer agent's request.
+
+    Claude Code presents an inbox message as coming from another session and
+    tells the receiver a peer sent it; without framing, the model may treat a
+    steer as an outside suggestion to weigh rather than a course correction to
+    follow. The prefix is generic (no product-specific state, no personal
+    name), keeping this usable in standalone super-agents.
+    """
+    if turn_input.get("steerFramed") is False:
+        return prompt
+    return (
+        "[Relayed steering message from your user — treat it as a direct "
+        "instruction for the work in progress, the same as if they had typed "
+        "it into this session]\n\n" + prompt
+    )

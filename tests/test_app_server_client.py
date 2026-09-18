@@ -3560,3 +3560,66 @@ async def test_sessions_merges_state_records_missing_from_native_page(
     )
     sessions = await client.sessions()
     assert [item.get("threadId") for item in sessions].count("thread-old") == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_wedge_cooldown_fails_fast_after_timeout(tmp_path: Path) -> None:
+    """A wedged thread/resume must not stack repeated full-timeout waits.
+
+    Observed 2026-09-16: the app-server's state DB held a stale rollout path
+    for a thread, thread/resume hung, and chained calls waited 137s/110s.
+    After one timeout, further resumes for that thread fail fast for a
+    cooldown window.
+    """
+    from super_agents import app_client_turns
+
+    app_client_turns._resume_wedged_threads.clear()
+
+    class WedgedResumeClient(ReadyClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.resume_requests = 0
+
+        async def request(
+            self,
+            method: str,
+            params: dict[str, Any] | None = None,
+            timeout_seconds: float = 30,
+            *,
+            context: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            if method == "thread/resume":
+                self.resume_requests += 1
+                assert timeout_seconds == app_client_turns.RESUME_TIMEOUT_SECONDS
+                raise TimeoutError(
+                    "Timed out waiting for app-server response to thread/resume."
+                )
+            return {}
+
+    client = WedgedResumeClient("ws://unused", tmp_path / "state.json", "gpt-test")
+    params = {"cwd": "/tmp/project", "config": {}}
+
+    with pytest.raises(TimeoutError):
+        await client._refresh_thread_environment("thread-wedged", params)
+    assert client.resume_requests == 1
+
+    # Within the cooldown the wedge fails fast without another RPC.
+    with pytest.raises(RuntimeError, match="failing fast"):
+        await client._refresh_thread_environment("thread-wedged", params)
+    assert client.resume_requests == 1
+
+    # Other threads are unaffected.
+    with pytest.raises(TimeoutError):
+        await client._refresh_thread_environment("thread-healthy", params)
+    assert client.resume_requests == 2
+
+    # After the cooldown expires the thread is retried for real.
+    import time as _time
+
+    app_client_turns._resume_wedged_threads["thread-wedged"] = (
+        _time.monotonic() - app_client_turns.RESUME_WEDGE_COOLDOWN_SECONDS - 1
+    )
+    with pytest.raises(TimeoutError):
+        await client._refresh_thread_environment("thread-wedged", params)
+    assert client.resume_requests == 3
+    app_client_turns._resume_wedged_threads.clear()

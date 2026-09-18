@@ -93,6 +93,32 @@ class FakeSdk:
     ClaudeSDKClient = FakeClaudeSDKClient
 
 
+@pytest.mark.asyncio
+async def test_embedding_tool_policy_is_session_scoped_and_reconnects_on_change(tmp_path):
+    store = Store(tmp_path / "policy.sqlite3")
+    blocked = {"router": ("Agent", "Task")}
+    client = ClaudeAgentSdkClient(
+        store=store,
+        sdk_loader=fake_sdk_loader,
+        disallowed_tools_for_session=lambda session: blocked.get(session.name, ()),
+    )
+    router = await client.start_thread({"name": "router", "cwd": str(tmp_path)})
+    worker = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
+    sdk = fake_sdk_loader()
+    first = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
+    assert first.options.kwargs["disallowed_tools"] == ["Agent", "Task"]
+    child = await client._sdk_client_for(store.get_session(worker["threadId"]), None, None, None, sdk)
+    assert "disallowed_tools" not in child.options.kwargs
+    same = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
+    assert same is first
+    blocked["router"] = ("Agent",)
+    replacement = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
+    assert replacement is not first
+    assert not first.connected
+    assert replacement.options.kwargs["disallowed_tools"] == ["Agent"]
+    await client.close()
+
+
 def fake_sdk_loader() -> FakeSdk:
     return FakeSdk()
 
@@ -953,6 +979,41 @@ async def test_claude_sdk_reuses_cached_client_for_consecutive_turns(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_same_model_followup_does_not_send_control_request(tmp_path: Path, monkeypatch) -> None:
+    async def stalled_control(self, model=None):
+        raise TimeoutError("Control request timeout: set_model")
+
+    monkeypatch.setattr(FakeClaudeSDKClient, "set_model", stalled_control)
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "haiku"})
+    for prompt in ("one", "two"):
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
+            {"prompt": prompt, "model": "haiku"})
+        await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    assert len(FakeClaudeSDKClient.options_seen) == 1
+    await client.close()
+    assert client._sdk_client_models == {}
+
+
+@pytest.mark.asyncio
+async def test_changed_model_is_applied_once_to_cached_client(tmp_path: Path, monkeypatch) -> None:
+    changes = []
+    async def change_model(self, model=None):
+        changes.append(model)
+    monkeypatch.setattr(FakeClaudeSDKClient, "set_model", change_model)
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    for index, model in enumerate(("haiku", "sonnet", "sonnet")):
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
+            {"prompt": str(index), "model": model})
+        await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    assert changes == ["sonnet"]
+    assert len(FakeClaudeSDKClient.options_seen) == 1
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_close_disconnects_cached_clients(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
@@ -1272,3 +1333,114 @@ def test_unresumable_session_error_detection() -> None:
     )
     assert not _unresumable_session_error(RuntimeError("stream disconnected"))
     assert not _unresumable_session_error(TimeoutError("turn timed out"))
+
+
+class _InboxProbeServer:
+    """Tiny AF_UNIX server mimicking a Claude Code session's inbox socket."""
+
+    def __init__(self, path: Path, session_id: str) -> None:
+        self._path = path
+        self._session_id = session_id
+        self.frames: list[dict] = []
+        self._server = None
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_unix_server(self._handle, path=str(self._path))
+
+    async def _handle(self, reader, writer) -> None:  # type: ignore[no-untyped-def]
+        try:
+            for _ in range(2):
+                try:
+                    line = await asyncio.wait_for(reader.readline(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    break
+                if not line:
+                    break
+                self.frames.append(json.loads(line))
+                if self.frames[-1].get("type") == "user":
+                    break
+            await asyncio.sleep(0.2)
+        finally:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+
+
+@pytest.mark.asyncio
+async def test_steer_routes_foreign_session_to_inbox_socket(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import tempfile
+
+    registry = tmp_path / "inbox-registry"
+    registry.mkdir()
+    monkeypatch.setenv("CLAUDE_INBOX_REGISTRY_DIR", str(registry))
+
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "terminal-sess", "cwd": str(tmp_path)})
+    # Simulate a session owned by a terminal process: it has a backend session
+    # id and no in-process SDK client.
+    store.update_session(started["threadId"], backend_session_id="claude-term-1")
+    client._sdk_clients = {}
+
+    # A live inbox socket for that backend session id (short path for AF_UNIX).
+    with tempfile.TemporaryDirectory(prefix="cci-sdk-", dir="/tmp") as sockdir:
+        sock = Path(sockdir) / "s.sock"
+        server = _InboxProbeServer(sock, "claude-term-1")
+        await server.start()
+        (registry / "claude-term-1.json").write_text(
+            json.dumps({"sessionId": "claude-term-1", "socket": str(sock), "token": "t0k"})
+        )
+        try:
+            result = await client.steer_by_label(
+                LabelQueryInput(label="terminal-sess"),
+                "switch to the other approach",
+            )
+        finally:
+            await server.stop()
+
+    assert result["delivery"] == "inbox"
+    assert result["steered"] is True
+    assert result["nativeSteer"] is False
+    # The steer went to the socket, not into a locally-run turn.
+    assert FakeClaudeSDKClient.prompts == []
+    user_frame = next(f for f in server.frames if f.get("type") == "user")
+    assert user_frame["session_id"] == "claude-term-1"
+    assert "switch to the other approach" in user_frame["message"]["content"]
+    # Framed as a relayed user instruction, not a bare peer message.
+    assert "Relayed steering message" in user_frame["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_steer_falls_back_to_local_when_inbox_socket_dead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    registry = tmp_path / "inbox-registry"
+    registry.mkdir()
+    monkeypatch.setenv("CLAUDE_INBOX_REGISTRY_DIR", str(registry))
+
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "dead-sess", "cwd": str(tmp_path)})
+    store.update_session(started["threadId"], backend_session_id="claude-dead-1")
+    client._sdk_clients = {}
+
+    # Record points at a socket that does not exist: the owning process is gone.
+    (registry / "claude-dead-1.json").write_text(
+        json.dumps({"sessionId": "claude-dead-1", "socket": str(tmp_path / "gone.sock")})
+    )
+
+    result = await client.steer_by_label(
+        LabelQueryInput(label="dead-sess"),
+        "keep going",
+    )
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    # Fell through to a locally-run turn (resume), and the stale record was pruned.
+    assert result.get("delivery") != "inbox"
+    assert FakeClaudeSDKClient.prompts and FakeClaudeSDKClient.prompts[-1].endswith("keep going")
+    assert not (registry / "claude-dead-1.json").exists()

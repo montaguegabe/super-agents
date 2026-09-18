@@ -31,6 +31,44 @@ from .state import JsonObject, TrackedStatus
 
 logger = logging.getLogger(__name__)
 
+# Interactive operations get tighter deadlines than the 30s transport
+# default: a voice dispatcher waiting 30s (or a chain of 30s calls) on a
+# wedged thread reads as a dead session. Observed wedge: the app-server's
+# state DB holding a stale rollout path makes thread/resume hang forever
+# (2026-09-16, 137s/110s tool waits).
+STEER_TIMEOUT_SECONDS = 15.0
+RESUME_TIMEOUT_SECONDS = 20.0
+# After thread/resume times out for a thread, fail resumes for it fast for
+# this long instead of stacking further full-timeout waits behind the wedge.
+RESUME_WEDGE_COOLDOWN_SECONDS = 120.0
+
+_resume_wedged_threads: dict[str, float] = {}
+
+
+def _record_resume_wedge(thread_id: str) -> None:
+    _resume_wedged_threads[thread_id] = time.monotonic()
+
+
+def _resume_wedge_remaining(thread_id: str) -> float:
+    wedged_at = _resume_wedged_threads.get(thread_id)
+    if wedged_at is None:
+        return 0.0
+    remaining = RESUME_WEDGE_COOLDOWN_SECONDS - (time.monotonic() - wedged_at)
+    if remaining <= 0:
+        _resume_wedged_threads.pop(thread_id, None)
+        return 0.0
+    return remaining
+
+
+def _raise_if_resume_wedged(thread_id: str) -> None:
+    remaining = _resume_wedge_remaining(thread_id)
+    if remaining > 0:
+        raise RuntimeError(
+            f"thread/resume for {thread_id} timed out recently (app-server may "
+            f"hold a stale rollout mapping for it); failing fast for another "
+            f"{int(remaining)}s instead of waiting on the wedge again."
+        )
+
 
 def _is_missing_rollout_error(exc: RuntimeError) -> bool:
     return "no rollout found for thread id" in str(exc)
@@ -165,6 +203,7 @@ class TurnLifecycleMixin:
         return params
 
     async def _refresh_thread_environment(self, thread_id: str, params: JsonObject) -> None:
+        _raise_if_resume_wedged(thread_id)
         try:
             await self.request(
                 "thread/resume",
@@ -173,7 +212,11 @@ class TurnLifecycleMixin:
                     "cwd": params["cwd"],
                     "config": params["config"],
                 },
+                timeout_seconds=RESUME_TIMEOUT_SECONDS,
             )
+        except TimeoutError:
+            _record_resume_wedge(thread_id)
+            raise
         except RuntimeError as exc:
             if not _is_missing_rollout_error(exc):
                 raise
@@ -264,6 +307,7 @@ class TurnLifecycleMixin:
                 "expectedTurnId": turn_id,
                 "input": [{"type": "text", "text": prompt}],
             },
+            timeout_seconds=STEER_TIMEOUT_SECONDS,
             context={
                 "dispatchId": dispatch_id,
                 "threadId": thread_id,
