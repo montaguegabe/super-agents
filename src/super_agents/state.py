@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, TypeVar
 
@@ -291,6 +293,86 @@ def update_state_file(path: Path, callback: Callable[[StateFile], T]) -> T:
         result = callback(state)
         write_state_file(path, state)
         return result
+
+
+def update_state_file_when(path: Path, callback: Callable[[StateFile], bool]) -> bool:
+    """Update the state file only when ``callback`` returns True.
+
+    The callback mutates the given state in place and returns whether the
+    mutation must be persisted; returning False skips the disk write so
+    high-frequency no-op updates don't rewrite the whole file.
+    """
+    with state_file_lock(path):
+        state = read_state_file(path)
+        should_write = callback(state)
+        if should_write:
+            write_state_file(path, state)
+        return should_write
+
+
+def _iso_to_epoch(iso_value: str | None) -> float:
+    if not iso_value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(iso_value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _session_last_activity(session: SessionRecord) -> float:
+    return max(_iso_to_epoch(session.last_event_at), _iso_to_epoch(session.updated_at))
+
+
+def prune_state_file_sessions(
+    path: Path,
+    *,
+    max_age_days: float = 30.0,
+    max_turns_per_session: int = 40,
+    now: float | None = None,
+) -> JsonObject:
+    """Drop long-inactive sessions and cap per-session turn history.
+
+    The state file is rewritten on every session merge, so its size is a
+    per-event cost; unbounded session/turn accumulation makes each write
+    (and read) proportionally slower. Sessions referenced by a routine are
+    always kept. Returns a summary of what was removed.
+    """
+    if now is None:
+        now = time.time()
+    cutoff = now - max_age_days * 86400.0
+    with state_file_lock(path):
+        state = read_state_file(path)
+        referenced = {
+            thread_id
+            for routine in state.routines.values()
+            for thread_id in (routine.thread_id, routine.last_thread_id)
+            if thread_id
+        }
+        removed_sessions = 0
+        removed_turns = 0
+        for thread_id in list(state.sessions):
+            session = state.sessions[thread_id]
+            if thread_id not in referenced and _session_last_activity(session) < cutoff:
+                del state.sessions[thread_id]
+                removed_sessions += 1
+                continue
+            turns = session.turns or {}
+            if len(turns) > max_turns_per_session:
+                ranked = sorted(turns.values(), key=lambda turn: turn.updated_at, reverse=True)
+                keep = {turn.turn_id for turn in ranked[:max_turns_per_session]}
+                if session.active_turn_id:
+                    keep.add(session.active_turn_id)
+                removed_turns += len(turns) - len(keep & set(turns))
+                session.turns = {turn_id: turn for turn_id, turn in turns.items() if turn_id in keep}
+        if removed_sessions or removed_turns:
+            write_state_file(path, state)
+        return {
+            "removedSessions": removed_sessions,
+            "removedTurns": removed_turns,
+            "remainingSessions": len(state.sessions),
+            "maxAgeDays": max_age_days,
+            "maxTurnsPerSession": max_turns_per_session,
+        }
 
 
 def as_session_record_map(value: Any) -> dict[str, SessionRecord]:

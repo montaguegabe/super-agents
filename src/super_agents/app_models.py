@@ -46,6 +46,10 @@ class TurnState:
     events: list[JsonObject] = field(default_factory=list)
     pending_requests: list[PendingServerRequest] = field(default_factory=list)
     finished_at: str | None = None
+    # Total notifications ever received for this turn. Unlike len(events)
+    # (capped at a rolling window), this only grows — a value still moving
+    # while poll RPCs fail proves the backend is busy streaming, not down.
+    notification_count: int = 0
     # Set whenever a notification advances this turn toward a state a waiter
     # cares about (terminal, or an approval request arriving/clearing). Lets
     # callers await turn progress instead of polling. Not serialized.
