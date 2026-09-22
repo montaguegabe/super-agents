@@ -562,6 +562,33 @@ async def test_claude_sdk_start_thread_retires_other_backend_name_holder(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_read_thread_does_not_echo_previous_output_onto_running_turn(tmp_path: Path) -> None:
+    # While a new turn runs, the session-level lastUsefulMessage still holds
+    # the PREVIOUS turn's output; pasting it onto the running turn made
+    # clients show the old output twice.
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    session_id = started["threadId"]
+    done = store.create_turn(session_id, "first prompt", status="completed")
+    store.update_turn(done.id, last_useful_message="old output")
+    running = store.create_turn(session_id, "second prompt", status="running")
+    store.update_session(
+        session_id,
+        status="running",
+        active_turn_id=running.id,
+        last_turn_id=running.id,
+        last_useful_message="old output",
+    )
+
+    readback = await client.read_by_label(LabelQueryInput(label="sdk"), include_turns=True)
+
+    by_id = {turn["turnId"]: turn for turn in readback["turns"]}
+    assert by_id[done.id]["lastUsefulMessage"] == "old output"
+    assert "lastUsefulMessage" not in by_id[running.id]
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_start_thread_refresh_preserves_existing_agent_name(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)

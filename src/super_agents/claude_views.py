@@ -73,6 +73,15 @@ class SessionViewMixin:
 
     def _turn_view(self, session: Session, turn: Any) -> JsonObject:
         data = turn.to_json()
-        if "lastUsefulMessage" not in data and turn.id == session.last_turn_id and session.last_useful_message:
+        if (
+            "lastUsefulMessage" not in data
+            and turn.id == session.last_turn_id
+            # A just-launched turn is already the session's last turn, but the
+            # session-level message still belongs to the previous turn; pasting
+            # it here made clients show the old output twice while the new
+            # turn ran. The running turn's own row picks up live progress.
+            and turn.id != session.active_turn_id
+            and session.last_useful_message
+        ):
             data["lastUsefulMessage"] = session.last_useful_message
         return data
