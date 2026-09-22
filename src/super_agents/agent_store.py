@@ -315,6 +315,35 @@ class Store:
                 row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
         return row_to_session(row) if row else None
 
+    def get_name_holder(self, name: str) -> Session | None:
+        """The session holding this name regardless of backend.
+
+        ``name`` is unique across the whole table, so a session created under
+        another backend still blocks the name; callers that are about to
+        create a session need to see that holder even though ``get_by_name``
+        scopes to this store's backend.
+        """
+        with self.connect() as conn:
+            row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
+        return row_to_session(row) if row else None
+
+    def retire_name_holder(self, name: str) -> Session | None:
+        """Free a name by renaming whichever session holds it, any backend.
+
+        Unlike ``rename_session`` this never refetches through the store's
+        backend scope, so it also works on a holder another backend owns.
+        Returns the previous holder, or None when the name was free.
+        """
+        holder = self.get_name_holder(name)
+        if holder is None:
+            return None
+        with self.connect() as conn:
+            conn.execute(
+                "update sessions set name = ?, updated_at = ? where id = ?",
+                (f"{name} (retired {holder.id[-8:]})", iso_now(), holder.id),
+            )
+        return holder
+
     def require_by_name(self, name: str) -> Session:
         session = self.get_by_name(name)
         if session is None:

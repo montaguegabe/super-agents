@@ -544,6 +544,24 @@ async def test_claude_sdk_start_thread_fresh_retires_existing_named_session(tmp_
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_start_thread_retires_other_backend_name_holder(tmp_path: Path) -> None:
+    # A same-named session left behind by another backend must not make
+    # start_thread fail on the store's cross-backend UNIQUE name constraint.
+    path = tmp_path / "state.sqlite3"
+    other_store = Store(path, backend="claude_code")
+    holder = other_store.create_session("dispatcher", cwd=str(tmp_path))
+
+    store = Store(path, backend="openbase_cloud")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader, backend_identity="openbase_cloud")
+    started = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
+
+    assert started["threadId"] != holder.id
+    assert store.get_by_name("dispatcher").id == started["threadId"]
+    retired = other_store.get_session(holder.id)
+    assert retired.name == f"dispatcher (retired {holder.id[-8:]})"
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_start_thread_refresh_preserves_existing_agent_name(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
@@ -988,8 +1006,7 @@ async def test_same_model_followup_does_not_send_control_request(tmp_path: Path,
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
     await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "haiku"})
     for prompt in ("one", "two"):
-        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
-            {"prompt": prompt, "model": "haiku"})
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": prompt, "model": "haiku"})
         await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
     assert len(FakeClaudeSDKClient.options_seen) == 1
     await client.close()
@@ -999,15 +1016,16 @@ async def test_same_model_followup_does_not_send_control_request(tmp_path: Path,
 @pytest.mark.asyncio
 async def test_changed_model_is_applied_once_to_cached_client(tmp_path: Path, monkeypatch) -> None:
     changes = []
+
     async def change_model(self, model=None):
         changes.append(model)
+
     monkeypatch.setattr(FakeClaudeSDKClient, "set_model", change_model)
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
     await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
     for index, model in enumerate(("haiku", "sonnet", "sonnet")):
-        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
-            {"prompt": str(index), "model": model})
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": str(index), "model": model})
         await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
     assert changes == ["sonnet"]
     assert len(FakeClaudeSDKClient.options_seen) == 1

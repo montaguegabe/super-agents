@@ -196,6 +196,11 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             # (and conversation) instead of the reuse-by-name refresh below.
             self.store.rename_session(existing.id, f"{name} (retired {existing.id[-8:]})")
             existing = None
+        if existing is None:
+            # The name column is unique across backends, so a same-named
+            # session left behind by another backend blocks create_session
+            # below; retire it out of the way rather than failing the start.
+            self.store.retire_name_holder(name)
         if existing is not None:
             effective_agent_name = agent_name or existing.agent_name
             effective_developer_instructions = with_super_agent_identity_instructions(
@@ -1038,8 +1043,11 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             # before every voice follow-up and can time out without submitting
             # the user's request. Only change a connected client's model when
             # the effective model actually changed.
-            if (resolved_model and resolved_model != self._sdk_client_models.get(session.id)
-                and hasattr(existing, "set_model")):
+            if (
+                resolved_model
+                and resolved_model != self._sdk_client_models.get(session.id)
+                and hasattr(existing, "set_model")
+            ):
                 await existing.set_model(resolved_model)
                 self._sdk_client_models[session.id] = resolved_model
             self._record_session_leaf_owner(session.id)
@@ -1066,7 +1074,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         if disallowed_tools:
             logger.info(
                 "dispatch_timing stage=super_agent_tool_policy_connected thread_id=%s disallowed_tools=%s",
-                session.id, ",".join(disallowed_tools),
+                session.id,
+                ",".join(disallowed_tools),
             )
         self._sdk_clients[session.id] = client
         self._sdk_client_tool_policies[session.id] = disallowed_tools
