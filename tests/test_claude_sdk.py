@@ -1256,6 +1256,117 @@ async def test_claude_sdk_coalesced_steers_do_not_hang_the_turn(
     assert "next question" in (second_turn.last_useful_message or "")
 
 
+@dataclass
+class FakeTaskMessage:
+    subtype: str
+    task_id: str
+    description: str = ""
+    status: str | None = None
+
+
+class BackgroundTaskClaudeSDKClient(FakeClaudeSDKClient):
+    """First response ends while two spawned tasks still run; their terminal
+    events (and optionally the follow-up response) arrive on later reads."""
+
+    tasks_done: asyncio.Event = asyncio.Event()
+    followup: bool = True
+
+    def __init__(self, options: FakeClaudeAgentOptions) -> None:
+        super().__init__(options)
+        self.responded = False
+
+    async def receive_response(self):
+        if not self.responded:
+            self.responded = True
+            yield FakeTaskMessage("task_started", "task-a", description="explore repo A")
+            yield FakeTaskMessage("task_started", "task-b", description="explore repo B")
+            yield FakeAssistantMessage([FakeTextBlock("launched explorers; waiting on results")])
+            yield FakeResultMessage("launched explorers; waiting on results")
+            return
+        await BackgroundTaskClaudeSDKClient.tasks_done.wait()
+        yield FakeTaskMessage("task_notification", "task-a", status="completed")
+        yield FakeTaskMessage("task_updated", "task-b", status="killed")
+        if BackgroundTaskClaudeSDKClient.followup:
+            yield FakeAssistantMessage([FakeTextBlock("synthesized findings")])
+            yield FakeResultMessage("synthesized findings")
+            return
+        # No follow-up response ever starts (e.g. a killed watch); the stream
+        # stays open with nothing more to say.
+        await asyncio.Event().wait()
+
+
+class BackgroundTaskSdk:
+    ClaudeAgentOptions = FakeClaudeAgentOptions
+    ClaudeSDKClient = BackgroundTaskClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_turn_stays_running_until_background_tasks_finish(tmp_path: Path) -> None:
+    """A response can end while subagents/watches it spawned still run; the
+    turn must not report "completed" until they finish.
+
+    Regression for 2026-09-22: agents that fanned out background exploration
+    subagents were reported completed the moment the parent response ended
+    ("I've launched three agents; once they report back I'll synthesize...")
+    while the subagents were still working, and their results rotted unread
+    on the stream.
+    """
+    BackgroundTaskClaudeSDKClient.tasks_done = asyncio.Event()
+    BackgroundTaskClaudeSDKClient.followup = True
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: BackgroundTaskSdk())
+    client._background_task_poll_seconds = 0.05
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "diagnose"})
+
+    # The parent response has ended, but two spawned tasks are in flight:
+    # the turn and session must stay running, and status must say why.
+    await wait_for(
+        lambda: "waiting on 2 background task(s)" in (store.get_session(started["threadId"]).last_observed_state or "")
+    )
+    assert store.get_turn(result["turnId"]).status == "running"
+    assert store.get_session(started["threadId"]).status == "running"
+    assert "explore repo A" in store.get_session(started["threadId"]).last_observed_state
+    # Hold across several poll cycles: the status must not flip to completed
+    # while the tasks are still running.
+    await asyncio.sleep(0.3)
+    assert store.get_turn(result["turnId"]).status == "running"
+    assert store.get_session(started["threadId"]).status == "running"
+
+    BackgroundTaskClaudeSDKClient.tasks_done.set()
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    turn = store.get_turn(result["turnId"])
+    assert "synthesized findings" in (turn.last_useful_message or "")
+    assert store.get_session(started["threadId"]).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_killed_background_task_does_not_hang_the_turn(tmp_path: Path) -> None:
+    """A task's terminal state can arrive with no follow-up response (e.g. a
+    killed watch); the turn must then complete instead of hanging, and the
+    client is dropped so the stream cannot owe the next turn a stale
+    response."""
+    BackgroundTaskClaudeSDKClient.tasks_done = asyncio.Event()
+    BackgroundTaskClaudeSDKClient.followup = False
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: BackgroundTaskSdk())
+    client._background_task_poll_seconds = 0.05
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "watch"})
+    await wait_for(
+        lambda: "waiting on 2 background task(s)" in (store.get_session(started["threadId"]).last_observed_state or "")
+    )
+    assert store.get_turn(result["turnId"]).status == "running"
+
+    BackgroundTaskClaudeSDKClient.tasks_done.set()
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    turn = store.get_turn(result["turnId"])
+    assert "launched explorers" in (turn.last_useful_message or "")
+    assert FakeClaudeSDKClient.disconnect_count >= 1
+
+
 @pytest.mark.asyncio
 async def test_claude_sdk_resume_can_replace_developer_instructions(
     monkeypatch: pytest.MonkeyPatch,
