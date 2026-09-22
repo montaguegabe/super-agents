@@ -1048,6 +1048,10 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             self._session_interrupted_steer_followups.discard(session.id)
             raise
         self._record_session_leaf_owner(session.id)
+        # Persist the steering text on the turn row so thread reads (and other
+        # processes' reads — the voice pipeline steers from a different process
+        # than the one serving history) can render every user input in order.
+        self.store.append_turn_steer(active_turn_id, prompt)
         current_turn = self.store.get_turn(active_turn_id)
         self.store.update_session(
             session.id,

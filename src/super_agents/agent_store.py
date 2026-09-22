@@ -86,6 +86,9 @@ class Turn:
     attempts: int = 0
     last_error: str | None = None
     last_useful_message: str | None = None
+    # Steering messages delivered into the turn while it ran, in order, as
+    # {"text": ..., "createdAt": ...} objects.
+    steers: tuple[JsonObject, ...] = ()
 
     def to_json(self) -> JsonObject:
         return {
@@ -105,6 +108,7 @@ class Turn:
                 "attempts": self.attempts,
                 "lastError": self.last_error,
                 "lastUsefulMessage": self.last_useful_message,
+                "steers": list(self.steers) or None,
             }.items()
             if value is not None
         }
@@ -203,6 +207,8 @@ class Store:
                 conn.execute("alter table turns add column service_tier text")
             if "last_useful_message" not in columns:
                 conn.execute("alter table turns add column last_useful_message text")
+            if "steers_json" not in columns:
+                conn.execute("alter table turns add column steers_json text")
             session_columns = {row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()}
             if "developer_instructions" not in session_columns:
                 conn.execute("alter table sessions add column developer_instructions text")
@@ -467,6 +473,21 @@ class Store:
             raise KeyError(f"No turn with id {turn_id}")
         return row_to_turn(row)
 
+    def append_turn_steer(self, turn_id: str, text: str) -> Turn:
+        """Record a steering message delivered into a running turn."""
+        now = iso_now()
+        with self.connect() as conn:
+            row = conn.execute("select steers_json from turns where id = ?", (turn_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No turn with id {turn_id}")
+            steers = list(steers_from_json(row["steers_json"]))
+            steers.append({"text": text, "createdAt": now})
+            conn.execute(
+                "update turns set steers_json = ?, updated_at = ? where id = ?",
+                (json.dumps(steers), now, turn_id),
+            )
+        return self.get_turn(turn_id)
+
     def list_turns(self, session_id: str, limit: int = 20) -> list[Turn]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -580,10 +601,23 @@ def row_to_turn(row: sqlite3.Row) -> Turn:
         attempts=row["attempts"],
         last_error=row["last_error"],
         last_useful_message=row["last_useful_message"],
+        steers=steers_from_json(row["steers_json"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
     )
+
+
+def steers_from_json(value: object) -> tuple[JsonObject, ...]:
+    if not isinstance(value, str) or not value:
+        return ()
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(raw, list):
+        return ()
+    return tuple(item for item in raw if isinstance(item, dict))
 
 
 def tail_file(path: Path, lines: int) -> list[str]:
