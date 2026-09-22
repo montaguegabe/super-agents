@@ -281,7 +281,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             "session": session.to_json(),
             "logTail": self.store.tail_log(session, lines=80),
         }
-        turn_views = [self._turn_view(session, turn) for turn in turns]
+        turn_views = [self._turn_view(session, turn, include_prompt=True) for turn in turns]
         if not turn_views:
             # Imported sessions (e.g. thread sync) have history only in the
             # backend transcript JSONL, never in the turns table.

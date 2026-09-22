@@ -71,8 +71,14 @@ class SessionViewMixin:
             }
         )
 
-    def _turn_view(self, session: Session, turn: Any) -> JsonObject:
+    def _turn_view(self, session: Session, turn: Any, *, include_prompt: bool = False) -> JsonObject:
         data = turn.to_json()
+        if include_prompt and turn.prompt:
+            # Thread reads feed history UIs that render what the user actually
+            # said; the 180-char promptPreview alone cuts transport envelopes
+            # like <voice>...</voice> in half and loses the rest of the prompt.
+            # Progress/status payloads keep the compact preview.
+            data["prompt"] = turn.prompt
         if (
             "lastUsefulMessage" not in data
             and turn.id == session.last_turn_id

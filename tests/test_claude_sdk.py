@@ -209,6 +209,32 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_thread_read_carries_full_prompt(tmp_path: Path) -> None:
+    """Thread reads serve the full stored prompt; progress keeps the preview.
+
+    History UIs render what the user actually said. The 180-char
+    promptPreview alone cuts transport envelopes like <voice>...</voice>
+    in half (the closing tag never survives), so clients showed raw
+    markup and lost the rest of the prompt.
+    """
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    long_prompt = "<voice>please " + "and then " * 40 + "stop</voice>"
+
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": long_prompt})
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    readback = await client.read_by_label(LabelQueryInput(label="sdk"), include_turns=True)
+    assert readback["turns"][0]["prompt"] == long_prompt
+    assert len(readback["turns"][0]["promptPreview"]) < len(long_prompt)
+
+    progress = await client.progress_by_label(LabelQueryInput(label="sdk"))
+    assert progress["turns"]
+    assert all("prompt" not in turn for turn in progress["turns"])
+
+
+@pytest.mark.asyncio
 async def test_local_and_cloud_claude_clients_keep_distinct_sdk_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
