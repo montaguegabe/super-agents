@@ -126,12 +126,20 @@ class LabelQueryMixin:
         return {"name": resolved.session.label, **result}
 
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject:
-        resolved = await self.resolve_session(required_label(input_data), replace(input_data, prefer="latest_any"))
-        result = await self.set_thread_name(resolved.session.thread_id, new_name)
-        await self.merge_session(
-            resolved.session.thread_id, {"label": new_name, "threadId": resolved.session.thread_id}
-        )
-        return {"renamed": True, "name": new_name, "previousName": resolved.session.label, "result": result}
+        if input_data.thread_id:
+            # An explicit thread id needs no name resolution (the session may
+            # not even be in the state file yet, e.g. a thread the app-server
+            # started on its own).
+            thread_id = input_data.thread_id
+            existing = await self.get_session(thread_id)
+            previous_name = existing.label if existing else None
+        else:
+            resolved = await self.resolve_session(required_label(input_data), replace(input_data, prefer="latest_any"))
+            thread_id = resolved.session.thread_id
+            previous_name = resolved.session.label
+        result = await self.set_thread_name(thread_id, new_name)
+        await self.merge_session(thread_id, {"label": new_name, "threadId": thread_id})
+        return {"renamed": True, "name": new_name, "previousName": previous_name, "result": result}
 
     async def progress_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         if input_data.thread_id:
