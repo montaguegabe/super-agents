@@ -491,10 +491,38 @@ class Store:
     def list_turns(self, session_id: str, limit: int = 20) -> list[Turn]:
         with self.connect() as conn:
             rows = conn.execute(
-                "select * from turns where session_id = ? order by created_at desc limit ?",
+                # rowid breaks same-millisecond ties so the newest insert is
+                # the newest turn (and listings agree with this ordering).
+                "select * from turns where session_id = ? order by created_at desc, rowid desc limit ?",
                 (session_id, limit),
             ).fetchall()
         return [row_to_turn(row) for row in rows]
+
+    def latest_turns_by_session(self) -> dict[str, Turn]:
+        """Newest turn for every session in one query.
+
+        Session listings need each session's latest turn (model, reasoning
+        effort); one query beats one ``list_turns`` round-trip per session.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select t.* from turns t
+                join (
+                    select session_id, max(created_at) as created_at
+                    from turns group by session_id
+                ) latest
+                on latest.session_id = t.session_id and latest.created_at = t.created_at
+                order by t.rowid desc
+                """
+            ).fetchall()
+        latest: dict[str, Turn] = {}
+        for row in rows:
+            turn = row_to_turn(row)
+            # Ties on created_at (same millisecond): the newest insert wins,
+            # matching list_turns' ordering.
+            latest.setdefault(turn.session_id, turn)
+        return latest
 
     def queued_turns(self, session_id: str | None = None) -> list[Turn]:
         params: list[object] = []

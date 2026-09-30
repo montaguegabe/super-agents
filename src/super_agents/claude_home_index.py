@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,9 @@ SWEEP_INTERVAL_SECONDS = 15.0
 _NAME_SCAN_MAX_LINES = 200
 
 _last_sweep_by_store: dict[str, float] = {}
+# Listings run on worker threads; a sweep in progress must not be duplicated
+# by a concurrent listing (it would race the title-scan offsets).
+_sweep_lock = threading.Lock()
 
 
 def refresh_last_interaction_index(store: Store, *, now: float | None = None) -> int:
@@ -54,15 +58,20 @@ def refresh_last_interaction_index(store: Store, *, now: float | None = None) ->
     """
     key = str(store.path)
     current = now if now is not None else time.monotonic()
-    last = _last_sweep_by_store.get(key)
-    if last is not None and current - last < SWEEP_INTERVAL_SECONDS:
+    if not _sweep_lock.acquire(blocking=False):
         return 0
-    _last_sweep_by_store[key] = current
     try:
-        return _sweep(store)
-    except Exception:
-        logger.warning("Claude home last-interaction sweep failed", exc_info=True)
-        return 0
+        last = _last_sweep_by_store.get(key)
+        if last is not None and current - last < SWEEP_INTERVAL_SECONDS:
+            return 0
+        _last_sweep_by_store[key] = current
+        try:
+            return _sweep(store)
+        except Exception:
+            logger.warning("Claude home last-interaction sweep failed", exc_info=True)
+            return 0
+    finally:
+        _sweep_lock.release()
 
 
 def _sweep(store: Store) -> int:
@@ -227,29 +236,51 @@ def _user_text(entry: dict) -> str | None:
     return text
 
 
+# Per-transcript title scan state: (bytes scanned, raw title found so far).
+# Transcripts are append-only, so a refresh sweep over an active session only
+# has to scan the bytes appended since the previous sweep instead of the whole
+# multi-MB file every interval.
+_TITLE_SCAN_STATE: dict[str, tuple[int, str | None]] = {}
+_TITLE_SCAN_MAX_ENTRIES = 512
+
+
 def _latest_custom_title(path: Path) -> str | None:
     """Last user-set title from the transcript's ``custom-title`` entries.
 
     /rename appends these, so the newest one wins. The substring pre-filter
     keeps the scan cheap on large transcripts that were never renamed.
     """
-    title: str | None = None
+    key = str(path)
+    scanned, title = _TITLE_SCAN_STATE.get(key, (0, None))
     try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                if '"custom-title"' not in line:
+        size = path.stat().st_size
+        if size < scanned:
+            # Truncated or rewritten: start over.
+            scanned, title = 0, None
+        with path.open("rb") as handle:
+            handle.seek(scanned)
+            # Only consume whole lines; a partially written last line is
+            # picked up by the next sweep.
+            chunk = handle.read()
+            end = chunk.rfind(b"\n") + 1
+            for raw_line in chunk[:end].splitlines():
+                if b'"custom-title"' not in raw_line:
                     continue
                 try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
+                    entry = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if not isinstance(entry, dict) or entry.get("type") != "custom-title":
                     continue
                 value = entry.get("customTitle")
                 if isinstance(value, str) and value.strip():
                     title = value.strip()
+            scanned += end
     except OSError:
         return None
+    if len(_TITLE_SCAN_STATE) >= _TITLE_SCAN_MAX_ENTRIES and key not in _TITLE_SCAN_STATE:
+        _TITLE_SCAN_STATE.clear()
+    _TITLE_SCAN_STATE[key] = (scanned, title)
     return preview(title, limit=80)
 
 
