@@ -277,6 +277,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         }
 
     async def read_by_label(self, input_data: LabelQueryInput, include_turns: bool = False) -> JsonObject:
+        # Thread reads are sqlite queries, a log tail, and — for imported
+        # sessions — a transcript parse that can span megabytes. The API
+        # server and voice workers run these on their event loop, so every
+        # read stalled websocket streaming and audio for its whole duration.
+        return await asyncio.to_thread(self._read_by_label_sync, input_data, include_turns)
+
+    def _read_by_label_sync(self, input_data: LabelQueryInput, include_turns: bool = False) -> JsonObject:
         self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
         turns = self.store.list_turns(session.id, limit=input_data.max_items or 20)
@@ -335,9 +342,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         return self._permission_gate.pending_requests()
 
     async def sessions(self) -> list[JsonObject]:
+        # Listing sweeps the Claude home (hundreds of transcript stats plus
+        # title scans) and reads every session row; keep it off the loop.
+        return await asyncio.to_thread(self._sessions_sync)
+
+    def _sessions_sync(self) -> list[JsonObject]:
         self._reconcile_orphaned_turns_once()
         refresh_last_interaction_index(self.store)
-        return [self._session_view(session) for session in self.store.list_sessions(include_inactive=True)]
+        sessions = self.store.list_sessions(include_inactive=True)
+        latest_turns = self.store.latest_turns_by_session()
+        return [self._session_view(session, latest_turns.get(session.id)) for session in sessions]
 
     async def active(self, input_data: LabelQueryInput | None = None) -> JsonObject:
         self._reconcile_orphaned_turns_once()

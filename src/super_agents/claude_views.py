@@ -12,14 +12,16 @@ JsonObject = dict[str, Any]
 
 
 class SessionViewMixin:
-    def _session_view(self, session: Session) -> JsonObject:
+    def _session_view(self, session: Session, latest: Any | None = None) -> JsonObject:
         view = {"backend": self.backend, **session.to_json()}
         # Session rows do not record reasoning effort (or, for imported
         # sessions, a model); surface the latest turn's values so list
-        # consumers can show them without fetching turns.
-        turns = self.store.list_turns(session.id, limit=1)
-        if turns:
-            latest = turns[0]
+        # consumers can show them without fetching turns. Listings pass the
+        # prefetched latest turn so a 500-session list is not 500 queries.
+        if latest is None:
+            turns = self.store.list_turns(session.id, limit=1)
+            latest = turns[0] if turns else None
+        if latest is not None:
             if latest.reasoning_effort:
                 view.setdefault("reasoningEffort", latest.reasoning_effort)
             if latest.model:
