@@ -1094,6 +1094,30 @@ async def test_rename_by_name_uses_native_app_server_thread_name(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_rename_by_thread_id_skips_name_resolution(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            raise AssertionError("renaming by thread id must not list threads")
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        result = await client.rename_by_label(type_query(thread_id="thread-native"), "new-name")
+
+        assert result == {"renamed": True, "name": "new-name", "previousName": None, "result": {"ok": True}}
+        rename_request = next(message for message in captured if message.get("method") == "thread/name/set")
+        assert rename_request["params"] == {"threadId": "thread-native", "name": "new-name"}
+        session = await client.get_session("thread-native")
+        assert session is not None and session.label == "new-name"
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_progress_by_label_reuses_resolved_thread_and_turn_ids(tmp_path: Path) -> None:
     captured: list[dict[str, Any]] = []
 
