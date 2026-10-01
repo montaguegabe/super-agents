@@ -84,6 +84,7 @@ from super_agents.defaults import (
     default_super_agents_model,
     default_super_agents_reasoning_effort,
 )
+from super_agents.initial_context import initial_context_input
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
@@ -653,7 +654,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 )
                 last_useful_message = ""
                 self._register_pending_result(session_id)
-                await sdk_client.query(prompt)
+                async with initial_context_input(self, session_id, prompt) as seeded_prompt:
+                    await sdk_client.query(seeded_prompt)
                 # Every query sent into this session (this turn's prompt plus
                 # any steers that joined while it ran) produces a response on
                 # the shared SDK stream — except that the CLI can COALESCE

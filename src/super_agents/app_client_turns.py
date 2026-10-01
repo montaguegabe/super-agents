@@ -28,6 +28,7 @@ from .app_protocol import (
 from .app_sessions import turn_patch
 from .app_time import iso_now, path_basename, turn_key
 from .state import JsonObject, TrackedStatus
+from .initial_context import initial_context_input
 
 logger = logging.getLogger(__name__)
 
@@ -146,15 +147,17 @@ class TurnLifecycleMixin:
             mode,
             reasoning_effort,
         )
-        result = await self.request(
-            "turn/start",
-            params,
-            context={
-                "dispatchId": dispatch_id,
-                "threadId": thread_id,
-                "name": label,
-            },
-        )
+        async with initial_context_input(self, thread_id, str(input_data["prompt"])) as prompt:
+            params["input"] = [{"type": "text", "text": prompt}]
+            result = await self.request(
+                "turn/start",
+                params,
+                context={
+                    "dispatchId": dispatch_id,
+                    "threadId": thread_id,
+                    "name": label,
+                },
+            )
         turn_id = extract_turn_id(result) or f"{thread_id}:unknown:{int(time.time() * 1000)}"
         logger.info(
             "dispatch_timing stage=app_server_turn_start_response dispatch_id=%s thread_id=%s turn_id=%s elapsed_ms=%d",

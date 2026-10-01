@@ -23,6 +23,7 @@ from .app_protocol import (
 from .app_time import iso_now, path_basename
 from .rollout_history import needs_rollout_turn_fallback, rollout_fallback_turns
 from .state import JsonObject, get_string
+from .initial_context import has_pending_initial_context
 
 logger = logging.getLogger(__name__)
 
@@ -237,18 +238,31 @@ class ThreadLifecycleMixin:
         if not isinstance(thread, dict):
             return result
 
-        page = await self.request(
-            "thread/turns/list",
-            without_none(
-                {
-                    "threadId": thread_id,
-                    "limit": limit,
-                    "cursor": cursor,
-                    "itemsView": items_view,
-                    "sortDirection": sort_direction,
-                }
-            ),
-        )
+        try:
+            page = await self.request(
+                "thread/turns/list",
+                without_none(
+                    {
+                        "threadId": thread_id,
+                        "limit": limit,
+                        "cursor": cursor,
+                        "itemsView": items_view,
+                        "sortDirection": sort_direction,
+                    }
+                ),
+            )
+        except RuntimeError as exc:
+            # A freshly created idle conversation legitimately has no
+            # persisted turns until its first prompt. Its metadata above is
+            # authoritative; no rollout-file fallback is needed.
+            empty_native_thread = "not materialized yet" in str(exc) and "before first user message" in str(exc)
+            # Setting the title can create metadata before the first rollout
+            # exists. Only treat missing lineage as empty for a new session
+            # whose registered initial input has never been submitted.
+            pending_continuation = "missing source rollout" in str(exc) and has_pending_initial_context(thread_id)
+            if not empty_native_thread and not pending_continuation:
+                raise
+            page = {"data": []}
         turns = page.get("data") if isinstance(page, dict) else None
         thread["turns"] = turns if isinstance(turns, list) else []
         thread["historyNextCursor"] = page.get("nextCursor")

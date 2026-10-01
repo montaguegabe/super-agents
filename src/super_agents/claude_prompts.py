@@ -36,3 +36,12 @@ def combine_developer_instructions(base: str | None, overlay: str | None) -> str
     if len(parts) == 2 and parts[1] in parts[0]:
         return parts[0]
     return "\n\n".join(parts)
+
+
+def without_claude_turn_context(prompt: str) -> str:
+    """Remove our session-specific wrapper when exporting a user message."""
+    if prompt.startswith("<openbase-claude-code-context>"):
+        _, separator, text = prompt.partition("</openbase-claude-code-context>\n\n")
+        if separator:
+            return text
+    return prompt
