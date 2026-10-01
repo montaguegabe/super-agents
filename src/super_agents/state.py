@@ -117,6 +117,8 @@ class TriggerRecord:
     sender_path: str | None = None
     sender_allowlist: list[str] | None = None
     filters: list[JsonObject] | None = None
+    watch_path: str | None = None
+    seen_files: dict[str, int] | None = None
     created_at: str | None = None
     last_event_at: str | None = None
     last_event_id: str | None = None
@@ -138,6 +140,8 @@ class TriggerRecord:
                 "senderPath": self.sender_path,
                 "senderAllowlist": self.sender_allowlist,
                 "filters": self.filters,
+                "watchPath": self.watch_path,
+                "seenFiles": self.seen_files,
                 "createdAt": self.created_at,
                 "lastEventAt": self.last_event_at,
                 "lastEventId": self.last_event_id,
@@ -539,6 +543,8 @@ def trigger_record_from_json(value: Any) -> TriggerRecord | None:
         sender_path=get_string(value, "senderPath"),
         sender_allowlist=as_string_list(value.get("senderAllowlist")),
         filters=as_json_object_list(value.get("filters")),
+        watch_path=get_string(value, "watchPath"),
+        seen_files=as_int_map(value.get("seenFiles")),
         created_at=get_string(value, "createdAt"),
         last_event_at=get_string(value, "lastEventAt"),
         last_event_id=get_string(value, "lastEventId"),
@@ -548,7 +554,18 @@ def trigger_record_from_json(value: Any) -> TriggerRecord | None:
 
 
 def as_trigger_type(value: str | None) -> str:
-    return value if value in {"webhook"} else "webhook"
+    return value if value in {"webhook", "file"} else "webhook"
+
+
+def as_int_map(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    items = {
+        key: item
+        for key, item in value.items()
+        if isinstance(key, str) and isinstance(item, int) and not isinstance(item, bool)
+    }
+    return items
 
 
 def as_string_list(value: Any) -> list[str] | None:

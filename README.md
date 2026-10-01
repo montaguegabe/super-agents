@@ -411,6 +411,11 @@ The public modules are organized so applications can reuse the websocket client,
 session metadata helpers, routine state, and queue handling without starting the
 stdio MCP server.
 
+Routines (loops) can run on a schedule, on webhook events, or on file events:
+`EventClientMixin.add_routine_trigger` accepts `{"type": "file", "watchPath": "<absolute glob>"}`
+and `run_due_routines` sweeps every file trigger, delivering one event per created or
+modified file (`path`, `name`, `dir`, `mtime`, `change`, small `contents`).
+
 ## Development
 
 Python embeddings of `ClaudeAgentSdkClient` may supply `disallowed_tools_for_session`, a callback receiving the session and returning a tuple of SDK tool names to exclude. The default excludes none. Policies are evaluated per session, and changing a policy reconnects that session's SDK client rather than reusing outdated tool options. This supports routing-only clients without restricting separately managed worker sessions.

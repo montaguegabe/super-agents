@@ -10,10 +10,13 @@ from .app_events import (
     RECENT_EVENT_IDS_LIMIT,
     event_id_from_headers,
     event_sender,
+    new_file_trigger,
     new_webhook_trigger,
     parse_event_payload,
+    scan_file_trigger,
     sender_is_authorized,
     trigger_matches_event,
+    trigger_type,
     validate_trigger_input,
     verify_hmac_signature,
 )
@@ -34,8 +37,10 @@ class EventClientMixin:
     """Trigger management and event delivery for routines (loops).
 
     Webhook triggers make a routine runnable by delivered events instead of
-    (or in addition to) its schedule. Event runs deliberately leave
-    lastRunDate/lastRunAt untouched so they never displace a scheduled run.
+    (or in addition to) its schedule; file triggers do the same for files
+    appearing or changing under a glob on this machine. Event runs
+    deliberately leave lastRunDate/lastRunAt untouched so they never displace
+    a scheduled run.
     """
 
     async def add_routine_trigger(self, name: str, trigger_input: JsonObject) -> JsonObject:
@@ -46,7 +51,11 @@ class EventClientMixin:
                 if routine is None:
                     raise ValueError(f"No Super Agents routine found for name {name}.")
                 validate_trigger_input(routine, trigger_input)
-                trigger = new_webhook_trigger(trigger_input)
+                trigger = (
+                    new_file_trigger(trigger_input)
+                    if trigger_type(trigger_input) == "file"
+                    else new_webhook_trigger(trigger_input)
+                )
                 raw = routine.to_json()
                 raw["triggers"] = [*(raw.get("triggers") or []), trigger]
                 raw["updatedAt"] = iso_now()
@@ -128,6 +137,60 @@ class EventClientMixin:
         reserved = decision["reservedRoutine"]
         result = await self.run_routine(reserved, force=True, event=event)
         return {**response, "status": "delivered", "run": result}
+
+    async def sweep_file_triggers(self, name: str | None = None) -> list[JsonObject]:
+        """Deliver one event per created or modified file under each file trigger.
+
+        Called from every scheduler sweep. The seen-files map is persisted
+        before delivery so a crash mid-delivery cannot re-fire the same change;
+        delivery itself goes through the same reservation, filter, and dedup
+        path as webhook events.
+        """
+        state = await self.read_state()
+        pending: list[tuple[str, str, list[JsonObject]]] = []
+        for routine in state.routines.values():
+            if name and routine.name != name:
+                continue
+            for trigger in routine.triggers or []:
+                if trigger.type != "file" or not trigger.watch_path:
+                    continue
+                events, seen = scan_file_trigger(trigger)
+                if seen == trigger.seen_files and not events:
+                    continue
+                await self._record_seen_files(routine.name, trigger.id, seen)
+                if routine.enabled and trigger.enabled and events:
+                    pending.append((routine.name, trigger.id, events))
+        results: list[JsonObject] = []
+        for routine_name, trigger_id, events in pending:
+            for event in events:
+                decision = await self._reserve_event_run(routine_name, trigger_id, event, "local")
+                result: JsonObject = {
+                    "name": routine_name,
+                    "triggerId": trigger_id,
+                    "eventId": event["id"],
+                    "status": decision["status"],
+                }
+                if decision["status"] == "accepted":
+                    run = await self.run_routine(decision["reservedRoutine"], force=True, event=event)
+                    result = {**result, "status": "delivered", "run": run}
+                results.append(result)
+        return results
+
+    async def _record_seen_files(self, name: str, trigger_id: str, seen: dict[str, int]) -> None:
+        async with self._state_lock:
+
+            def update(state: StateFile) -> None:
+                routine = state.routines.get(name)
+                if routine is None:
+                    return
+                raw = routine.to_json()
+                raw["triggers"] = [
+                    {**item, "seenFiles": seen} if item.get("id") == trigger_id else item
+                    for item in raw.get("triggers") or []
+                ]
+                state.routines[name] = _routine_from_raw(raw)
+
+            update_state_file(self.state_file, update)
 
     async def emit_routine_event(
         self,
