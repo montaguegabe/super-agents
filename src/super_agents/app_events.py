@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import glob
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
+from pathlib import Path
 from typing import Any
 
 from .app_time import iso_now
@@ -16,6 +19,9 @@ MAX_EVENT_PROMPT_CHARS = 8000
 DEFAULT_HMAC_HEADER = "X-Hub-Signature-256"
 EVENT_ID_HEADERS = ("x-github-delivery", "x-delivery-id", "x-request-id", "x-event-id")
 FILTER_OPS = {"equals", "notEquals", "contains", "startsWith", "endsWith", "exists", "regex"}
+TRIGGER_TYPES = {"webhook", "file"}
+MAX_FILE_TRIGGER_MATCHES = 500
+MAX_FILE_EVENT_CONTENT_BYTES = 16 * 1024
 
 
 def new_webhook_trigger(input_data: JsonObject) -> JsonObject:
@@ -37,6 +43,38 @@ def new_webhook_trigger(input_data: JsonObject) -> JsonObject:
     }
 
 
+def new_file_trigger(input_data: JsonObject) -> JsonObject:
+    now = iso_now()
+    return {
+        "id": f"trg-{secrets.token_hex(4)}",
+        "type": "file",
+        "enabled": True,
+        "description": input_data.get("description"),
+        "watchPath": normalize_watch_path(str(input_data.get("watchPath") or "")),
+        "filters": input_data.get("filters"),
+        # None means "never scanned": the first sweep records the files that
+        # already match without firing, unless the caller asked otherwise.
+        "seenFiles": {} if input_data.get("fireExisting") else None,
+        "createdAt": now,
+    }
+
+
+def normalize_watch_path(value: str) -> str:
+    expanded = os.path.expanduser(value.strip())
+    if not expanded:
+        raise ValueError("File triggers need a watchPath glob.")
+    if not os.path.isabs(expanded):
+        raise ValueError("File trigger watchPath must be absolute (a ~ prefix is expanded).")
+    return expanded
+
+
+def trigger_type(input_data: JsonObject) -> str:
+    value = input_data.get("type") or "webhook"
+    if value not in TRIGGER_TYPES:
+        raise ValueError(f"Trigger type must be one of {sorted(TRIGGER_TYPES)}.")
+    return str(value)
+
+
 def validate_trigger_input(routine: RoutineRecord, input_data: JsonObject) -> None:
     filters = input_data.get("filters") or []
     for item in filters:
@@ -44,6 +82,11 @@ def validate_trigger_input(routine: RoutineRecord, input_data: JsonObject) -> No
             raise ValueError(f"Trigger filters need a path and an op in {sorted(FILTER_OPS)}.")
         if item.get("op") == "regex":
             re.compile(str(item.get("value") or ""))
+    if trigger_type(input_data) == "file":
+        # Local files are written by whoever already controls this machine, so
+        # they carry the same trust as a locally emitted event: no allowlist.
+        normalize_watch_path(str(input_data.get("watchPath") or ""))
+        return
     if routine.kind == "agent":
         # An externally reachable trigger that can start an agent turn is a
         # prompt-injection port unless deliveries are pinned to known senders.
@@ -120,6 +163,60 @@ def sender_is_authorized(trigger: TriggerRecord, payload: Any) -> bool:
         return False
     sender = event_sender(trigger, payload)
     return sender is not None and sender in trigger.sender_allowlist
+
+
+def scan_file_trigger(trigger: TriggerRecord) -> tuple[list[JsonObject], dict[str, int]]:
+    """Compare the files matching a file trigger's glob with what it has seen.
+
+    Returns the events to deliver (one per created or modified file, oldest
+    first) and the new seen-files map to persist. Deleted files drop out of the
+    map so a recreated file fires again. Each (path, mtime) pair fires once;
+    touching the file fires again.
+    """
+    if not trigger.watch_path:
+        return [], trigger.seen_files or {}
+    matches = sorted(glob.glob(trigger.watch_path, recursive=True))[:MAX_FILE_TRIGGER_MATCHES]
+    current: dict[str, int] = {}
+    for match in matches:
+        try:
+            if not os.path.isfile(match):
+                continue
+            current[match] = os.stat(match).st_mtime_ns
+        except OSError:
+            continue
+    if trigger.seen_files is None:
+        return [], current
+    changed = [path for path, mtime in current.items() if trigger.seen_files.get(path) != mtime]
+    changed.sort(key=lambda path: current[path])
+    events: list[JsonObject] = []
+    for path in changed:
+        events.append(
+            {
+                "id": f"file:{path}@{current[path]}",
+                "origin": "local",
+                "triggerId": trigger.id,
+                "receivedAt": iso_now(),
+                "payload": file_event_payload(path, current[path], created=path not in trigger.seen_files),
+            }
+        )
+    return events, current
+
+
+def file_event_payload(path: str, mtime_ns: int, *, created: bool) -> JsonObject:
+    file_path = Path(path)
+    payload: JsonObject = {
+        "path": path,
+        "name": file_path.name,
+        "dir": str(file_path.parent),
+        "mtime": mtime_ns // 1_000_000_000,
+        "change": "created" if created else "modified",
+    }
+    try:
+        if file_path.stat().st_size <= MAX_FILE_EVENT_CONTENT_BYTES:
+            payload["contents"] = file_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
+    return payload
 
 
 def event_id_from_headers(headers: JsonObject, body: bytes) -> str:
