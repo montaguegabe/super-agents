@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any
 
@@ -69,10 +70,10 @@ def normalize_watch_path(value: str) -> str:
 
 
 def trigger_type(input_data: JsonObject) -> str:
-    value = input_data.get("type") or "webhook"
+    value = str(input_data.get("type") or "webhook")
     if value not in TRIGGER_TYPES:
         raise ValueError(f"Trigger type must be one of {sorted(TRIGGER_TYPES)}.")
-    return str(value)
+    return value
 
 
 def validate_trigger_input(routine: RoutineRecord, input_data: JsonObject) -> None:
@@ -175,7 +176,10 @@ def scan_file_trigger(trigger: TriggerRecord) -> tuple[list[JsonObject], dict[st
     """
     if not trigger.watch_path:
         return [], trigger.seen_files or {}
-    matches = sorted(glob.glob(trigger.watch_path, recursive=True))[:MAX_FILE_TRIGGER_MATCHES]
+    matches = nsmallest(
+        MAX_FILE_TRIGGER_MATCHES,
+        glob.iglob(trigger.watch_path, recursive=True),
+    )
     current: dict[str, int] = {}
     for match in matches:
         try:
