@@ -264,15 +264,15 @@ async def test_file_trigger_baselines_then_fires_on_create_modify_and_recreate(t
     seen = read_state_file(tmp_path / "state.json").routines["echo-loop"].triggers[0].seen_files
     assert seen == {str(inbox / "old.md"): 1_000_000_000_000_000_000}
 
-    _touch(inbox / "review-request.md", "Please review.", 1_000_000_001_000_000_000)
+    _touch(inbox / "ready-for-review.md", "Please review.", 1_000_000_001_000_000_000)
     delivered = await _deliveries(client)
     assert len(delivered) == 1
     event = json.loads(delivered[0]["run"]["stdout"].strip())
     assert event["origin"] == "local"
-    assert event["id"] == f"file:{inbox / 'review-request.md'}@1000000001000000000"
+    assert event["id"] == f"file:{inbox / 'ready-for-review.md'}@1000000001000000000"
     assert event["payload"] == {
-        "path": str(inbox / "review-request.md"),
-        "name": "review-request.md",
+        "path": str(inbox / "ready-for-review.md"),
+        "name": "ready-for-review.md",
         "dir": str(inbox),
         "mtime": 1_000_000_001,
         "change": "created",
@@ -281,15 +281,15 @@ async def test_file_trigger_baselines_then_fires_on_create_modify_and_recreate(t
 
     # Unchanged files stay quiet; a touch fires again as "modified".
     assert await _deliveries(client) == []
-    _touch(inbox / "review-request.md", "Please review again.", 1_000_000_002_000_000_000)
+    _touch(inbox / "ready-for-review.md", "Please review again.", 1_000_000_002_000_000_000)
     delivered = await _deliveries(client)
     assert len(delivered) == 1
     assert json.loads(delivered[0]["run"]["stdout"].strip())["payload"]["change"] == "modified"
 
     # Deleting forgets the file, so recreating it fires as "created" again.
-    (inbox / "review-request.md").unlink()
+    (inbox / "ready-for-review.md").unlink()
     assert await client.sweep_file_triggers() == []
-    _touch(inbox / "review-request.md", "Third time.", 1_000_000_003_000_000_000)
+    _touch(inbox / "ready-for-review.md", "Third time.", 1_000_000_003_000_000_000)
     delivered = await _deliveries(client)
     assert len(delivered) == 1
     assert json.loads(delivered[0]["run"]["stdout"].strip())["payload"]["change"] == "created"
@@ -306,7 +306,7 @@ async def test_file_trigger_fire_existing_filters_and_disabled_loops(tmp_path: P
     await make_command_loop(client)
     inbox = tmp_path / "inbox"
     inbox.mkdir()
-    _touch(inbox / "qa-request.md", "qa", 1_000_000_000_000_000_000)
+    _touch(inbox / "ready-for-qa.md", "qa", 1_000_000_000_000_000_000)
     _touch(inbox / "notes.md", "notes", 1_000_000_000_000_000_000)
     await client.add_routine_trigger(
         "echo-loop",
@@ -314,22 +314,22 @@ async def test_file_trigger_fire_existing_filters_and_disabled_loops(tmp_path: P
             "type": "file",
             "watchPath": str(inbox / "*.md"),
             "fireExisting": True,
-            "filters": [{"path": "name", "op": "endsWith", "value": "-request.md"}],
+            "filters": [{"path": "name", "op": "startsWith", "value": "ready-for-"}],
         },
     )
 
     results = await client.sweep_file_triggers()
     assert [(item["status"], Path(item["eventId"].split("@")[0][5:]).name) for item in results] == [
         ("filtered", "notes.md"),
-        ("delivered", "qa-request.md"),
+        ("delivered", "ready-for-qa.md"),
     ]
 
     await client.save_routine({"name": "echo-loop", "enabled": False})
-    _touch(inbox / "merge-request.md", "merge", 1_000_000_001_000_000_000)
+    _touch(inbox / "ready-for-merge.md", "merge", 1_000_000_001_000_000_000)
     # A disabled loop still tracks files (so nothing fires later for stale changes) but runs nothing.
     assert await client.sweep_file_triggers() == []
     seen = read_state_file(tmp_path / "state.json").routines["echo-loop"].triggers[0].seen_files
-    assert str(inbox / "merge-request.md") in seen
+    assert str(inbox / "ready-for-merge.md") in seen
 
     await client.save_routine({"name": "echo-loop", "enabled": True})
     state = read_state_file(tmp_path / "state.json")
