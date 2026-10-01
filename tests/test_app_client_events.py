@@ -225,6 +225,8 @@ async def test_file_trigger_validates_watch_path_and_needs_no_allowlist(tmp_path
         await client.add_routine_trigger("flag-loop", {"type": "file", "watchPath": "relative/*.md"})
     with pytest.raises(ValueError, match="type"):
         await client.add_routine_trigger("flag-loop", {"type": "cron"})
+    with pytest.raises(ValueError, match="type"):
+        await client.add_routine_trigger("flag-loop", {"type": ["file"], "watchPath": str(tmp_path / "*.md")})
 
     created = await client.add_routine_trigger("flag-loop", {"type": "file", "watchPath": "~/inbox/*.md"})
     trigger = created["trigger"]
@@ -314,6 +316,25 @@ async def test_file_trigger_fire_existing_filters_and_disabled_loops(tmp_path: P
     assert await client.sweep_file_triggers() == []
     seen = read_state_file(tmp_path / "state.json").routines["echo-loop"].triggers[0].seen_files
     assert str(inbox / "merge-request.md") in seen
+
+
+@pytest.mark.asyncio
+async def test_file_trigger_caps_seen_files_to_first_500_matches(tmp_path: Path) -> None:
+    client = EventClientStub(tmp_path / "state.json")
+    await make_command_loop(client)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    for index in range(505):
+        _touch(inbox / f"{index:03d}.md", str(index), 1_000_000_000_000_000_000 + index)
+    await client.add_routine_trigger("echo-loop", {"type": "file", "watchPath": str(inbox / "*.md")})
+
+    assert await client.sweep_file_triggers() == []
+    seen = read_state_file(tmp_path / "state.json").routines["echo-loop"].triggers[0].seen_files
+    assert seen is not None
+    assert len(seen) == 500
+    assert str(inbox / "000.md") in seen
+    assert str(inbox / "499.md") in seen
+    assert str(inbox / "500.md") not in seen
 
 
 @pytest.mark.asyncio
