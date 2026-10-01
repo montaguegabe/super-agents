@@ -11,7 +11,8 @@ import pytest
 
 from super_agents.app_client_events import EventClientMixin
 from super_agents.app_client_routines import RoutineClientMixin
-from super_agents.state import read_state_file
+from super_agents.app_events import file_event_payload
+from super_agents.state import read_state_file, write_state_file
 
 
 class EventClientStub(RoutineClientMixin, EventClientMixin):
@@ -210,6 +211,19 @@ def _touch(path: Path, text: str, mtime_ns: int) -> None:
     os.utime(path, ns=(mtime_ns, mtime_ns))
 
 
+def test_file_event_payload_includes_only_small_utf8_contents(tmp_path: Path) -> None:
+    small = tmp_path / "small.md"
+    small.write_text("hello")
+    large = tmp_path / "large.md"
+    large.write_text("x" * (16 * 1024 + 1))
+    binary = tmp_path / "binary.md"
+    binary.write_bytes(b"\xff")
+
+    assert file_event_payload(str(small), 1_000_000_000, created=True)["contents"] == "hello"
+    assert "contents" not in file_event_payload(str(large), 1_000_000_000, created=True)
+    assert "contents" not in file_event_payload(str(binary), 1_000_000_000, created=True)
+
+
 async def _deliveries(client: EventClientStub, name: str | None = None) -> list[dict]:
     return [item for item in await client.sweep_file_triggers(name=name) if item["status"] == "delivered"]
 
@@ -316,6 +330,15 @@ async def test_file_trigger_fire_existing_filters_and_disabled_loops(tmp_path: P
     assert await client.sweep_file_triggers() == []
     seen = read_state_file(tmp_path / "state.json").routines["echo-loop"].triggers[0].seen_files
     assert str(inbox / "merge-request.md") in seen
+
+    await client.save_routine({"name": "echo-loop", "enabled": True})
+    state = read_state_file(tmp_path / "state.json")
+    state.routines["echo-loop"].triggers[0].enabled = False
+    write_state_file(tmp_path / "state.json", state)
+    _touch(inbox / "merge-response.md", "merged", 1_000_000_002_000_000_000)
+    assert await client.sweep_file_triggers() == []
+    seen = read_state_file(tmp_path / "state.json").routines["echo-loop"].triggers[0].seen_files
+    assert str(inbox / "merge-response.md") in seen
 
 
 @pytest.mark.asyncio
