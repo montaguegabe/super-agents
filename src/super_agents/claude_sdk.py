@@ -84,6 +84,7 @@ from super_agents.defaults import (
     default_super_agents_model,
     default_super_agents_reasoning_effort,
 )
+from super_agents.thread_intro import announce_thread_intro, is_first_turn
 
 JsonObject = dict[str, Any]
 SdkLoader = Callable[[], Any]
@@ -589,6 +590,11 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
         reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
         service_tier = _optional_str(turn_input.get("serviceTier"))
+        # A named thread introduces itself on its very first turn, before any
+        # prompt reaches the model; the runtime owns the greeting, not the model.
+        announce_intro = bool(session.agent_name) and is_first_turn(
+            last_turn_id=session.last_turn_id, active_turn_id=session.active_turn_id
+        )
         turn = self.store.create_turn(
             session.id,
             prompt,
@@ -605,7 +611,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             last_turn_id=turn.id,
             last_observed_state=last_observed_state,
         )
-        self._spawn_turn_task(session.id, turn.id, sdk_prompt, model, reasoning_effort, service_tier, sdk)
+        self._spawn_turn_task(
+            session.id,
+            turn.id,
+            sdk_prompt,
+            model,
+            reasoning_effort,
+            service_tier,
+            sdk,
+            announce_intro=announce_intro,
+        )
         return turn
 
     def _spawn_turn_task(
@@ -617,10 +632,21 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
+        *,
+        announce_intro: bool = False,
     ) -> None:
         """Run a turn in the background, retaining the task so it cannot be garbage collected."""
         task = asyncio.create_task(
-            self._run_turn(session_id, turn_id, prompt, model, reasoning_effort, service_tier, sdk)
+            self._run_turn(
+                session_id,
+                turn_id,
+                prompt,
+                model,
+                reasoning_effort,
+                service_tier,
+                sdk,
+                announce_intro=announce_intro,
+            )
         )
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
@@ -634,6 +660,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
+        *,
+        announce_intro: bool = False,
     ) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock, self._cross_process_session_lock(session_id):
@@ -651,6 +679,14 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     service_tier,
                     sdk,
                 )
+                if announce_intro:
+                    # The greeting precedes the first prompt so the user hears
+                    # who picked up the task before any work starts.
+                    await announce_thread_intro(
+                        agent_name=session.agent_name,
+                        thread_name=session.name,
+                        thread_id=session.id,
+                    )
                 last_useful_message = ""
                 self._register_pending_result(session_id)
                 await sdk_client.query(prompt)

@@ -1626,3 +1626,58 @@ async def test_steer_falls_back_to_local_when_inbox_socket_dead(
     assert result.get("delivery") != "inbox"
     assert FakeClaudeSDKClient.prompts and FakeClaudeSDKClient.prompts[-1].endswith("keep going")
     assert not (registry / "claude-dead-1.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_announces_named_thread_intro_only_on_first_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The runtime greets the user before the first prompt; later turns stay quiet."""
+    import super_agents.claude_sdk as claude_sdk_module
+
+    announced: list[dict[str, object]] = []
+
+    async def fake_announce(**kwargs: object) -> bool:
+        announced.append({**kwargs, "prompts_so_far": list(FakeClaudeSDKClient.prompts)})
+        return True
+
+    monkeypatch.setattr(claude_sdk_module, "announce_thread_intro", fake_announce)
+    FakeClaudeSDKClient.prompts = []
+    FakeClaudeSDKClient.options_seen = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    started = await client.start_thread(
+        {"name": "react-chess-game", "agentName": "Connie", "cwd": str(tmp_path), "model": "sonnet"}
+    )
+    first = await client.start_turn_by_label(LabelQueryInput(label="react-chess-game"), {"prompt": "build chess"})
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+    second = await client.start_turn_by_label(LabelQueryInput(label="react-chess-game"), {"prompt": "add castling"})
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+
+    assert [a["agent_name"] for a in announced] == ["Connie"]
+    assert announced[0]["thread_name"] == "react-chess-game"
+    assert announced[0]["thread_id"] == started["threadId"]
+    # The greeting ran before the first prompt reached the SDK.
+    assert announced[0]["prompts_so_far"] == []
+    assert len(FakeClaudeSDKClient.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_skips_intro_for_unnamed_threads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import super_agents.claude_sdk as claude_sdk_module
+
+    announced: list[object] = []
+
+    async def fake_announce(**kwargs: object) -> bool:
+        announced.append(kwargs)
+        return True
+
+    monkeypatch.setattr(claude_sdk_module, "announce_thread_intro", fake_announce)
+    FakeClaudeSDKClient.prompts = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(LabelQueryInput(label="dispatcher"), {"prompt": "hello"})
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    assert announced == []

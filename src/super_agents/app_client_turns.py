@@ -28,6 +28,7 @@ from .app_protocol import (
 from .app_sessions import turn_patch
 from .app_time import iso_now, path_basename, turn_key
 from .state import JsonObject, TrackedStatus
+from .thread_intro import announce_thread_intro, is_first_turn
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,13 @@ class TurnLifecycleMixin:
             developer_instructions,
         )
         await self._refresh_thread_environment(thread_id, params)
+        if agent_name and is_first_turn(
+            last_turn_id=session.last_turn_id if session else None,
+            active_turn_id=session.active_turn_id if session else None,
+        ):
+            # The runtime greets the user before the first prompt reaches the
+            # model; the model is never asked to introduce itself.
+            await announce_thread_intro(agent_name=agent_name, thread_name=label, thread_id=thread_id)
         logger.info(
             "dispatch_timing stage=app_server_turn_start_request dispatch_id=%s "
             "thread_id=%s cwd_basename=%s mode=%s reasoning_effort=%s",
