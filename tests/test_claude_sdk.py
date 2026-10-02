@@ -1442,6 +1442,36 @@ async def test_claude_sdk_startup_sweep_fails_orphaned_running_turns(
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_startup_sweep_completes_turns_whose_response_finished(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A turn kept "running" only by background tasks (a dev server) after its
+    response finished did its work: the sweep completes it instead of failing it."""
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "chess", "cwd": str(tmp_path)})
+    turn_id = _insert_ghost_turn(store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z")
+    store.update_turn(turn_id, response_finished_at="2026-01-01T00:00:00.000Z", last_useful_message="Chess app done")
+    # update_turn bumps updated_at; age the row again so the sweep may reclaim it.
+    with store.connect() as conn:
+        conn.execute("update turns set updated_at = ? where id = ?", ("2026-01-01T00:00:01.000Z", turn_id))
+
+    reconciled = client.reconcile_orphaned_turns()
+
+    assert reconciled == 1
+    turn = store.get_turn(turn_id)
+    assert turn.status == "completed"
+    assert turn.last_error is None
+    assert turn.finished_at
+    assert turn.to_json()["responseFinishedAt"] == "2026-01-01T00:00:00.000Z"
+    session = store.get_session(started["threadId"])
+    assert session.active_turn_id is None
+    assert session.status == "completed"
+    assert "background tasks abandoned" in (session.last_observed_state or "")
+
+
+@pytest.mark.asyncio
 async def test_claude_sdk_startup_sweep_leaves_fresh_turns_alone(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

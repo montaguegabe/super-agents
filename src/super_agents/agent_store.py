@@ -86,6 +86,11 @@ class Turn:
     attempts: int = 0
     last_error: str | None = None
     last_useful_message: str | None = None
+    # Set once the model's response for this turn has completed, even if the
+    # turn stays "running" to wait on background tasks it spawned (a dev
+    # server, a watch). Lets a later orphan sweep tell "finished, abandoned
+    # its background tasks" apart from "died mid-response".
+    response_finished_at: str | None = None
     # Steering messages delivered into the turn while it ran, in order, as
     # {"text": ..., "createdAt": ...} objects.
     steers: tuple[JsonObject, ...] = ()
@@ -108,6 +113,7 @@ class Turn:
                 "attempts": self.attempts,
                 "lastError": self.last_error,
                 "lastUsefulMessage": self.last_useful_message,
+                "responseFinishedAt": self.response_finished_at,
                 "steers": list(self.steers) or None,
             }.items()
             if value is not None
@@ -209,6 +215,8 @@ class Store:
                 conn.execute("alter table turns add column last_useful_message text")
             if "steers_json" not in columns:
                 conn.execute("alter table turns add column steers_json text")
+            if "response_finished_at" not in columns:
+                conn.execute("alter table turns add column response_finished_at text")
             session_columns = {row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()}
             if "developer_instructions" not in session_columns:
                 conn.execute("alter table sessions add column developer_instructions text")
@@ -457,7 +465,7 @@ class Store:
         return self.get_turn(turn_id)
 
     def update_turn(self, turn_id: str, **fields: object) -> Turn:
-        allowed = {"status", "attempts", "last_error", "finished_at", "last_useful_message"}
+        allowed = {"status", "attempts", "last_error", "finished_at", "last_useful_message", "response_finished_at"}
         updates = {key: value for key, value in fields.items() if key in allowed}
         updates["updated_at"] = iso_now()
         assignments = ", ".join(f"{key} = ?" for key in updates)
@@ -629,6 +637,7 @@ def row_to_turn(row: sqlite3.Row) -> Turn:
         attempts=row["attempts"],
         last_error=row["last_error"],
         last_useful_message=row["last_useful_message"],
+        response_finished_at=row["response_finished_at"],
         steers=steers_from_json(row["steers_json"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],

@@ -838,6 +838,14 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     if not _is_noop_result(result_message):
                         last_result_message = result_message
                         consumed_any_result = True
+                        # The response is done even if background tasks keep
+                        # the turn open; record that so a process exit later
+                        # cannot turn finished work into a "failed" turn.
+                        await asyncio.to_thread(
+                            self.store.update_turn,
+                            turn_id,
+                            response_finished_at=iso_now(),
+                        )
                         # A steer can register a pending result while the
                         # background drain is already reading; whichever cycle
                         # consumes a response settles the debt.
