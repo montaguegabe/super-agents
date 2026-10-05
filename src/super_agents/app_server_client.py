@@ -307,6 +307,8 @@ class CodexAppServerClient(
         self._permission_callback_tasks: set[asyncio.Task[None]] = set()
         self._permission_decision_tasks: set[asyncio.Task[None]] = set()
         self._merge_session_tasks: set[asyncio.Task[None]] = set()
+        self._volatile_merge_write_times: dict[str, float] = {}
+        self._suppressed_merge_counts: dict[str, int] = {}
         self._initialize_result: JsonObject = {}
         self._last_connection_error: str | None = None
 

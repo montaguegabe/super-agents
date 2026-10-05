@@ -124,6 +124,11 @@ class RoutineClientMixin:
         results = []
         for routine in sorted(candidates, key=lambda item: item.name):
             results.append(await self.run_routine(routine, force=force))
+        # File triggers ride the same sweep as the schedule (EventClientMixin);
+        # a forced single-routine run is a manual action and does not scan.
+        sweep_file_triggers = getattr(self, "sweep_file_triggers", None)
+        if sweep_file_triggers is not None and not force:
+            results.extend(await sweep_file_triggers(name=name))
         return {
             "count": len(results),
             "results": results,

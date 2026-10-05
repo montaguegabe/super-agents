@@ -79,6 +79,28 @@ def merge_turns(current: dict[str, TurnSummary] | None, patch: Any) -> JsonObjec
     return result
 
 
+# Session/turn fields that move on every streamed app-server event without
+# reflecting a meaningful state change. A merge that only touches these does
+# not need its own state-file write (2026-09-18: a churning turn streamed
+# ~30 notifications/sec and each one rewrote the multi-MB state file).
+VOLATILE_SESSION_FIELDS = frozenset({"updatedAt", "lastEventAt", "lastUsefulMessage"})
+VOLATILE_TURN_FIELDS = frozenset({"updatedAt", "lastUsefulMessage", "eventCount"})
+
+
+def significant_session_json(session_json: JsonObject) -> JsonObject:
+    """Project session JSON down to the fields worth an immediate persist."""
+    result = {key: value for key, value in session_json.items() if key not in VOLATILE_SESSION_FIELDS}
+    turns = result.get("turns")
+    if isinstance(turns, dict):
+        result["turns"] = {
+            turn_id: {key: value for key, value in turn.items() if key not in VOLATILE_TURN_FIELDS}
+            if isinstance(turn, dict)
+            else turn
+            for turn_id, turn in turns.items()
+        }
+    return result
+
+
 def session_from_patch(value: JsonObject) -> SessionRecord:
     turns = None
     if isinstance(value.get("turns"), dict):

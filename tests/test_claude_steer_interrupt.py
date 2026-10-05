@@ -130,3 +130,39 @@ async def test_interrupted_followup_timeout_is_not_coalesced_success(tmp_path: P
     assert failed.status == "failed"
     assert "Interrupted steer" in failed.last_error
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_steer_records_turn_steers_for_thread_reads(tmp_path: Path, sdk):
+    """Steering text persists on the turn row and appears in thread reads.
+
+    The voice pipeline steers from a different process than the one serving
+    history reads, so in-memory bookkeeping alone leaves steers invisible to
+    clients (iOS showed only the turn's first message).
+    """
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: sdk)
+    client._steer_drain_timeout_seconds = .01
+    client._interrupted_steer_start_timeout_seconds = .3
+    await client.start_thread({"name": "elm", "cwd": str(tmp_path)})
+    initial = await client.start_turn_by_label(LabelQueryInput(label="elm"), {"prompt": "blocked tool"})
+    while not BlockedToolClient.instances:
+        await asyncio.sleep(.005)
+    transport = BlockedToolClient.instances[0]
+    await asyncio.wait_for(transport.started.wait(), 1)
+
+    await client.steer_by_label(
+        LabelQueryInput(label="elm"),
+        "<voice>also update the docs</voice>",
+        {"interruptCurrentWork": True},
+    )
+    await terminal(store, initial["turnId"])
+
+    steers = store.get_turn(initial["turnId"]).steers
+    assert [steer["text"] for steer in steers] == ["<voice>also update the docs</voice>"]
+    assert all(steer["createdAt"] for steer in steers)
+
+    readback = await client.read_by_label(LabelQueryInput(label="elm"), include_turns=True)
+    turn_view = next(t for t in readback["turns"] if t["turnId"] == initial["turnId"])
+    assert [steer["text"] for steer in turn_view["steers"]] == ["<voice>also update the docs</voice>"]
+    await client.close()

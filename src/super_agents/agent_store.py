@@ -86,6 +86,14 @@ class Turn:
     attempts: int = 0
     last_error: str | None = None
     last_useful_message: str | None = None
+    # Set once the model's response for this turn has completed, even if the
+    # turn stays "running" to wait on background tasks it spawned (a dev
+    # server, a watch). Lets a later orphan sweep tell "finished, abandoned
+    # its background tasks" apart from "died mid-response".
+    response_finished_at: str | None = None
+    # Steering messages delivered into the turn while it ran, in order, as
+    # {"text": ..., "createdAt": ...} objects.
+    steers: tuple[JsonObject, ...] = ()
 
     def to_json(self) -> JsonObject:
         return {
@@ -105,6 +113,8 @@ class Turn:
                 "attempts": self.attempts,
                 "lastError": self.last_error,
                 "lastUsefulMessage": self.last_useful_message,
+                "responseFinishedAt": self.response_finished_at,
+                "steers": list(self.steers) or None,
             }.items()
             if value is not None
         }
@@ -203,6 +213,10 @@ class Store:
                 conn.execute("alter table turns add column service_tier text")
             if "last_useful_message" not in columns:
                 conn.execute("alter table turns add column last_useful_message text")
+            if "steers_json" not in columns:
+                conn.execute("alter table turns add column steers_json text")
+            if "response_finished_at" not in columns:
+                conn.execute("alter table turns add column response_finished_at text")
             session_columns = {row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()}
             if "developer_instructions" not in session_columns:
                 conn.execute("alter table sessions add column developer_instructions text")
@@ -315,6 +329,35 @@ class Store:
                 row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
         return row_to_session(row) if row else None
 
+    def get_name_holder(self, name: str) -> Session | None:
+        """The session holding this name regardless of backend.
+
+        ``name`` is unique across the whole table, so a session created under
+        another backend still blocks the name; callers that are about to
+        create a session need to see that holder even though ``get_by_name``
+        scopes to this store's backend.
+        """
+        with self.connect() as conn:
+            row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
+        return row_to_session(row) if row else None
+
+    def retire_name_holder(self, name: str) -> Session | None:
+        """Free a name by renaming whichever session holds it, any backend.
+
+        Unlike ``rename_session`` this never refetches through the store's
+        backend scope, so it also works on a holder another backend owns.
+        Returns the previous holder, or None when the name was free.
+        """
+        holder = self.get_name_holder(name)
+        if holder is None:
+            return None
+        with self.connect() as conn:
+            conn.execute(
+                "update sessions set name = ?, updated_at = ? where id = ?",
+                (f"{name} (retired {holder.id[-8:]})", iso_now(), holder.id),
+            )
+        return holder
+
     def require_by_name(self, name: str) -> Session:
         session = self.get_by_name(name)
         if session is None:
@@ -422,7 +465,7 @@ class Store:
         return self.get_turn(turn_id)
 
     def update_turn(self, turn_id: str, **fields: object) -> Turn:
-        allowed = {"status", "attempts", "last_error", "finished_at", "last_useful_message"}
+        allowed = {"status", "attempts", "last_error", "finished_at", "last_useful_message", "response_finished_at"}
         updates = {key: value for key, value in fields.items() if key in allowed}
         updates["updated_at"] = iso_now()
         assignments = ", ".join(f"{key} = ?" for key in updates)
@@ -438,13 +481,56 @@ class Store:
             raise KeyError(f"No turn with id {turn_id}")
         return row_to_turn(row)
 
+    def append_turn_steer(self, turn_id: str, text: str) -> Turn:
+        """Record a steering message delivered into a running turn."""
+        now = iso_now()
+        with self.connect() as conn:
+            row = conn.execute("select steers_json from turns where id = ?", (turn_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"No turn with id {turn_id}")
+            steers = list(steers_from_json(row["steers_json"]))
+            steers.append({"text": text, "createdAt": now})
+            conn.execute(
+                "update turns set steers_json = ?, updated_at = ? where id = ?",
+                (json.dumps(steers), now, turn_id),
+            )
+        return self.get_turn(turn_id)
+
     def list_turns(self, session_id: str, limit: int = 20) -> list[Turn]:
         with self.connect() as conn:
             rows = conn.execute(
-                "select * from turns where session_id = ? order by created_at desc limit ?",
+                # rowid breaks same-millisecond ties so the newest insert is
+                # the newest turn (and listings agree with this ordering).
+                "select * from turns where session_id = ? order by created_at desc, rowid desc limit ?",
                 (session_id, limit),
             ).fetchall()
         return [row_to_turn(row) for row in rows]
+
+    def latest_turns_by_session(self) -> dict[str, Turn]:
+        """Newest turn for every session in one query.
+
+        Session listings need each session's latest turn (model, reasoning
+        effort); one query beats one ``list_turns`` round-trip per session.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select t.* from turns t
+                join (
+                    select session_id, max(created_at) as created_at
+                    from turns group by session_id
+                ) latest
+                on latest.session_id = t.session_id and latest.created_at = t.created_at
+                order by t.rowid desc
+                """
+            ).fetchall()
+        latest: dict[str, Turn] = {}
+        for row in rows:
+            turn = row_to_turn(row)
+            # Ties on created_at (same millisecond): the newest insert wins,
+            # matching list_turns' ordering.
+            latest.setdefault(turn.session_id, turn)
+        return latest
 
     def queued_turns(self, session_id: str | None = None) -> list[Turn]:
         params: list[object] = []
@@ -551,10 +637,24 @@ def row_to_turn(row: sqlite3.Row) -> Turn:
         attempts=row["attempts"],
         last_error=row["last_error"],
         last_useful_message=row["last_useful_message"],
+        response_finished_at=row["response_finished_at"],
+        steers=steers_from_json(row["steers_json"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
     )
+
+
+def steers_from_json(value: object) -> tuple[JsonObject, ...]:
+    if not isinstance(value, str) or not value:
+        return ()
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(raw, list):
+        return ()
+    return tuple(item for item in raw if isinstance(item, dict))
 
 
 def tail_file(path: Path, lines: int) -> list[str]:

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any, Literal, cast
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
 
 from .app_formatting import as_object
 from .app_models import PendingServerRequest
@@ -12,6 +18,36 @@ from .app_time import iso_now
 from .state import JsonObject
 
 DEFAULT_APPROVAL_REQUESTS_FILE = Path.home() / ".super-agents" / "approval-requests.json"
+
+
+def permission_store_path(path: str | Path | None = None) -> Path:
+    return Path(path or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE") or DEFAULT_APPROVAL_REQUESTS_FILE)
+
+
+@contextlib.contextmanager
+def permission_store_lock(path: str | Path | None = None):
+    """Serialize read-modify-write cycles on the shared approval store.
+
+    Every mutation rewrites the whole store from a snapshot, so two unlocked
+    concurrent writers lose one side's update — a decision written between
+    another writer's read and write vanishes and the answered approval never
+    resumes its requester. Plain readers stay lockless: the store file is
+    replaced atomically.
+    """
+    if fcntl is None:
+        yield
+        return
+    store_path = permission_store_path(path)
+    store_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = store_path.with_name(store_path.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def is_permission_request(method: str) -> bool:
@@ -35,23 +71,25 @@ def record_shared_permission_request(
     request: PendingServerRequest,
     path: str | Path | None = None,
 ) -> None:
-    store = read_permission_store(path)
-    requests = as_object(store.get("requests"))
-    requests[str(request.id)] = request.to_json()
-    store["requests"] = requests
-    store["decisions"] = as_object(store.get("decisions"))
-    write_permission_store(path, store)
+    with permission_store_lock(path):
+        store = read_permission_store(path)
+        requests = as_object(store.get("requests"))
+        requests[str(request.id)] = request.to_json()
+        store["requests"] = requests
+        store["decisions"] = as_object(store.get("decisions"))
+        write_permission_store(path, store)
 
 
 def clear_shared_permission_request(request_id: str | int, path: str | Path | None = None) -> None:
-    store = read_permission_store(path)
-    requests = as_object(store.get("requests"))
-    decisions = as_object(store.get("decisions"))
-    requests.pop(str(request_id), None)
-    decisions.pop(str(request_id), None)
-    store["requests"] = requests
-    store["decisions"] = decisions
-    write_permission_store(path, store)
+    with permission_store_lock(path):
+        store = read_permission_store(path)
+        requests = as_object(store.get("requests"))
+        decisions = as_object(store.get("decisions"))
+        requests.pop(str(request_id), None)
+        decisions.pop(str(request_id), None)
+        store["requests"] = requests
+        store["decisions"] = decisions
+        write_permission_store(path, store)
 
 
 def write_shared_permission_decision(
@@ -59,16 +97,17 @@ def write_shared_permission_decision(
     decision: Literal["accept", "decline", "cancel"],
     path: str | Path | None = None,
 ) -> bool:
-    store = read_permission_store(path)
-    requests = as_object(store.get("requests"))
-    if str(request_id) not in requests:
-        return False
-    decisions = as_object(store.get("decisions"))
-    decisions[str(request_id)] = {"decision": decision, "decidedAt": iso_now()}
-    store["requests"] = requests
-    store["decisions"] = decisions
-    write_permission_store(path, store)
-    return True
+    with permission_store_lock(path):
+        store = read_permission_store(path)
+        requests = as_object(store.get("requests"))
+        if str(request_id) not in requests:
+            return False
+        decisions = as_object(store.get("decisions"))
+        decisions[str(request_id)] = {"decision": decision, "decidedAt": iso_now()}
+        store["requests"] = requests
+        store["decisions"] = decisions
+        write_permission_store(path, store)
+        return True
 
 
 def permission_response_for_request(
@@ -108,20 +147,21 @@ def _permission_request_method(request: JsonObject | PendingServerRequest | Any)
 
 
 def pop_shared_permission_decision(request_id: str | int, path: str | Path | None = None) -> JsonObject | None:
-    store = read_permission_store(path)
-    requests = as_object(store.get("requests"))
-    request = requests.get(str(request_id))
-    method = str(request.get("method") or "") if isinstance(request, dict) else ""
-    decisions = as_object(store.get("decisions"))
-    raw_decision = decisions.pop(str(request_id), None)
-    if not isinstance(raw_decision, dict):
-        return None
-    decision = raw_decision.get("decision")
-    if decision not in {"accept", "decline", "cancel"}:
-        return None
-    store["requests"] = requests
-    store["decisions"] = decisions
-    write_permission_store(path, store)
+    with permission_store_lock(path):
+        store = read_permission_store(path)
+        requests = as_object(store.get("requests"))
+        request = requests.get(str(request_id))
+        method = str(request.get("method") or "") if isinstance(request, dict) else ""
+        decisions = as_object(store.get("decisions"))
+        raw_decision = decisions.pop(str(request_id), None)
+        if not isinstance(raw_decision, dict):
+            return None
+        decision = raw_decision.get("decision")
+        if decision not in {"accept", "decline", "cancel"}:
+            return None
+        store["requests"] = requests
+        store["decisions"] = decisions
+        write_permission_store(path, store)
     return permission_response_for_request(
         request if isinstance(request, dict) else {"method": method},
         decision,
@@ -129,7 +169,7 @@ def pop_shared_permission_decision(request_id: str | int, path: str | Path | Non
 
 
 def read_permission_store(path: str | Path | None = None) -> JsonObject:
-    store_path = Path(path or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE") or DEFAULT_APPROVAL_REQUESTS_FILE)
+    store_path = permission_store_path(path)
     try:
         raw = json.loads(store_path.read_text(encoding="utf-8"))
     except Exception:
@@ -140,7 +180,7 @@ def read_permission_store(path: str | Path | None = None) -> JsonObject:
 
 
 def write_permission_store(path: str | Path | None, store: JsonObject) -> None:
-    store_path = Path(path or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE") or DEFAULT_APPROVAL_REQUESTS_FILE)
+    store_path = permission_store_path(path)
     store_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Approval payloads can contain commands, paths, and redacted input
     # context. Do not depend on the host's umask to keep that metadata private.

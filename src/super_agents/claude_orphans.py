@@ -67,16 +67,34 @@ class OrphanReconciliationMixin:
         return (datetime.now(timezone.utc) - updated).total_seconds()
 
     def _fail_orphaned_turn(self, session_id: str, turn_id: str | None) -> None:
+        """Terminalize an orphaned turn.
+
+        A turn whose model response already finished (it only stayed "running"
+        to wait on background tasks it spawned, such as a dev server) did its
+        work; it completes, with a note that those tasks were abandoned. Only a
+        turn that died mid-response fails. (Field test 2026-10-02: a finished,
+        announced chess build was reported as failed for this reason.)
+        """
+        response_finished = False
         if turn_id:
             with contextlib.suppress(KeyError):
                 turn = self.store.get_turn(turn_id)
                 if turn.status not in {"completed", "failed", "cancelled"}:
-                    self.store.update_turn(
-                        turn_id,
-                        status="failed",
-                        finished_at=iso_now(),
-                        last_error="interrupted: owning process exited mid-turn",
-                    )
+                    response_finished = bool(turn.response_finished_at)
+                    if response_finished:
+                        self.store.update_turn(
+                            turn_id,
+                            status="completed",
+                            finished_at=iso_now(),
+                            last_error=None,
+                        )
+                    else:
+                        self.store.update_turn(
+                            turn_id,
+                            status="failed",
+                            finished_at=iso_now(),
+                            last_error="interrupted: owning process exited mid-turn",
+                        )
         # Reconciliation is bookkeeping, not activity: keep the session's real
         # last-activity time so UIs don't surface long-dead threads as recent.
         previous_updated_at = None
@@ -84,9 +102,13 @@ class OrphanReconciliationMixin:
             previous_updated_at = self.store.get_session(session_id).updated_at
         self.store.update_session(
             session_id,
-            status="failed",
+            status="completed" if response_finished else "failed",
             active_turn_id=None,
-            last_observed_state="turn orphaned by process exit",
+            last_observed_state=(
+                "response completed; background tasks abandoned by process exit"
+                if response_finished
+                else "turn orphaned by process exit"
+            ),
             **({"updated_at": previous_updated_at} if previous_updated_at else {}),
         )
 

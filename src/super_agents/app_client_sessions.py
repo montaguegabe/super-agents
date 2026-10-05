@@ -43,6 +43,7 @@ from .app_sessions import (
     session_from_patch,
     session_from_thread,
     session_recency,
+    significant_session_json,
     turn_patch,
 )
 from .app_time import age_ms, iso_from_thread_time, iso_now, parse_iso_ms, thread_recency, turn_key
@@ -55,12 +56,17 @@ from .state import (
     get_string,
     read_state_file_locked,
     update_state_file,
+    update_state_file_when,
 )
 from .thread_favorites import favorite_status, is_favorite
 
 logger = logging.getLogger(__name__)
 
 STALE_ACTIVE_TURN_WARNING = "stale_active_turn"
+
+# Volatile-only session merges (no significant field changed) are flushed to
+# the state file at most this often per thread.
+VOLATILE_MERGE_FLUSH_SECONDS = 1.0
 
 
 class SessionClientMixin:
@@ -681,7 +687,7 @@ class SessionClientMixin:
     ) -> None:
         async with self._state_lock:
 
-            def update(state: StateFile) -> None:
+            def update(state: StateFile) -> bool:
                 now = iso_now()
                 current = state.sessions.get(thread_id) or SessionRecord(
                     thread_id=thread_id, created_at=now, updated_at=now
@@ -694,20 +700,35 @@ class SessionClientMixin:
                 for field_name in clear_fields or []:
                     merged_json.pop(field_name, None)
                 merged = session_from_patch(merged_json)
+                if thread_id in state.sessions and significant_session_json(
+                    merged.to_json()
+                ) == significant_session_json(current.to_json()):
+                    # Only volatile bookkeeping (event timestamps, previews,
+                    # counters) moved. A churning turn streams these many
+                    # times per second and each persist rewrites the whole
+                    # state file, so flush them at most once per interval.
+                    last_write = self._volatile_merge_write_times.get(thread_id, 0.0)
+                    if time.monotonic() - last_write < VOLATILE_MERGE_FLUSH_SECONDS:
+                        self._suppressed_merge_counts[thread_id] = self._suppressed_merge_counts.get(thread_id, 0) + 1
+                        return False
+                self._volatile_merge_write_times[thread_id] = time.monotonic()
+                suppressed = self._suppressed_merge_counts.pop(thread_id, 0)
                 logger.info(
                     "Super Agents state merge thread_id=%s old_active_turn_id=%s new_active_turn_id=%s "
-                    "old_last_status=%s new_last_status=%s clear_fields=%s state_file=%s",
+                    "old_last_status=%s new_last_status=%s clear_fields=%s suppressed_merges=%d state_file=%s",
                     thread_id,
                     old_active_turn_id,
                     merged.active_turn_id,
                     old_last_status,
                     merged.last_status,
                     clear_fields or [],
+                    suppressed,
                     self.state_file,
                 )
                 state.sessions[thread_id] = merged
+                return True
 
-            update_state_file(self.state_file, update)
+            update_state_file_when(self.state_file, update)
 
     async def get_session(self, thread_id: str) -> SessionRecord | None:
         state = await self.read_state()

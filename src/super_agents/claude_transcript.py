@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,31 @@ from super_agents.claude_options import CLAUDE_CONFIG_DIR_ENV
 JsonObject = dict[str, Any]
 
 CLAUDE_PROJECTS_DIR_NAME = "projects"
-# Parsed transcripts keyed by path, invalidated on (mtime_ns, size) change so
-# steady-state polling of a detail page does not re-parse multi-MB files.
-_TRANSCRIPT_CACHE: dict[str, tuple[int, int, list[JsonObject]]] = {}
+# Parsed transcripts keyed by path. An unchanged file (same mtime_ns and
+# size) is served from cache; a grown file is parsed incrementally from the
+# previously consumed byte offset, since Claude Code only appends to a
+# transcript. Only a shrunk file forces a full re-parse. Without this, every
+# detail poll of an active terminal session re-parsed the whole multi-MB
+# file on each new line.
+_TRANSCRIPT_CACHE: dict[str, "_ParsedTranscript"] = {}
 _TRANSCRIPT_CACHE_MAX_ENTRIES = 32
+# Reads run on worker threads; one parser state per file must not be fed by
+# two threads at once.
+_TRANSCRIPT_CACHE_LOCK = threading.Lock()
+
+
+class _ParsedTranscript:
+    __slots__ = ("mtime_ns", "size", "consumed", "turns", "current", "session_id")
+
+    def __init__(self, session_id: str) -> None:
+        self.mtime_ns = -1
+        self.size = 0
+        # Bytes parsed so far; always ends on a newline boundary.
+        self.consumed = 0
+        self.turns: list[JsonObject] = []
+        # The turn still collecting assistant replies at the consumed offset.
+        self.current: JsonObject | None = None
+        self.session_id = session_id
 
 
 def transcript_turn_views(session: Session, limit: int = 20) -> list[JsonObject]:
@@ -71,50 +93,84 @@ def _project_dir_name(cwd: str) -> str:
 
 
 def _cached_transcript_turns(path: Path, session_id: str) -> list[JsonObject]:
+    with _TRANSCRIPT_CACHE_LOCK:
+        return _cached_transcript_turns_locked(path, session_id)
+
+
+def _cached_transcript_turns_locked(path: Path, session_id: str) -> list[JsonObject]:
     try:
         stat = path.stat()
     except OSError:
         return []
     key = str(path)
-    cached = _TRANSCRIPT_CACHE.get(key)
-    if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-        return cached[2]
-    turns = _parse_transcript_turns(path, session_id)
-    while len(_TRANSCRIPT_CACHE) >= _TRANSCRIPT_CACHE_MAX_ENTRIES:
-        _TRANSCRIPT_CACHE.pop(next(iter(_TRANSCRIPT_CACHE)))
-    _TRANSCRIPT_CACHE[key] = (stat.st_mtime_ns, stat.st_size, turns)
-    return turns
+    parsed = _TRANSCRIPT_CACHE.get(key)
+    if parsed is not None and parsed.session_id != session_id:
+        parsed = None
+    if parsed is not None and parsed.mtime_ns == stat.st_mtime_ns and parsed.size == stat.st_size:
+        return parsed.turns
+    if parsed is None or stat.st_size < parsed.consumed:
+        parsed = _ParsedTranscript(session_id)
+    try:
+        _parse_transcript_append(path, parsed)
+    except OSError:
+        return []
+    parsed.mtime_ns = stat.st_mtime_ns
+    parsed.size = stat.st_size
+    if key not in _TRANSCRIPT_CACHE:
+        while len(_TRANSCRIPT_CACHE) >= _TRANSCRIPT_CACHE_MAX_ENTRIES:
+            _TRANSCRIPT_CACHE.pop(next(iter(_TRANSCRIPT_CACHE)))
+    _TRANSCRIPT_CACHE[key] = parsed
+    return parsed.turns
 
 
 def _parse_transcript_turns(path: Path, session_id: str) -> list[JsonObject]:
-    turns: list[JsonObject] = []
-    current: JsonObject | None = None
+    parsed = _ParsedTranscript(session_id)
     try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                entry = _json_object(line)
-                if entry is None or entry.get("isSidechain"):
-                    continue
-                entry_type = entry.get("type")
-                if entry_type == "user" and not entry.get("isMeta"):
-                    text = _message_text(entry)
-                    if not text:
-                        continue
-                    current = _new_turn(entry, text, session_id, index=len(turns))
-                    turns.append(current)
-                elif entry_type == "assistant":
-                    text = _message_text(entry)
-                    if not text:
-                        continue
-                    if current is None:
-                        # History continued from a prior session: replies may
-                        # precede the first prompt captured in this file.
-                        current = _new_turn(entry, "", session_id, index=len(turns))
-                        turns.append(current)
-                    _append_reply(current, entry, text)
+        _parse_transcript_append(path, parsed)
     except OSError:
         return []
-    return turns
+    return parsed.turns
+
+
+def _parse_transcript_append(path: Path, parsed: _ParsedTranscript) -> None:
+    """Feed the bytes appended since ``parsed.consumed`` into the turn list.
+
+    Only whole lines are consumed; a partially written trailing line waits
+    for the next read. Raises OSError for the caller to handle.
+    """
+    with path.open("rb") as handle:
+        handle.seek(parsed.consumed)
+        chunk = handle.read()
+    end = chunk.rfind(b"\n") + 1
+    if end == 0:
+        return
+    text_chunk = chunk[:end].decode("utf-8", errors="replace")
+    turns = parsed.turns
+    current = parsed.current
+    session_id = parsed.session_id
+    for line in text_chunk.splitlines():
+        entry = _json_object(line)
+        if entry is None or entry.get("isSidechain"):
+            continue
+        entry_type = entry.get("type")
+        if entry_type == "user" and not entry.get("isMeta"):
+            text = _message_text(entry)
+            if not text:
+                continue
+            current = _new_turn(entry, text, session_id, index=len(turns))
+            turns.append(current)
+        elif entry_type == "assistant":
+            text = _message_text(entry)
+            if not text:
+                continue
+            if current is None:
+                # History continued from a prior session: replies may
+                # precede the first prompt captured in this file.
+                current = _new_turn(entry, "", session_id, index=len(turns))
+                turns.append(current)
+            _append_reply(current, entry, text)
+    parsed.current = current
+    parsed.consumed += end
 
 
 def _new_turn(entry: JsonObject, prompt: str, session_id: str, *, index: int) -> JsonObject:

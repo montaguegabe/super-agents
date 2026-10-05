@@ -501,6 +501,7 @@ class TransportClientMixin:
         turn = self.ensure_turn(thread_id, turn_id)
         received_at = iso_now()
         turn.events.append({"method": method, "params": params, "receivedAt": received_at})
+        turn.notification_count += 1
         if len(turn.events) > 200:
             turn.events.pop(0)
         error_message = turn_error_message(params)

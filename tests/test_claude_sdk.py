@@ -209,6 +209,32 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_thread_read_carries_full_prompt(tmp_path: Path) -> None:
+    """Thread reads serve the full stored prompt; progress keeps the preview.
+
+    History UIs render what the user actually said. The 180-char
+    promptPreview alone cuts transport envelopes like <voice>...</voice>
+    in half (the closing tag never survives), so clients showed raw
+    markup and lost the rest of the prompt.
+    """
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    long_prompt = "<voice>please " + "and then " * 40 + "stop</voice>"
+
+    await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": long_prompt})
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+
+    readback = await client.read_by_label(LabelQueryInput(label="sdk"), include_turns=True)
+    assert readback["turns"][0]["prompt"] == long_prompt
+    assert len(readback["turns"][0]["promptPreview"]) < len(long_prompt)
+
+    progress = await client.progress_by_label(LabelQueryInput(label="sdk"))
+    assert progress["turns"]
+    assert all("prompt" not in turn for turn in progress["turns"])
+
+
+@pytest.mark.asyncio
 async def test_local_and_cloud_claude_clients_keep_distinct_sdk_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -541,6 +567,51 @@ async def test_claude_sdk_start_thread_fresh_retires_existing_named_session(tmp_
     assert store.get_by_name("dispatcher").id == fresh["threadId"]
     retired = store.get_session(first["threadId"])
     assert retired.name == f"dispatcher (retired {first['threadId'][-8:]})"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_start_thread_retires_other_backend_name_holder(tmp_path: Path) -> None:
+    # A same-named session left behind by another backend must not make
+    # start_thread fail on the store's cross-backend UNIQUE name constraint.
+    path = tmp_path / "state.sqlite3"
+    other_store = Store(path, backend="claude_code")
+    holder = other_store.create_session("dispatcher", cwd=str(tmp_path))
+
+    store = Store(path, backend="openbase_cloud")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader, backend_identity="openbase_cloud")
+    started = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
+
+    assert started["threadId"] != holder.id
+    assert store.get_by_name("dispatcher").id == started["threadId"]
+    retired = other_store.get_session(holder.id)
+    assert retired.name == f"dispatcher (retired {holder.id[-8:]})"
+
+
+@pytest.mark.asyncio
+async def test_read_thread_does_not_echo_previous_output_onto_running_turn(tmp_path: Path) -> None:
+    # While a new turn runs, the session-level lastUsefulMessage still holds
+    # the PREVIOUS turn's output; pasting it onto the running turn made
+    # clients show the old output twice.
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    session_id = started["threadId"]
+    done = store.create_turn(session_id, "first prompt", status="completed")
+    store.update_turn(done.id, last_useful_message="old output")
+    running = store.create_turn(session_id, "second prompt", status="running")
+    store.update_session(
+        session_id,
+        status="running",
+        active_turn_id=running.id,
+        last_turn_id=running.id,
+        last_useful_message="old output",
+    )
+
+    readback = await client.read_by_label(LabelQueryInput(label="sdk"), include_turns=True)
+
+    by_id = {turn["turnId"]: turn for turn in readback["turns"]}
+    assert by_id[done.id]["lastUsefulMessage"] == "old output"
+    assert "lastUsefulMessage" not in by_id[running.id]
 
 
 @pytest.mark.asyncio
@@ -988,8 +1059,7 @@ async def test_same_model_followup_does_not_send_control_request(tmp_path: Path,
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
     await client.start_thread({"name": "sdk", "cwd": str(tmp_path), "model": "haiku"})
     for prompt in ("one", "two"):
-        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
-            {"prompt": prompt, "model": "haiku"})
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": prompt, "model": "haiku"})
         await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
     assert len(FakeClaudeSDKClient.options_seen) == 1
     await client.close()
@@ -999,15 +1069,16 @@ async def test_same_model_followup_does_not_send_control_request(tmp_path: Path,
 @pytest.mark.asyncio
 async def test_changed_model_is_applied_once_to_cached_client(tmp_path: Path, monkeypatch) -> None:
     changes = []
+
     async def change_model(self, model=None):
         changes.append(model)
+
     monkeypatch.setattr(FakeClaudeSDKClient, "set_model", change_model)
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
     await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
     for index, model in enumerate(("haiku", "sonnet", "sonnet")):
-        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"),
-            {"prompt": str(index), "model": model})
+        result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": str(index), "model": model})
         await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
     assert changes == ["sonnet"]
     assert len(FakeClaudeSDKClient.options_seen) == 1
@@ -1185,6 +1256,117 @@ async def test_claude_sdk_coalesced_steers_do_not_hang_the_turn(
     assert "next question" in (second_turn.last_useful_message or "")
 
 
+@dataclass
+class FakeTaskMessage:
+    subtype: str
+    task_id: str
+    description: str = ""
+    status: str | None = None
+
+
+class BackgroundTaskClaudeSDKClient(FakeClaudeSDKClient):
+    """First response ends while two spawned tasks still run; their terminal
+    events (and optionally the follow-up response) arrive on later reads."""
+
+    tasks_done: asyncio.Event = asyncio.Event()
+    followup: bool = True
+
+    def __init__(self, options: FakeClaudeAgentOptions) -> None:
+        super().__init__(options)
+        self.responded = False
+
+    async def receive_response(self):
+        if not self.responded:
+            self.responded = True
+            yield FakeTaskMessage("task_started", "task-a", description="explore repo A")
+            yield FakeTaskMessage("task_started", "task-b", description="explore repo B")
+            yield FakeAssistantMessage([FakeTextBlock("launched explorers; waiting on results")])
+            yield FakeResultMessage("launched explorers; waiting on results")
+            return
+        await BackgroundTaskClaudeSDKClient.tasks_done.wait()
+        yield FakeTaskMessage("task_notification", "task-a", status="completed")
+        yield FakeTaskMessage("task_updated", "task-b", status="killed")
+        if BackgroundTaskClaudeSDKClient.followup:
+            yield FakeAssistantMessage([FakeTextBlock("synthesized findings")])
+            yield FakeResultMessage("synthesized findings")
+            return
+        # No follow-up response ever starts (e.g. a killed watch); the stream
+        # stays open with nothing more to say.
+        await asyncio.Event().wait()
+
+
+class BackgroundTaskSdk:
+    ClaudeAgentOptions = FakeClaudeAgentOptions
+    ClaudeSDKClient = BackgroundTaskClaudeSDKClient
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_turn_stays_running_until_background_tasks_finish(tmp_path: Path) -> None:
+    """A response can end while subagents/watches it spawned still run; the
+    turn must not report "completed" until they finish.
+
+    Regression for 2026-09-22: agents that fanned out background exploration
+    subagents were reported completed the moment the parent response ended
+    ("I've launched three agents; once they report back I'll synthesize...")
+    while the subagents were still working, and their results rotted unread
+    on the stream.
+    """
+    BackgroundTaskClaudeSDKClient.tasks_done = asyncio.Event()
+    BackgroundTaskClaudeSDKClient.followup = True
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: BackgroundTaskSdk())
+    client._background_task_poll_seconds = 0.05
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "diagnose"})
+
+    # The parent response has ended, but two spawned tasks are in flight:
+    # the turn and session must stay running, and status must say why.
+    await wait_for(
+        lambda: "waiting on 2 background task(s)" in (store.get_session(started["threadId"]).last_observed_state or "")
+    )
+    assert store.get_turn(result["turnId"]).status == "running"
+    assert store.get_session(started["threadId"]).status == "running"
+    assert "explore repo A" in store.get_session(started["threadId"]).last_observed_state
+    # Hold across several poll cycles: the status must not flip to completed
+    # while the tasks are still running.
+    await asyncio.sleep(0.3)
+    assert store.get_turn(result["turnId"]).status == "running"
+    assert store.get_session(started["threadId"]).status == "running"
+
+    BackgroundTaskClaudeSDKClient.tasks_done.set()
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    turn = store.get_turn(result["turnId"])
+    assert "synthesized findings" in (turn.last_useful_message or "")
+    assert store.get_session(started["threadId"]).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_killed_background_task_does_not_hang_the_turn(tmp_path: Path) -> None:
+    """A task's terminal state can arrive with no follow-up response (e.g. a
+    killed watch); the turn must then complete instead of hanging, and the
+    client is dropped so the stream cannot owe the next turn a stale
+    response."""
+    BackgroundTaskClaudeSDKClient.tasks_done = asyncio.Event()
+    BackgroundTaskClaudeSDKClient.followup = False
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: BackgroundTaskSdk())
+    client._background_task_poll_seconds = 0.05
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+
+    result = await client.start_turn_by_label(LabelQueryInput(label="sdk"), {"prompt": "watch"})
+    await wait_for(
+        lambda: "waiting on 2 background task(s)" in (store.get_session(started["threadId"]).last_observed_state or "")
+    )
+    assert store.get_turn(result["turnId"]).status == "running"
+
+    BackgroundTaskClaudeSDKClient.tasks_done.set()
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    turn = store.get_turn(result["turnId"])
+    assert "launched explorers" in (turn.last_useful_message or "")
+    assert FakeClaudeSDKClient.disconnect_count >= 1
+
+
 @pytest.mark.asyncio
 async def test_claude_sdk_resume_can_replace_developer_instructions(
     monkeypatch: pytest.MonkeyPatch,
@@ -1257,6 +1439,36 @@ async def test_claude_sdk_startup_sweep_fails_orphaned_running_turns(
     session = store.get_session(started["threadId"])
     assert session.active_turn_id is None
     assert session.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_startup_sweep_completes_turns_whose_response_finished(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A turn kept "running" only by background tasks (a dev server) after its
+    response finished did its work: the sweep completes it instead of failing it."""
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "chess", "cwd": str(tmp_path)})
+    turn_id = _insert_ghost_turn(store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z")
+    store.update_turn(turn_id, response_finished_at="2026-01-01T00:00:00.000Z", last_useful_message="Chess app done")
+    # update_turn bumps updated_at; age the row again so the sweep may reclaim it.
+    with store.connect() as conn:
+        conn.execute("update turns set updated_at = ? where id = ?", ("2026-01-01T00:00:01.000Z", turn_id))
+
+    reconciled = client.reconcile_orphaned_turns()
+
+    assert reconciled == 1
+    turn = store.get_turn(turn_id)
+    assert turn.status == "completed"
+    assert turn.last_error is None
+    assert turn.finished_at
+    assert turn.to_json()["responseFinishedAt"] == "2026-01-01T00:00:00.000Z"
+    session = store.get_session(started["threadId"])
+    assert session.active_turn_id is None
+    assert session.status == "completed"
+    assert "background tasks abandoned" in (session.last_observed_state or "")
 
 
 @pytest.mark.asyncio
@@ -1444,3 +1656,58 @@ async def test_steer_falls_back_to_local_when_inbox_socket_dead(
     assert result.get("delivery") != "inbox"
     assert FakeClaudeSDKClient.prompts and FakeClaudeSDKClient.prompts[-1].endswith("keep going")
     assert not (registry / "claude-dead-1.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_announces_named_thread_intro_only_on_first_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The runtime greets the user before the first prompt; later turns stay quiet."""
+    import super_agents.claude_sdk as claude_sdk_module
+
+    announced: list[dict[str, object]] = []
+
+    async def fake_announce(**kwargs: object) -> bool:
+        announced.append({**kwargs, "prompts_so_far": list(FakeClaudeSDKClient.prompts)})
+        return True
+
+    monkeypatch.setattr(claude_sdk_module, "announce_thread_intro", fake_announce)
+    FakeClaudeSDKClient.prompts = []
+    FakeClaudeSDKClient.options_seen = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+
+    started = await client.start_thread(
+        {"name": "react-chess-game", "agentName": "Connie", "cwd": str(tmp_path), "model": "sonnet"}
+    )
+    first = await client.start_turn_by_label(LabelQueryInput(label="react-chess-game"), {"prompt": "build chess"})
+    await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
+    second = await client.start_turn_by_label(LabelQueryInput(label="react-chess-game"), {"prompt": "add castling"})
+    await wait_for(lambda: store.get_turn(second["turnId"]).status == "completed")
+
+    assert [a["agent_name"] for a in announced] == ["Connie"]
+    assert announced[0]["thread_name"] == "react-chess-game"
+    assert announced[0]["thread_id"] == started["threadId"]
+    # The greeting ran before the first prompt reached the SDK.
+    assert announced[0]["prompts_so_far"] == []
+    assert len(FakeClaudeSDKClient.prompts) == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_sdk_skips_intro_for_unnamed_threads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import super_agents.claude_sdk as claude_sdk_module
+
+    announced: list[object] = []
+
+    async def fake_announce(**kwargs: object) -> bool:
+        announced.append(kwargs)
+        return True
+
+    monkeypatch.setattr(claude_sdk_module, "announce_thread_intro", fake_announce)
+    FakeClaudeSDKClient.prompts = []
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path), "model": "sonnet"})
+    result = await client.start_turn_by_label(LabelQueryInput(label="dispatcher"), {"prompt": "hello"})
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    assert announced == []

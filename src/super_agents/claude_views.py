@@ -12,14 +12,16 @@ JsonObject = dict[str, Any]
 
 
 class SessionViewMixin:
-    def _session_view(self, session: Session) -> JsonObject:
+    def _session_view(self, session: Session, latest: Any | None = None) -> JsonObject:
         view = {"backend": self.backend, **session.to_json()}
         # Session rows do not record reasoning effort (or, for imported
         # sessions, a model); surface the latest turn's values so list
-        # consumers can show them without fetching turns.
-        turns = self.store.list_turns(session.id, limit=1)
-        if turns:
-            latest = turns[0]
+        # consumers can show them without fetching turns. Listings pass the
+        # prefetched latest turn so a 500-session list is not 500 queries.
+        if latest is None:
+            turns = self.store.list_turns(session.id, limit=1)
+            latest = turns[0] if turns else None
+        if latest is not None:
             if latest.reasoning_effort:
                 view.setdefault("reasoningEffort", latest.reasoning_effort)
             if latest.model:
@@ -71,8 +73,23 @@ class SessionViewMixin:
             }
         )
 
-    def _turn_view(self, session: Session, turn: Any) -> JsonObject:
+    def _turn_view(self, session: Session, turn: Any, *, include_prompt: bool = False) -> JsonObject:
         data = turn.to_json()
-        if "lastUsefulMessage" not in data and turn.id == session.last_turn_id and session.last_useful_message:
+        if include_prompt and turn.prompt:
+            # Thread reads feed history UIs that render what the user actually
+            # said; the 180-char promptPreview alone cuts transport envelopes
+            # like <voice>...</voice> in half and loses the rest of the prompt.
+            # Progress/status payloads keep the compact preview.
+            data["prompt"] = turn.prompt
+        if (
+            "lastUsefulMessage" not in data
+            and turn.id == session.last_turn_id
+            # A just-launched turn is already the session's last turn, but the
+            # session-level message still belongs to the previous turn; pasting
+            # it here made clients show the old output twice while the new
+            # turn ran. The running turn's own row picks up live progress.
+            and turn.id != session.active_turn_id
+            and session.last_useful_message
+        ):
             data["lastUsefulMessage"] = session.last_useful_message
         return data

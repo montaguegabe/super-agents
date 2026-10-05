@@ -15,6 +15,7 @@ from .app_formatting import as_object
 from .app_models import PendingServerRequest
 from .app_permissions import (
     clear_shared_permission_request,
+    permission_store_lock,
     pop_shared_permission_decision,
     read_permission_store,
     record_shared_permission_request,
@@ -154,6 +155,10 @@ class ToolApprovalGate:
 
     def clear_orphaned_requests(self) -> int:
         """Remove expired requests or requests whose owning process exited."""
+        with permission_store_lock(self.requests_file):
+            return self._clear_orphaned_requests_locked()
+
+    def _clear_orphaned_requests_locked(self) -> int:
         store = read_permission_store(self.requests_file)
         requests = as_object(store.get("requests"))
         decisions = as_object(store.get("decisions"))

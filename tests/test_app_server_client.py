@@ -801,6 +801,61 @@ async def test_start_turn_sets_super_agent_identity_environment(
 
 
 @pytest.mark.asyncio
+async def test_start_turn_announces_named_thread_intro_before_first_codex_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import super_agents.app_client_turns as app_client_turns
+
+    captured: list[dict[str, Any]] = []
+    announced: list[dict[str, object]] = []
+    turn_index = 0
+
+    async def fake_announce(**kwargs: object) -> bool:
+        announced.append({**kwargs, "methods_so_far": [message.get("method") for message in captured]})
+        return True
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    monkeypatch.setattr(app_client_turns, "announce_thread_intro", fake_announce)
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_turn(
+            {
+                "threadId": "thread-intro",
+                "label": "Build",
+                "agentName": "Dottie",
+                "prompt": "first",
+            }
+        )
+        client.handle_notification("turn/completed", {"threadId": "thread-intro", "turnId": "turn-1"})
+        await client.start_turn(
+            {
+                "threadId": "thread-intro",
+                "label": "Build",
+                "agentName": "Dottie",
+                "prompt": "second",
+            }
+        )
+
+        assert [item["agent_name"] for item in announced] == ["Dottie"]
+        assert announced[0]["thread_name"] == "Build"
+        assert announced[0]["thread_id"] == "thread-intro"
+        assert announced[0]["methods_so_far"][-1] == "thread/resume"
+        assert "turn/start" not in announced[0]["methods_so_far"]
+        assert [message.get("method") for message in captured].count("turn/start") == 2
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
 async def test_start_turn_continues_when_new_thread_has_no_rollout_to_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1088,6 +1143,30 @@ async def test_rename_by_name_uses_native_app_server_thread_name(tmp_path: Path)
         assert result["renamed"] is True
         rename_request = next(message for message in captured if message.get("method") == "thread/name/set")
         assert rename_request["params"] == {"threadId": "thread-native", "name": "new-name"}
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.asyncio
+async def test_rename_by_thread_id_skips_name_resolution(tmp_path: Path) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        if message.get("method") == "thread/list":
+            raise AssertionError("renaming by thread id must not list threads")
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        result = await client.rename_by_label(type_query(thread_id="thread-native"), "new-name")
+
+        assert result == {"renamed": True, "name": "new-name", "previousName": None, "result": {"ok": True}}
+        rename_request = next(message for message in captured if message.get("method") == "thread/name/set")
+        assert rename_request["params"] == {"threadId": "thread-native", "name": "new-name"}
+        session = await client.get_session("thread-native")
+        assert session is not None and session.label == "new-name"
     finally:
         await client.close()
         await server.close()
