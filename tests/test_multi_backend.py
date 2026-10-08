@@ -27,13 +27,22 @@ class FakeBackendClient:
         self._next_thread = 1
         self._next_turn = 1
 
-    def add_session(self, thread_id: str, name: str, cwd: str = "/repo") -> None:
+    def add_session(
+        self,
+        thread_id: str,
+        name: str,
+        cwd: str = "/repo",
+        *,
+        backend: str | None = None,
+    ) -> None:
         self.sessions_by_id[thread_id] = {
             "threadId": thread_id,
             "name": name,
             "cwd": cwd,
             "status": "completed",
         }
+        if backend:
+            self.sessions_by_id[thread_id]["backend"] = backend
 
     async def start_thread(self, input_data: JsonObject) -> JsonObject:
         self.calls.append(("start_thread", dict(input_data)))
@@ -352,6 +361,23 @@ async def test_legacy_session_without_backend_is_claimed_by_safe_default(
 
     assert result["backend"] == "openbase_cloud"
     assert client.provenance.backend_for_thread("legacy-thread") == "openbase_cloud"
+
+
+@pytest.mark.asyncio
+async def test_session_discovery_preserves_stored_claude_identity(
+    tmp_path: Path,
+    clients: dict[str, FakeBackendClient],
+) -> None:
+    clients["claude_code"].add_session("cloud-thread", "cloud", backend="openbase_cloud")
+    clients["openbase_cloud"].add_session("cloud-thread", "cloud", backend="openbase_cloud")
+    client = make_client(tmp_path, clients, default="claude_code")
+
+    result = await client.read_by_label(LabelQueryInput(label="cloud"))
+
+    assert result["backend"] == "openbase_cloud"
+    assert client.provenance.backend_for_thread("cloud-thread") == "openbase_cloud"
+    assert any(name == "read_by_label" for name, _payload in clients["openbase_cloud"].calls)
+    assert not any(name == "read_by_label" for name, _payload in clients["claude_code"].calls)
 
 
 def test_mcp_backend_schema_and_cleaners_are_additive(

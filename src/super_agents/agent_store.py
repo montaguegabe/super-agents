@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .backend_config import BACKENDS, execution_backend
 from .state import state_file_lock
 
 logger = logging.getLogger(__name__)
@@ -134,10 +135,33 @@ class Store:
             raise ValueError(f"Store is already scoped to backend {self.backend}.")
         self.backend = backend
         with self.connect() as conn:
-            conn.execute(
-                "update sessions set backend = ? where backend is null",
-                (backend,),
-            )
+            self._claim_legacy_rows(conn)
+
+    def _claim_legacy_rows(self, conn: sqlite3.Connection) -> None:
+        """Rows written before backends were recorded belong to this store."""
+        if self.backend:
+            conn.execute("update sessions set backend = ? where backend is null", (self.backend,))
+
+    def _scope(self) -> tuple[str, ...]:
+        """Every identity this store's rows may carry.
+
+        A store is scoped by execution backend, not by identity: claude_code
+        and openbase_cloud sessions run on the same Claude Code engine on
+        one machine, and several processes there may hold different
+        identities (the API services, the Super Agents MCP server inside a
+        session, a thread-sync import). Each process keeps writing its own
+        identity on the rows it creates, and every one of them sees all the
+        machine's Claude Code sessions. Rows of other execution backends are
+        never visible.
+        """
+        if not self.backend:
+            return ()
+        mine = execution_backend(self.backend)
+        return tuple(sorted(candidate for candidate in BACKENDS if execution_backend(candidate) == mine))
+
+    def _scope_sql(self) -> tuple[str, list[str]]:
+        scope = self._scope()
+        return f"backend in ({', '.join('?' for _ in scope)})", list(scope)
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -228,11 +252,7 @@ class Store:
                 conn.execute("alter table sessions add column backend text")
             if "transcript_title" not in session_columns:
                 conn.execute("alter table sessions add column transcript_title text")
-            if self.backend:
-                conn.execute(
-                    "update sessions set backend = ? where backend is null",
-                    (self.backend,),
-                )
+            self._claim_legacy_rows(conn)
 
     @staticmethod
     def _is_corrupt_database_error(exc: sqlite3.DatabaseError) -> bool:
@@ -308,9 +328,10 @@ class Store:
     def get_session(self, session_id: str) -> Session:
         with self.connect() as conn:
             if self.backend:
+                clause, params = self._scope_sql()
                 row = conn.execute(
-                    "select * from sessions where id = ? and backend = ?",
-                    (session_id, self.backend),
+                    f"select * from sessions where id = ? and {clause}",
+                    (session_id, *params),
                 ).fetchone()
             else:
                 row = conn.execute("select * from sessions where id = ?", (session_id,)).fetchone()
@@ -321,9 +342,10 @@ class Store:
     def get_by_name(self, name: str) -> Session | None:
         with self.connect() as conn:
             if self.backend:
+                clause, params = self._scope_sql()
                 row = conn.execute(
-                    "select * from sessions where name = ? and backend = ?",
-                    (name, self.backend),
+                    f"select * from sessions where name = ? and {clause}",
+                    (name, *params),
                 ).fetchone()
             else:
                 row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
@@ -374,8 +396,9 @@ class Store:
             clauses.append("status = ?")
             params.append(status)
         if self.backend:
-            clauses.append("backend = ?")
-            params.append(self.backend)
+            clause, scope = self._scope_sql()
+            clauses.append(clause)
+            params.extend(scope)
         if clauses:
             query += " where " + " and ".join(clauses)
         query += " order by updated_at desc"
