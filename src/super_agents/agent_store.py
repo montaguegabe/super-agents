@@ -135,33 +135,33 @@ class Store:
             raise ValueError(f"Store is already scoped to backend {self.backend}.")
         self.backend = backend
         with self.connect() as conn:
-            self._claim_compatible_rows(conn)
+            self._claim_legacy_rows(conn)
 
-    def _claim_compatible_rows(self, conn: sqlite3.Connection, session_id: str | None = None) -> int:
-        """Relabel rows this scoped store should own.
+    def _claim_legacy_rows(self, conn: sqlite3.Connection) -> None:
+        """Rows written before backends were recorded belong to this store."""
+        if self.backend:
+            conn.execute("update sessions set backend = ? where backend is null", (self.backend,))
 
-        Rows with no backend are legacy. Rows labelled with another identity of
-        the same execution backend (``claude_code`` vs ``openbase_cloud``) were
-        written by a process that did not know this machine's identity, such
-        as a thread-sync import or a machine whose backend setting changed;
-        only one client per execution backend runs on a machine, so they would
-        otherwise be invisible forever. Rows of other execution backends are
-        never touched.
+    def _scope(self) -> tuple[str, ...]:
+        """Every identity this store's rows may carry.
+
+        A store is scoped by execution backend, not by identity: claude_code
+        and openbase_cloud sessions run on the same Claude Code engine on
+        one machine, and several processes there may hold different
+        identities (the API services, the Super Agents MCP server inside a
+        session, a thread-sync import). Each process keeps writing its own
+        identity on the rows it creates, and every one of them sees all the
+        machine's Claude Code sessions. Rows of other execution backends are
+        never visible.
         """
         if not self.backend:
-            return 0
-        others = sorted(
-            candidate
-            for candidate in BACKENDS
-            if candidate != self.backend and execution_backend(candidate) == execution_backend(self.backend)
-        )
-        placeholders = ", ".join("?" for _ in others)
-        query = f"update sessions set backend = ? where (backend is null or backend in ({placeholders}))"
-        params: list[Any] = [self.backend, *others]
-        if session_id is not None:
-            query += " and id = ?"
-            params.append(session_id)
-        return conn.execute(query, params).rowcount
+            return ()
+        mine = execution_backend(self.backend)
+        return tuple(sorted(candidate for candidate in BACKENDS if execution_backend(candidate) == mine))
+
+    def _scope_sql(self) -> tuple[str, list[str]]:
+        scope = self._scope()
+        return f"backend in ({', '.join('?' for _ in scope)})", list(scope)
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -252,8 +252,7 @@ class Store:
                 conn.execute("alter table sessions add column backend text")
             if "transcript_title" not in session_columns:
                 conn.execute("alter table sessions add column transcript_title text")
-            if self.backend:
-                self._claim_compatible_rows(conn)
+            self._claim_legacy_rows(conn)
 
     @staticmethod
     def _is_corrupt_database_error(exc: sqlite3.DatabaseError) -> bool:
@@ -329,16 +328,11 @@ class Store:
     def get_session(self, session_id: str) -> Session:
         with self.connect() as conn:
             if self.backend:
+                clause, params = self._scope_sql()
                 row = conn.execute(
-                    "select * from sessions where id = ? and backend = ?",
-                    (session_id, self.backend),
+                    f"select * from sessions where id = ? and {clause}",
+                    (session_id, *params),
                 ).fetchone()
-                if row is None and self._claim_compatible_rows(conn, session_id):
-                    # Written since this store was scoped (a thread-sync import).
-                    row = conn.execute(
-                        "select * from sessions where id = ? and backend = ?",
-                        (session_id, self.backend),
-                    ).fetchone()
             else:
                 row = conn.execute("select * from sessions where id = ?", (session_id,)).fetchone()
         if row is None:
@@ -348,9 +342,10 @@ class Store:
     def get_by_name(self, name: str) -> Session | None:
         with self.connect() as conn:
             if self.backend:
+                clause, params = self._scope_sql()
                 row = conn.execute(
-                    "select * from sessions where name = ? and backend = ?",
-                    (name, self.backend),
+                    f"select * from sessions where name = ? and {clause}",
+                    (name, *params),
                 ).fetchone()
             else:
                 row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
@@ -401,8 +396,9 @@ class Store:
             clauses.append("status = ?")
             params.append(status)
         if self.backend:
-            clauses.append("backend = ?")
-            params.append(self.backend)
+            clause, scope = self._scope_sql()
+            clauses.append(clause)
+            params.extend(scope)
         if clauses:
             query += " where " + " and ".join(clauses)
         query += " order by updated_at desc"
