@@ -570,9 +570,12 @@ async def test_claude_sdk_start_thread_fresh_retires_existing_named_session(tmp_
 
 
 @pytest.mark.asyncio
-async def test_claude_sdk_start_thread_retires_other_backend_name_holder(tmp_path: Path) -> None:
-    # A same-named session left behind by another backend must not make
-    # start_thread fail on the store's cross-backend UNIQUE name constraint.
+async def test_claude_sdk_start_thread_adopts_other_claude_identity_name_holder(tmp_path: Path) -> None:
+    # Only one Claude client runs on a machine, so a same-named session left
+    # under the other Claude identity (claude_code vs openbase_cloud: a
+    # thread-sync import, or a changed backend setting) is this client's own
+    # session, relabelled and refreshed, not a holder to retire or a UNIQUE
+    # name constraint to trip over.
     path = tmp_path / "state.sqlite3"
     other_store = Store(path, backend="claude_code")
     holder = other_store.create_session("dispatcher", cwd=str(tmp_path))
@@ -581,10 +584,10 @@ async def test_claude_sdk_start_thread_retires_other_backend_name_holder(tmp_pat
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader, backend_identity="openbase_cloud")
     started = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
 
-    assert started["threadId"] != holder.id
-    assert store.get_by_name("dispatcher").id == started["threadId"]
-    retired = other_store.get_session(holder.id)
-    assert retired.name == f"dispatcher (retired {holder.id[-8:]})"
+    assert started["threadId"] == holder.id
+    adopted = store.get_session(holder.id)
+    assert adopted.backend == "openbase_cloud"
+    assert store.get_by_name("dispatcher").id == holder.id
 
 
 @pytest.mark.asyncio
