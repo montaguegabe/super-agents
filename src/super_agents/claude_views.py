@@ -13,7 +13,7 @@ JsonObject = dict[str, Any]
 
 class SessionViewMixin:
     def _session_view(self, session: Session, latest: Any | None = None) -> JsonObject:
-        view = {"backend": self.backend, **session.to_json()}
+        view = {**session.to_json(), "backend": self._session_backend(session)}
         # Session rows do not record reasoning effort (or, for imported
         # sessions, a model); surface the latest turn's values so list
         # consumers can show them without fetching turns. Listings pass the
@@ -33,7 +33,7 @@ class SessionViewMixin:
         return apply_field_selection(
             without_none(
                 {
-                    "backend": self.backend,
+                    "backend": self._session_backend(session),
                     "name": session.name,
                     "agentName": session.agent_name,
                     "threadId": session.id,
@@ -56,7 +56,7 @@ class SessionViewMixin:
         queued = self.store.queued_turns(session.id)
         return without_none(
             {
-                "backend": self.backend,
+                "backend": self._session_backend(session),
                 "name": session.name,
                 "agentName": session.agent_name,
                 "threadId": session.id,
@@ -93,3 +93,6 @@ class SessionViewMixin:
         ):
             data["lastUsefulMessage"] = session.last_useful_message
         return data
+
+    def _session_backend(self, session: Session) -> str:
+        return session.backend or self.backend

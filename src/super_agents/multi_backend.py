@@ -313,6 +313,11 @@ class MultiBackendClient:
         sessions: list[JsonObject] = []
         for identity in self.engaged_backends():
             sessions.extend(await self._sessions_for_backend(identity))
+        sessions_by_id = {
+            _session_thread_id(session) or f"index:{index}": session
+            for index, session in enumerate(sessions)
+        }
+        sessions = list(sessions_by_id.values())
         # Most recently interacted-with first across every backend; without
         # this, per-backend concatenation buries today's sessions on one
         # backend below stale sessions from another.
@@ -375,8 +380,11 @@ class MultiBackendClient:
             matches: list[str] = []
             for identity in self.engaged_backends():
                 sessions = await self._sessions_for_backend(identity)
-                if any(_session_matches(item, input_data) for item in sessions):
-                    matches.append(identity)
+                matches.extend(
+                    item["backend"]
+                    for item in sessions
+                    if isinstance(item.get("backend"), str) and _session_matches(item, input_data)
+                )
             return _require_one_backend(matches, subject=f'name "{input_data.label}"')
         return self._default_backend
 
@@ -387,8 +395,11 @@ class MultiBackendClient:
         matches: list[str] = []
         for backend in self.engaged_backends():
             sessions = await self._sessions_for_backend(backend)
-            if any(_session_thread_id(item) == thread_id for item in sessions):
-                matches.append(backend)
+            matches.extend(
+                item["backend"]
+                for item in sessions
+                if isinstance(item.get("backend"), str) and _session_thread_id(item) == thread_id
+            )
         identity = _require_one_backend(matches, subject=f"thread {thread_id}")
         self.provenance.remember(identity, thread_ids={thread_id})
         return identity
@@ -423,23 +434,38 @@ class MultiBackendClient:
         raw_sessions = await self.client_for(identity).sessions()
         provenance = self.provenance.read()
         legacy_identity = self._legacy_identity_for_execution(execution_backend(identity))
-        migrated: set[str] = set()
+        migrated: dict[str, set[str]] = {}
         sessions: list[JsonObject] = []
         for raw in raw_sessions:
             if not isinstance(raw, dict):
                 continue
             thread_id = _session_thread_id(raw)
+            stored_identity = self._stored_session_identity(identity, raw)
+            session_identity = stored_identity or identity
             owner = provenance.threads.get(thread_id) if thread_id else None
-            if owner and owner != identity:
+            if owner and owner != session_identity:
                 continue
             if thread_id and owner is None:
-                if identity != legacy_identity:
+                if stored_identity is None and identity != legacy_identity:
                     continue
-                migrated.add(thread_id)
-            sessions.append({**raw, "backend": identity})
+                migrated.setdefault(session_identity, set()).add(thread_id)
+            sessions.append({**raw, "backend": session_identity})
         if migrated:
-            self.provenance.remember(identity, thread_ids=migrated)
+            for owner, thread_ids in migrated.items():
+                self.provenance.remember(owner, thread_ids=thread_ids)
         return sessions
+
+    def _stored_session_identity(self, observer_identity: str, session: JsonObject) -> str | None:
+        raw_backend = session.get("backend")
+        if not isinstance(raw_backend, str) or not raw_backend.strip():
+            return None
+        try:
+            stored_identity = self.resolve_backend(raw_backend)
+        except ValueError:
+            return None
+        if execution_backend(stored_identity) != execution_backend(observer_identity):
+            return None
+        return stored_identity
 
     def _legacy_identity_for_execution(self, execution: str) -> str:
         if execution_backend(self._default_backend) == execution:
