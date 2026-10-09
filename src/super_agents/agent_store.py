@@ -508,6 +508,32 @@ class Store:
             )
         return self.get_turn(turn_id)
 
+    def claim_queued_turn(self, session_id: str) -> Turn | None:
+        """Atomically claim the first queued turn across owner/caller drainers."""
+        self.get_session(session_id)  # Enforce this store's backend scope.
+        now = iso_now()
+        with self.connect() as conn:
+            conn.execute("begin immediate")
+            session = conn.execute("select * from sessions where id = ?", (session_id,)).fetchone()
+            if session["active_turn_id"] or session["status"] in {"running", "waiting"}:
+                return None
+            row = conn.execute(
+                "select * from turns where session_id = ? and status = 'queued' order by created_at, rowid limit 1",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "update turns set status = 'running', attempts = attempts + 1, updated_at = ? where id = ?",
+                (now, row["id"]),
+            )
+            conn.execute(
+                "update sessions set status = 'running', active_turn_id = ?, last_turn_id = ?, "
+                "updated_at = ?, last_observed_state = 'running queued turn via Claude Code' where id = ?",
+                (row["id"], row["id"], now, session_id),
+            )
+        return self.get_turn(row["id"])
+
     def update_turn(self, turn_id: str, *, only_if_active: bool = False, **fields: object) -> Turn:
         """Update a turn, optionally rejecting writes after it becomes terminal.
 

@@ -204,3 +204,59 @@ async def test_session_list_view_includes_latest_turn_model_and_effort(tmp_path:
     view = next(item for item in sessions if item["id"] == session.id)
     assert view["model"] == "claude-fable-5"
     assert view["reasoningEffort"] == "high"
+
+
+@pytest.mark.parametrize("content_blocks", [False, True])
+@pytest.mark.asyncio
+async def test_imported_voice_history_hides_internal_envelopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content_blocks: bool,
+) -> None:
+    config_dir = tmp_path / "claude_config"
+    cwd = "/workspace/tic-tac-toe"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    parts = [
+        "<openbase-claude-code-context>Current working directory: /workspace/tic-tac-toe"
+        "</openbase-claude-code-context>",
+        "[Openbase system note: onboarding is pending [agent only].]",
+        "<voice>Tic tac toe &amp; chess</voice>",
+        "<system-reminder>Private runtime instructions</system-reminder>",
+    ]
+    user = _user_entry("\n\n".join(parts), uuid="voice", timestamp="2026-10-09T06:49:00Z")
+    if content_blocks:
+        user["message"]["content"] = [{"type": "text", "text": part} for part in parts]
+    reply = "Example: <voice>tags</voice> and [Openbase system note: literal example]"
+    path = _write_transcript(config_dir, cwd, [
+        user, _assistant_entry(reply, uuid="reply", timestamp="2026-10-09T06:49:01Z"),
+    ])
+    original = path.read_bytes()
+    store = Store(tmp_path / "state.sqlite3")
+    session = _imported_session(store, cwd)
+    client = ClaudeAgentSdkClient(store=store)
+
+    for include_turns, key in [(True, "turns"), (False, "recentTurns")]:
+        detail = await client.read_by_label(LabelQueryInput(thread_id=session.id), include_turns=include_turns)
+        turn = detail[key][0]
+        assert turn["turnId"] == "voice"
+        assert turn["promptPreview"] == "Tic tac toe & chess"
+        assert turn["items"][0] == {
+            "type": "userMessage", "content": [{"type": "text", "text": "Tic tac toe & chess"}],
+        }
+        assert turn["lastUsefulMessage"] == reply
+    assert path.read_bytes() == original
+
+
+def test_internal_only_imported_turn_keeps_its_reply_separate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude_config"))
+    cwd = "/workspace/project"
+    _write_transcript(tmp_path / "claude_config", cwd, [
+        _user_entry("real request", uuid="u1", timestamp="2026-10-09T06:49:00Z"),
+        _assistant_entry("first answer", uuid="a1", timestamp="2026-10-09T06:49:01Z"),
+        _user_entry("[Openbase system note: truncated", uuid="u2", timestamp="2026-10-09T06:49:02Z"),
+        _assistant_entry("second answer", uuid="a2", timestamp="2026-10-09T06:49:03Z"),
+    ])
+    session = _imported_session(Store(tmp_path / "state.sqlite3"), cwd)
+    newest, oldest = transcript_turn_views(session)
+    assert newest["turnId"] == "u2"
+    assert "promptPreview" not in newest
+    assert newest["items"] == [{"type": "agentMessage", "text": "second answer"}]
+    assert oldest["lastUsefulMessage"] == "first answer"

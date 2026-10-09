@@ -9,17 +9,64 @@ CLAUDE_CONTEXT_CLOSE = "</openbase-claude-code-context>"
 
 def user_prompt_for_title(prompt: str) -> str:
     """Remove leading transport framing before shortening a user request."""
-    text = prompt.strip()
-    while text.startswith(CLAUDE_CONTEXT_OPEN):
-        _, closing_tag, text = text.partition(CLAUDE_CONTEXT_CLOSE)
-        if not closing_tag:
-            # A truncated context block contains no safe user title text.
-            return ""
-        text = text.strip()
+    return user_prompt_for_display(prompt.strip()).strip()
+
+
+def user_prompt_for_display(prompt: str) -> str:
+    """Present imported user text without optional integration transport framing.
+
+    Strip only known boundary envelopes, never arbitrary XML or inline examples.
+    Work on a read-only view: the transcript used to resume Claude stays intact.
+    """
+    text = _strip_internal_envelopes(prompt)
     if text.startswith("<voice>") and text.endswith("</voice>"):
-        text = text[len("<voice>") : -len("</voice>")]
-        text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-    return text.strip()
+        spoken = text[len("<voice>") : -len("</voice>")]
+        if "<voice>" not in spoken and "</voice>" not in spoken:
+            return spoken.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    return text
+
+
+def _strip_internal_envelopes(value: str) -> str:
+    envelopes = (
+        (CLAUDE_CONTEXT_OPEN, CLAUDE_CONTEXT_CLOSE),
+        ("[Openbase system note:", "]"),
+        ("<system-reminder>", "</system-reminder>"),
+    )
+    text = value
+    while True:
+        trimmed = text.strip()
+        for opening, closing in envelopes:
+            if trimmed.startswith(opening):
+                end = _envelope_end(trimmed, opening, closing)
+                if end is None:
+                    return ""
+                text = trimmed[end:].lstrip()
+                break
+            # Claude can append system reminders as separate content blocks.
+            start = trimmed.rfind("\n" + opening)
+            if start >= 0:
+                block = trimmed[start + 1:]
+                end = _envelope_end(block, opening, closing)
+                if end is None or end == len(block):
+                    text = trimmed[:start].rstrip()
+                    break
+        else:
+            return text
+
+
+def _envelope_end(text: str, opening: str, closing: str) -> int | None:
+    if closing == "]":
+        depth = 0
+        for index, char in enumerate(text):
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+        return None
+    end = text.find(closing, len(opening))
+    return end + len(closing) if end >= 0 else None
 
 
 def with_claude_turn_context(

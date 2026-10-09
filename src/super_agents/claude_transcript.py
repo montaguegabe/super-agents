@@ -20,6 +20,7 @@ from typing import Any
 
 from super_agents.agent_store import Session, preview
 from super_agents.claude_options import CLAUDE_CONFIG_DIR_ENV
+from super_agents.claude_prompts import user_prompt_for_display
 
 JsonObject = dict[str, Any]
 
@@ -157,7 +158,7 @@ def _parse_transcript_append(path: Path, parsed: _ParsedTranscript) -> None:
             text = _message_text(entry)
             if not text:
                 continue
-            current = _new_turn(entry, text, session_id, index=len(turns))
+            current = _new_turn(entry, user_prompt_for_display(text), session_id, index=len(turns))
             turns.append(current)
         elif entry_type == "assistant":
             text = _message_text(entry)
