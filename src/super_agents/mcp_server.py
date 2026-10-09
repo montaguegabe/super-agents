@@ -188,19 +188,37 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
         name="super_agents_start",
         title="Start Super Agents Thread",
         description=(
-            "Create a named Super Agents thread. Usually omit model so the configured Super Agents "
-            "default is honored. Pass model (e.g. fable, sol, astra, opus) only when the user asks "
-            "for an override; the thread is then routed to a backend that can run it. Backend is an "
-            "optional advanced override. Unknown model slugs are rejected with suggestions."
+            "Create a named Super Agents thread and, when prompt is given, start its first turn "
+            "with that task at once. Creating a thread alone starts no work: without prompt the "
+            "agent sits idle, with no messages, until super_agents_start_turn is called, and "
+            "developerInstructions is standing guidance, never the task. Usually omit model so "
+            "the configured Super Agents default is honored. Pass model (e.g. fable, sol, astra, "
+            "opus) only when the user asks for an override; the thread is then routed to a backend "
+            "that can run it. Backend is an optional advanced override. Unknown model slugs are "
+            "rejected with suggestions."
         ),
         input_schema=object_schema(
             {
                 "name": {"type": "string", "description": "Human-friendly thread name for future operations."},
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The agent's first task. Starts the thread's first turn immediately, exactly "
+                        "as super_agents_start_turn would. Omit only when you will start the turn "
+                        "yourself; the result then says turnStarted false."
+                    ),
+                },
                 "cwd": {
                     "type": "string",
                     "description": "Project working directory. Defaults to the user's home directory.",
                 },
-                "developerInstructions": {"type": "string"},
+                "developerInstructions": {
+                    "type": "string",
+                    "description": "Standing guidance for every turn of the thread. Not the task: pass that as prompt.",
+                },
+                "mode": {"type": "string", "enum": ["default", "plan"], "default": "default"},
+                "reasoningEffort": {"type": "string"},
+                "serviceTier": {"type": "string"},
                 "agentName": {
                     "type": "string",
                     "description": 'Optional agent name/persona, e.g. "Carl" or "Dottie".',
@@ -215,12 +233,42 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
                     ),
                 },
                 **backend_option_properties(),
-                **permission_option_properties(include_sandbox=True),
+                **permission_option_properties(include_sandbox=True, include_sandbox_type=True),
             },
             ["name"],
         ),
-        handler=lambda input_data: client.start_thread(clean_thread_input(input_data)),
+        handler=lambda input_data: start_thread_with_first_turn(client, input_data),
     )
+
+
+START_TURN_NEXT_STEP = (
+    "No turn was started: the agent is idle with no messages. Call super_agents_start_turn "
+    "with this thread's name and the task as prompt before telling anyone it is working."
+)
+
+
+async def start_thread_with_first_turn(client: SuperAgentsClient, input_data: JsonObject) -> JsonObject:
+    """Create the thread, then start its first turn when a prompt was given.
+
+    A voice dispatcher once created a thread with the task in
+    developerInstructions and announced the agent was working; nothing ever
+    ran and the thread showed no messages. The result now says whether a turn
+    started, and a prompt starts one in the same call.
+    """
+    prompt = optional_string(input_data, "prompt")
+    result = await client.start_thread(clean_thread_input(input_data))
+    if prompt is None:
+        return {**result, "turnStarted": False, "nextStep": START_TURN_NEXT_STEP}
+    name = required_string(input_data, "name")
+    turn_input = clean_start_turn_by_name_input(input_data, backend=client_backend(client))
+    backend = result.get("backend")
+    query = LabelQueryInput(
+        label=name,
+        thread_id=_result_thread_id(result) or None,
+        backend=backend if isinstance(backend, str) else None,
+    )
+    turn = await client.start_turn_by_label(query, turn_input)
+    return {**result, "turn": turn, "turnStarted": True}
 
 
 def _tool_super_agents_resume(client: SuperAgentsClient) -> ToolDefinition:

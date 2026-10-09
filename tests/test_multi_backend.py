@@ -477,3 +477,27 @@ async def test_explicit_backend_incompatible_with_model_fails_at_start(
 
     with pytest.raises(BackendResolutionError, match="cannot execute"):
         await client.start_thread({"name": "bad-pair", "model": "fable", "backend": "codex"})
+
+
+@pytest.mark.asyncio
+async def test_start_with_prompt_runs_the_first_turn_on_the_thread_backend(
+    tmp_path: Path,
+    clients: dict[str, FakeBackendClient],
+) -> None:
+    client = make_client(tmp_path, clients)
+    start = next(tool for tool in build_tools(client) if tool.name == "super_agents_start")
+
+    result = await start.handler({"name": "tic-tac-toe", "model": "fable", "prompt": "Build the game."})
+
+    claude = clients["claude_code"]
+    assert [name for name, _payload in claude.calls if name in ("start_thread", "start_turn_by_label")] == [
+        "start_thread",
+        "start_turn_by_label",
+    ]
+    query, turn_input = next(payload for name, payload in claude.calls if name == "start_turn_by_label")
+    assert query.thread_id == result["threadId"]
+    assert query.backend == "claude_code"
+    assert turn_input["prompt"] == "Build the game."
+    assert result["turnStarted"] is True
+    assert result["turn"]["threadId"] == result["threadId"]
+    assert not any(name == "start_turn_by_label" for name, _payload in clients["codex"].calls)
