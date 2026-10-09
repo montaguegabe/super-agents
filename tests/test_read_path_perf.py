@@ -90,7 +90,7 @@ def test_transcript_append_is_parsed_incrementally(tmp_path, monkeypatch):
     assert full_parses[-1] == 0
 
 
-def testlatest_custom_title_scans_only_appended_bytes(tmp_path):
+def test_latest_custom_title_scans_only_appended_bytes(tmp_path):
     path = tmp_path / "t.jsonl"
     path.write_text(json.dumps({"type": "custom-title", "customTitle": "one"}) + "\n")
     assert claude_home_index.latest_custom_title(path) == "one"
