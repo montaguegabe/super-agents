@@ -78,7 +78,7 @@ def test_explicit_cloud_identity_overrides_process_backend(monkeypatch) -> None:
         backend="openbase_cloud",
     )
 
-    assert options.kwargs["model"] == "claude-haiku-4-5"
+    assert options.kwargs["model"] == "claude-haiku-4-5-20251001"
     assert options.kwargs["env"]["ANTHROPIC_AUTH_TOKEN"] == "machine-token"
 
 
@@ -89,7 +89,7 @@ def test_openbase_cloud_backend_pins_claude_aliases(monkeypatch) -> None:
 
     options = agent_options(_FAKE_SDK, "/tmp", "fable", None, resume=None)
 
-    assert options.kwargs["model"] == "claude-fable-5"
+    assert options.kwargs["model"] == "claude-fable-5-1"
 
 
 def test_openbase_cloud_backend_defaults_unset_model_to_haiku(monkeypatch) -> None:
@@ -99,7 +99,7 @@ def test_openbase_cloud_backend_defaults_unset_model_to_haiku(monkeypatch) -> No
 
     options = agent_options(_FAKE_SDK, "/tmp", None, None, resume=None)
 
-    assert options.kwargs["model"] == "claude-haiku-4-5"
+    assert options.kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
 def test_local_claude_backend_leaves_unset_model_to_sdk(monkeypatch) -> None:
@@ -213,3 +213,18 @@ def test_invalid_system_prompt_mode_raises(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(ValueError, match="SUPER_AGENTS_CLAUDE_SYSTEM_PROMPT_MODE"):
         agent_options(_FAKE_SDK, "/tmp", None, None, resume=None)
+
+
+def test_cloud_family_aliases_pin_latest_but_explicit_old_ids_still_resolve():
+    from super_agents.claude_options import openbase_cloud_claude_model
+
+    for alias, model in {
+        "haiku": "claude-haiku-4-5-20251001",
+        "sonnet": "claude-sonnet-5",
+        "opus": "claude-opus-5-5",
+        "fable": "claude-fable-5-1",
+    }.items():
+        assert openbase_cloud_claude_model(alias, "openbase_cloud") == model
+        assert openbase_cloud_claude_model(model, "openbase_cloud") == model
+    for old in ("claude-fable-5", "claude-opus-4-8", "claude-haiku-4-5"):
+        assert openbase_cloud_claude_model(old, "openbase_cloud") == old

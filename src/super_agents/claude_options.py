@@ -40,16 +40,16 @@ CLAUDE_SDK_ENV_OVERRIDES = {"ANTHROPIC_API_KEY": ""}
 # (including dated snapshots); the Cloud proxy allowlist is keyed by these
 # public ids, so pin aliases before they reach the SDK on the Cloud backend.
 OPENBASE_CLOUD_CLAUDE_MODEL_MAP = {
-    "fable": "claude-fable-5",
-    "opus": "claude-opus-4-8",
+    "fable": "claude-fable-5-1",
+    "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5",
-    "haiku": "claude-haiku-4-5",
+    "haiku": "claude-haiku-4-5-20251001",
 }
 # With no model configured, the Claude Code CLI falls back to its own family
 # default (Opus/Fable), which the Cloud proxy rejects for trial accounts —
 # pin the product's trial-safe Haiku default instead of leaving the choice to
 # the SDK.
-OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5"
+OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL = OPENBASE_CLOUD_CLAUDE_MODEL_MAP["haiku"]
 OPENBASE_CLOUD_DEFAULT_BASE_URL = "https://app.openbase.cloud"
 OPENBASE_CLOUD_ANTHROPIC_PATH = "/api/openbase/llm/anthropic"
 OPENBASE_CLOUD_ANTHROPIC_BASE_URL_ENV = "OPENBASE_CLOUD_ANTHROPIC_BASE_URL"

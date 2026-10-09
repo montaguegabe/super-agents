@@ -471,8 +471,8 @@ def test_openbase_cloud_defaults_to_haiku_when_unconfigured(monkeypatch, tmp_pat
 
     cleaned = clean_turn_input({"threadId": "thread-1", "prompt": "work"})
 
-    assert cleaned["model"] == "claude-haiku-4-5"
-    assert default_super_agents_model() == "claude-haiku-4-5"
+    assert cleaned["model"] == "claude-haiku-4-5-20251001"
+    assert default_super_agents_model() == "claude-haiku-4-5-20251001"
 
 
 def test_turn_input_ignores_legacy_shared_reasoning_key(monkeypatch, tmp_path: Path) -> None:

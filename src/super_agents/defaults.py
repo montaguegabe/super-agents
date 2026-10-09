@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .claude_options import OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL
 from .config_profiles import codex_profile_config
 
 from .backend_config import (  # noqa: F401  (re-exported for compatibility)
@@ -35,7 +36,8 @@ CALLER_MODEL_ENV_KEYS = ("SUPER_AGENTS_CALLER_MODEL", "AGENT_MODEL")
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 CODEX_SERVICE_TIERS = {"fast", "standard"}
 DEFAULT_CODEX_SERVICE_TIER = "standard"
-DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = "claude-haiku-4-5"
+
+DEFAULT_OPENBASE_CLOUD_CLAUDE_MODEL = OPENBASE_CLOUD_DEFAULT_CLAUDE_MODEL
 
 logger = logging.getLogger(__name__)
 
