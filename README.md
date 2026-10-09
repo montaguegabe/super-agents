@@ -309,7 +309,7 @@ The MCP server exposes these tools:
 
 - `codex_app_server_status`: check app-server readiness, websocket connection,
   pending callbacks, and active turns.
-- `super_agents_start`: create a named thread, optionally on an explicit backend.
+- `super_agents_start`: create a named thread, optionally on an explicit backend. Pass the first task as `prompt` to start its first turn in the same call. Without a prompt, the result includes `turnStarted: false` and a `nextStep`; `developerInstructions` supplies standing guidance and does not start work. If starting the turn fails after creation, the error identifies the existing thread so you can inspect it and retry with `super_agents_start_turn` instead of creating a duplicate.
 - `super_agents_resume`: resume a named thread.
 - `super_agents_read`: read a named or id-addressed thread.
 - `super_agents_rename`: rename a Super Agents thread.

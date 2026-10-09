@@ -224,10 +224,7 @@ class LabelQueryMixin:
             required_label(input_data),
             input_data.prefer or "latest_any",
         )
-        resolved = await self.resolve_session(
-            required_label(input_data),
-            replace(input_data, prefer=input_data.prefer or "latest_any"),
-        )
+        resolved = await self.resolve_queue_target(input_data)
         logger.info(
             "dispatch_timing stage=super_agents_resolve_end dispatch_id=%s thread_id=%s status=%s elapsed_ms=%d",
             dispatch_id,
