@@ -755,7 +755,7 @@ async def test_claude_sdk_follow_up_resumes_native_claude_session_after_sdk_clie
 
 
 @pytest.mark.asyncio
-async def test_claude_sdk_read_backfills_latest_turn_message_from_session(tmp_path: Path) -> None:
+async def test_claude_sdk_read_does_not_borrow_session_message(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
     started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
@@ -773,7 +773,7 @@ async def test_claude_sdk_read_backfills_latest_turn_message_from_session(tmp_pa
 
     readback = await client.read_by_label(LabelQueryInput(label="sdk"), include_turns=True)
 
-    assert readback["turns"][0]["lastUsefulMessage"] == "Recovered latest Claude Code response."
+    assert "lastUsefulMessage" not in readback["turns"][0]
 
 
 @pytest.mark.asyncio

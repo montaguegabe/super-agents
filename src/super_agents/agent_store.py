@@ -507,14 +507,21 @@ class Store:
             )
         return self.get_turn(turn_id)
 
-    def update_turn(self, turn_id: str, **fields: object) -> Turn:
+    def update_turn(self, turn_id: str, *, only_if_active: bool = False, **fields: object) -> Turn:
+        """Update a turn, optionally rejecting writes after it becomes terminal.
+
+        The status predicate runs in the same SQL statement as the write so a
+        concurrent cancellation wins over late stream output or completion.
+        Return the current row even when the conditional write is skipped.
+        """
         allowed = {"status", "attempts", "last_error", "finished_at", "last_useful_message", "response_finished_at"}
         updates = {key: value for key, value in fields.items() if key in allowed}
         updates["updated_at"] = iso_now()
         assignments = ", ".join(f"{key} = ?" for key in updates)
         values = list(updates.values()) + [turn_id]
         with self.connect() as conn:
-            conn.execute(f"update turns set {assignments} where id = ?", values)
+            condition = " and status in ('running', 'waiting')" if only_if_active else ""
+            conn.execute(f"update turns set {assignments} where id = ?{condition}", values)
         return self.get_turn(turn_id)
 
     def get_turn(self, turn_id: str) -> Turn:
