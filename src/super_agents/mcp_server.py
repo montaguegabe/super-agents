@@ -18,6 +18,7 @@ from mcp.server.models import InitializationOptions
 
 from .app_client_transport import CONTROL_PLANE_DIAGNOSTICS_ENV, control_plane_diagnostics_enabled
 from .app_models import QueueCancelInput
+from .app_protocol import extract_thread_id
 from .app_server_client import LabelQueryInput
 from .backend_clients import SuperAgentsClient, multi_client_from_environment
 from .backend_config import BACKENDS, normalize_backend, resolve_model
@@ -260,14 +261,24 @@ async def start_thread_with_first_turn(client: SuperAgentsClient, input_data: Js
     if prompt is None:
         return {**result, "turnStarted": False, "nextStep": START_TURN_NEXT_STEP}
     name = required_string(input_data, "name")
-    turn_input = clean_start_turn_by_name_input(input_data, backend=client_backend(client))
     backend = result.get("backend")
+    backend = backend if isinstance(backend, str) else client_backend(client)
+    thread_id = extract_thread_id(result)
     query = LabelQueryInput(
         label=name,
-        thread_id=_result_thread_id(result) or None,
-        backend=backend if isinstance(backend, str) else None,
+        thread_id=thread_id,
+        backend=backend,
     )
-    turn = await client.start_turn_by_label(query, turn_input)
+    try:
+        turn_input = clean_start_turn_by_name_input(input_data, backend=backend)
+        turn = await client.start_turn_by_label(query, turn_input)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Created thread {name!r} (threadId={thread_id!r}, backend={backend!r}), "
+            f"but its first turn could not be confirmed: {exc}. "
+            "Inspect this thread with super_agents_read before retrying "
+            "super_agents_start_turn with its name and threadId; do not create another thread."
+        ) from exc
     return {**result, "turn": turn, "turnStarted": True}
 
 

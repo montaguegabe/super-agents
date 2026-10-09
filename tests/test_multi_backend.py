@@ -501,3 +501,23 @@ async def test_start_with_prompt_runs_the_first_turn_on_the_thread_backend(
     assert result["turnStarted"] is True
     assert result["turn"]["threadId"] == result["threadId"]
     assert not any(name == "start_turn_by_label" for name, _payload in clients["codex"].calls)
+
+
+@pytest.mark.asyncio
+async def test_first_turn_defaults_follow_explicit_thread_backend(tmp_path, clients, monkeypatch):
+    config_path = tmp_path / "dispatcher-config.json"
+    config_path.write_text(
+        '{"backend_models": {"codex": {"super_agents": "gpt-6.1"}, '
+        '"claude_code": {"super_agents": "opus"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))
+    client = make_client(tmp_path, clients)
+    start = next(tool for tool in build_tools(client) if tool.name == "super_agents_start")
+
+    result = await start.handler({"name": "claude-task", "backend": "claude_code", "prompt": "Build it."})
+
+    query, turn_input = next(payload for name, payload in clients["claude_code"].calls if name == "start_turn_by_label")
+    assert query.backend == "claude_code"
+    assert turn_input["model"] == "opus"
+    assert result["turnStarted"] is True
