@@ -80,6 +80,7 @@ from super_agents.claude_prompts import (
     with_claude_turn_context as _with_claude_turn_context,
 )
 from super_agents.claude_transcript import transcript_turn_views
+from super_agents.claude_steering import ActiveSteeringMixin
 from super_agents.claude_views import SessionViewMixin
 from super_agents.defaults import (
     default_super_agents_model,
@@ -114,7 +115,7 @@ async def _chain_async(first: Any, rest: Any):
         yield item
 
 
-class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin):
+class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin):
     """Super Agents backend using Claude Code without Anthropic API keys."""
 
     backend = "claude_code"
@@ -438,6 +439,9 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
         session = self._resolve_session(input_data)
+        owner = self._active_owner(session.id)
+        if owner is not None and owner is not self:
+            return await owner.steer_by_label(input_data, prompt, turn_input)
         # A session with no in-process SDK client that still has a live inbox
         # socket is held open by a foreign process — a terminal, IDE, or another
         # super-agents instance. Resuming it here would fork the transcript that
@@ -447,6 +451,8 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
         if self._sdk_clients.get(session.id) is None:
             delivered = await self._try_inbox_steer(session, prompt, turn_input or {})
             if delivered is not None:
+                if delivered.get("steered") is False and self._session_is_busy(session):
+                    return await self._queue_unavailable_steer(session, prompt, turn_input or {})
                 return delivered
         if self._session_is_busy(session):
             return await self._steer_active_turn(
@@ -669,6 +675,7 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
             # Re-read after acquiring the locks: another process may have run
             # turns (advancing the conversation) while this one waited.
             session = self.store.get_session(session_id)
+            self._register_active_owner(session_id)
             cancellation_watch = asyncio.create_task(
                 self._watch_turn_cancellation(turn_id, asyncio.current_task())
             )
@@ -949,6 +956,7 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
                         last_observed_state=str(exc),
                     )
             finally:
+                self._unregister_active_owner(session_id)
                 cancellation_watch.cancel()
                 await asyncio.gather(cancellation_watch, return_exceptions=True)
                 self._permission_gate.cancel_scope(thread_id=session_id, turn_id=turn_id)
@@ -1055,6 +1063,7 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
                 "queued": False,
                 "steered": False,
                 "delivery": "inbox_unavailable",
+                "message": "Nothing was delivered or queued. The Claude Code inbox rejected the steering message.",
                 "reason": result.reason,
                 "drain": "inbox_socket",
             }
@@ -1079,108 +1088,6 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
             **({"deliveryStatus": result.status} if result.status else {}),
             "drain": "inbox_socket",
         }
-
-    async def _steer_active_turn(
-        self,
-        session: Session,
-        prompt: str,
-        turn_input: JsonObject,
-        *,
-        requested_turn_id: str | None = None,
-    ) -> JsonObject:
-        active_turn_id = session.active_turn_id
-        if not active_turn_id:
-            return await self.start_turn_by_label(
-                LabelQueryInput(thread_id=session.id),
-                {**turn_input, "prompt": prompt},
-            )
-
-        if requested_turn_id and requested_turn_id != active_turn_id:
-            raise RuntimeError(f"Expected active turn id `{requested_turn_id}` but found `{active_turn_id}`.")
-
-        sdk_client = await self._wait_for_active_sdk_client(session.id)
-        refreshed = self.store.get_session(session.id)
-        if refreshed.active_turn_id != active_turn_id or not self._session_is_busy(refreshed):
-            return await self.start_turn_by_label(
-                LabelQueryInput(thread_id=session.id),
-                {**turn_input, "prompt": prompt},
-            )
-        if sdk_client is None:
-            # No client in this process: either the turn runs in another
-            # process (its flock is held — steering stays unsupported there)
-            # or the owning process died and left a ghost row. Reclaim the
-            # ghost so the user's message becomes a fresh turn instead of
-            # black-holing against a dead turn.
-            if self._reclaim_orphaned_turn(session.id, active_turn_id):
-                logger.info(
-                    "Steer reclaimed orphaned Claude Code turn session_id=%s turn_id=%s",
-                    session.id,
-                    active_turn_id,
-                )
-                return await self.start_turn_by_label(
-                    LabelQueryInput(thread_id=session.id),
-                    {**turn_input, "prompt": prompt},
-                )
-            raise RuntimeError("Active Claude Code turn cannot accept steering before its SDK client is ready.")
-
-        # The steered query produces its own response on the shared stream;
-        # register it so the active turn's reader consumes it instead of
-        # leaving it to shift the next turn's answer (off-by-one).
-        self._register_pending_result(session.id)
-        try:
-            if turn_input.get("interruptCurrentWork") is True:
-                self._session_interrupted_steer_followups.add(session.id)
-                await sdk_client.interrupt()
-                logger.info(
-                    "dispatch_timing stage=super_agent_steer_interrupt_ack thread_id=%s turn_id=%s",
-                    session.id,
-                    active_turn_id,
-                )
-            await sdk_client.query(self._prompt_for_session(refreshed, {**turn_input, "prompt": prompt}))
-            logger.info(
-                "dispatch_timing stage=super_agent_steer_correction_sent thread_id=%s turn_id=%s interrupted=%s",
-                session.id,
-                active_turn_id,
-                turn_input.get("interruptCurrentWork") is True,
-            )
-        except BaseException:
-            self._consume_pending_result(session.id)
-            self._session_interrupted_steer_followups.discard(session.id)
-            raise
-        self._record_session_leaf_owner(session.id)
-        # Persist the steering text on the turn row so thread reads (and other
-        # processes' reads — the voice pipeline steers from a different process
-        # than the one serving history) can render every user input in order.
-        self.store.append_turn_steer(active_turn_id, prompt)
-        current_turn = self.store.get_turn(active_turn_id)
-        self.store.update_session(
-            session.id,
-            status="running",
-            active_turn_id=active_turn_id,
-            last_turn_id=active_turn_id,
-            last_observed_state="steering active turn via Claude Code",
-        )
-        return {
-            "backend": self.backend,
-            "threadId": session.id,
-            "name": session.name,
-            "turnId": active_turn_id,
-            "turn": current_turn.to_json(),
-            "queued": False,
-            "steered": True,
-            "nativeSteer": True,
-            "interruptedCurrentWork": turn_input.get("interruptCurrentWork") is True,
-            "startedImmediately": False,
-            "drain": "steered_active_turn",
-        }
-
-    async def _wait_for_active_sdk_client(self, session_id: str) -> Any | None:
-        for _ in range(100):
-            client = self._sdk_clients.get(session_id)
-            if client is not None:
-                return client
-            await asyncio.sleep(0.01)
-        return None
 
     async def _interrupt_active_turn(self, session: Session, *, reason: str) -> str | None:
         turn_id = session.active_turn_id
@@ -1402,16 +1309,10 @@ class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, Ses
             queued = self.store.queued_turns(session_id)
             if not queued:
                 return
-            turn = queued[0]
             sdk = self._require_sdk()
-            self.store.update_turn(turn.id, status="running", attempts=turn.attempts + 1)
-            self.store.update_session(
-                session_id,
-                status="running",
-                active_turn_id=turn.id,
-                last_turn_id=turn.id,
-                last_observed_state="running queued turn via Claude Code",
-            )
+            turn = self.store.claim_queued_turn(session_id)
+            if turn is None:
+                continue
             self._spawn_turn_task(
                 session_id,
                 turn.id,

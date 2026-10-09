@@ -130,7 +130,14 @@ def create_server(client: SuperAgentsClient | None = None) -> Server:
                 int((time.monotonic() - started) * 1000),
                 type(exc).__name__,
             )
-            return text_tool_result({"error": str(exc)}, is_error=True)
+            error = {"error": str(exc)}
+            if name == "super_agents_steer":
+                error["message"] = (
+                    "Steering failed. No successful delivery or queueing was confirmed. "
+                    "Do not claim the instruction was delivered or queued, or promise automatic delivery. "
+                    "Inspect the thread before retrying if delivery is uncertain."
+                )
+            return text_tool_result(error, is_error=True)
 
     return server
 
@@ -525,7 +532,9 @@ def _tool_super_agents_steer(client: SuperAgentsClient) -> ToolDefinition:
         title="Steer Super Agents By Name",
         description=(
             "Send steering input to the latest active Super Agents turn matching a thread name. "
-            "If no active turn exists, starts a new turn on the same thread."
+            "If no active turn exists, starts a new turn on the same thread. "
+            "If the active Claude SDK owner is unavailable, saves a queued follow-up instead. "
+            "Report queued or steered only when the result explicitly confirms it; an error queues nothing automatically."
         ),
         input_schema=object_schema(
             {**name_query_properties(include_output_options=False), "prompt": {"type": "string"},
