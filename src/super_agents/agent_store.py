@@ -260,6 +260,9 @@ class Store:
                 conn.execute("alter table sessions add column title text")
             if "auto_title" not in session_columns:
                 conn.execute("alter table sessions add column auto_title integer not null default 0")
+            if conn.execute("pragma user_version").fetchone()[0] < 1:
+                _strip_session_id_suffixes(conn)
+                conn.execute("pragma user_version = 1")
             self._claim_legacy_rows(conn)
 
     @staticmethod
@@ -322,7 +325,7 @@ class Store:
                     raw_log_path,
                     now,
                     now,
-                    conversation_title(Path(resolved_cwd).name or "Thread", session_id) if auto_title else None,
+                    conversation_title(Path(resolved_cwd).name or "Thread") if auto_title else None,
                     auto_title,
                 ),
             )
@@ -387,7 +390,7 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 "update sessions set name = ?, updated_at = ? where id = ?",
-                (f"{name} (retired {holder.id[-8:]})", iso_now(), holder.id),
+                (unique_session_name(conn, f"{name} (retired)", exclude_id=holder.id), iso_now(), holder.id),
             )
         return holder
 
@@ -489,7 +492,7 @@ class Store:
             # The first accepted prompt owns the automatic title, even when
             # execution later fails. The guarded update shares the turn insert
             # transaction, so concurrent writers cannot replace the first title.
-            title = conversation_title(prompt, session_id)
+            title = conversation_title(prompt)
             conn.execute(
                 "update sessions set title = coalesce(?, title), auto_title = 0 where id = ? and auto_title = 1",
                 (title, session_id),
@@ -675,14 +678,57 @@ def preview(text: str | None, limit: int = 180) -> str | None:
     return compact[: limit - 1] + "..."
 
 
-def conversation_title(text: str, session_id: str) -> str | None:
-    """A compact display title; repeated prompts still identify distinct chats."""
+def conversation_title(text: str) -> str | None:
+    """A compact display title. Titles need not be unique (the session name is
+    the unique lookup key), so they never carry the session id."""
     compact = " ".join(user_prompt_for_title(text).split())
     if not compact:
         return None
     if len(compact) > 80:
         compact = compact[:77].rstrip() + "..."
-    return f"{compact} ({session_id[-8:]})"
+    return compact
+
+
+def unique_session_name(conn: sqlite3.Connection, base_name: str, exclude_id: str | None = None) -> str:
+    """``base_name``, or ``base_name (2)``, ``(3)``… when another session holds it."""
+    candidate = base_name
+    suffix = 2
+    while True:
+        row = conn.execute("select id from sessions where name = ?", (candidate,)).fetchone()
+        if row is None or row["id"] == exclude_id:
+            return candidate
+        suffix_text = f" ({suffix})"
+        candidate = f"{base_name[: 80 - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+
+
+def _strip_session_id_suffixes(conn: sqlite3.Connection) -> None:
+    """One-time cleanup of the session-id suffix older versions stored in
+    display titles (``Hi (1a2b3c4d)``) and in imported or retired session
+    names (``project (1a2b3c4d)``, ``dispatcher (retired 1a2b3c4d)``)."""
+    conn.execute(
+        """
+        update sessions set title = substr(title, 1, length(title) - 11)
+        where length(title) > 11 and substr(title, -11) = ' (' || substr(id, -8) || ')'
+        """
+    )
+    rows = conn.execute(
+        """
+        select id, name from sessions
+        where substr(name, -11) = ' (' || substr(id, -8) || ')'
+           or substr(name, -19) = ' (retired ' || substr(id, -8) || ')'
+        """
+    ).fetchall()
+    for row in rows:
+        name, suffix = row["name"], row["id"][-8:]
+        if name.endswith(f" (retired {suffix})"):
+            base = name[: -len(f" (retired {suffix})")] + " (retired)"
+        else:
+            base = name[: -len(f" ({suffix})")] or "Thread"
+        conn.execute(
+            "update sessions set name = ? where id = ?",
+            (unique_session_name(conn, base, exclude_id=row["id"]), row["id"]),
+        )
 
 
 def row_to_session(row: sqlite3.Row) -> Session:

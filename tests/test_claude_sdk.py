@@ -566,7 +566,10 @@ async def test_claude_sdk_start_thread_fresh_retires_existing_named_session(tmp_
     assert fresh["threadId"] != first["threadId"]
     assert store.get_by_name("dispatcher").id == fresh["threadId"]
     retired = store.get_session(first["threadId"])
-    assert retired.name == f"dispatcher (retired {first['threadId'][-8:]})"
+    assert retired.name == "dispatcher (retired)"
+    third = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path), "fresh": True})
+    assert store.get_session(fresh["threadId"]).name == "dispatcher (retired) (2)"
+    assert store.get_by_name("dispatcher").id == third["threadId"]
 
 
 @pytest.mark.asyncio

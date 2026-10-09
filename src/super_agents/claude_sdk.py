@@ -211,9 +211,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         )
         existing = self.store.get_by_name(name)
         if existing is not None and bool(input_data.get("fresh")):
-            # Retire the name-holder so the caller gets a brand-new session
-            # (and conversation) instead of the reuse-by-name refresh below.
-            self.store.rename_session(existing.id, f"{name} (retired {existing.id[-8:]})")
+            # Retire the name-holder (below) so the caller gets a brand-new
+            # session (and conversation) instead of the reuse-by-name refresh.
             existing = None
         if existing is None:
             # The name column is unique across backends, so a same-named

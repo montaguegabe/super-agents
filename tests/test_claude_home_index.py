@@ -206,7 +206,7 @@ def test_import_title_uses_real_request_after_context(projects, tmp_path, conten
 
 
 @pytest.mark.parametrize("closed", [True, False])
-def test_context_only_import_uses_project_and_short_id(projects, tmp_path, closed):
+def test_context_only_import_uses_project_name(projects, tmp_path, closed):
     prompt = "<openbase-claude-code-context>\nCurrent working directory: /workspace/project\n"
     if closed:
         prompt += "</openbase-claude-code-context>"
@@ -215,7 +215,7 @@ def test_context_only_import_uses_project_and_short_id(projects, tmp_path, close
     store = Store(tmp_path / "state.sqlite3", backend="claude_code")
 
     assert refresh_last_interaction_index(store, now=time.monotonic()) == 1
-    assert store.list_sessions()[0].name == f"project ({SESSION_UUID[-8:]})"
+    assert store.list_sessions()[0].name == "project"
 
 
 def test_context_only_first_entry_skips_to_first_real_request(projects, tmp_path):
