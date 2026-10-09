@@ -247,8 +247,9 @@ async def login_shell_config_override(thread_id: str | None = None, model: str |
     return {"shell_environment_policy": {"inherit": "all", "set": set_values}}
 
 
-def default_model_from_environment() -> str:
-    return default_super_agents_model() or DEFAULT_MODEL
+def default_model_from_environment(*, backend: str = CODEX_BACKEND) -> str:
+    # The app-server's identity, not the global routing preference, owns its model.
+    return default_super_agents_model(backend=backend) or DEFAULT_MODEL
 
 
 class CodexAppServerClient(
@@ -291,7 +292,7 @@ class CodexAppServerClient(
             or os.environ.get("SUPER_AGENTS_APPROVAL_REQUESTS_FILE")
             or self.state_file.with_name("approval-requests.json")
         )
-        self.default_model = default_model or default_model_from_environment()
+        self.default_model = default_model or default_model_from_environment(backend=self.backend)
         self._ws: Any | None = None
         self._next_id = 1
         self._pending: dict[str | int, asyncio.Future[Any]] = {}
