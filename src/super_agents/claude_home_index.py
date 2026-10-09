@@ -31,7 +31,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from super_agents.agent_store import Session, Store, preview
+from super_agents.agent_store import Session, Store, conversation_title, preview
+from super_agents.claude_prompts import CLAUDE_CONTEXT_OPEN, user_prompt_for_title
 from super_agents.claude_transcript import CLAUDE_PROJECTS_DIR_NAME, claude_config_dir
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,13 @@ def _sweep(store: Store) -> int:
         if existing is not None:
             session, synced_title = existing
             fresh = not session.updated_at or session.updated_at < interacted_at
-            if not fresh and synced_title is not None:
+            repair_name = (
+                session.id == f"claude_{backend_session_id.replace('-', '')}"
+                and session.title is None
+                and not synced_title
+                and session.name.lstrip().startswith(CLAUDE_CONTEXT_OPEN)
+            )
+            if not fresh and synced_title is not None and not repair_name:
                 continue
             # Idle rows only reach here for the one-time title backfill; keep
             # their real last-activity time instead of bumping it to "now".
@@ -101,6 +108,13 @@ def _sweep(store: Store) -> int:
                 elif title and title != session.name:
                     with store.connect() as conn:
                         updates["name"] = _unique_session_name(conn, title, exclude_id=session.id)
+            if repair_name and not title:
+                # Older importers shortened the context block into the name.
+                # Re-read the original prompt even for an idle transcript;
+                # do not alter its history, identity or last-activity time.
+                if parsed := _parse_transcript_head(path):
+                    with store.connect() as conn:
+                        updates["name"] = _unique_session_name(conn, parsed[0], exclude_id=session.id)
             store.update_session(session.id, **updates)
             changed += 1
             continue
@@ -191,6 +205,7 @@ def _parse_transcript_head(path: Path) -> tuple[str, str | None, str | None] | N
     """
     cwd: str | None = None
     created_at: str | None = None
+    saw_user_text = False
     try:
         with path.open(encoding="utf-8") as handle:
             for index, line in enumerate(handle):
@@ -211,11 +226,19 @@ def _parse_transcript_head(path: Path) -> tuple[str, str | None, str | None] | N
                     created_at = entry["timestamp"]
                 if entry.get("type") != "user" or entry.get("isMeta"):
                     continue
-                text = _user_text(entry)
-                if text:
-                    return preview(text, limit=80) or "Claude Code session", cwd, created_at
+                raw_text = _user_text(entry)
+                if raw_text:
+                    saw_user_text = True
+                    text = user_prompt_for_title(raw_text)
+                    if text:
+                        return preview(text, limit=80) or "Claude Code session", cwd, created_at
     except OSError:
         return None
+    if saw_user_text:
+        # Context-only/truncated prompts must still yield an identifiable
+        # conversation, without surfacing internal instructions.
+        fallback = conversation_title(Path(cwd or "").name or "Thread", path.stem)
+        return fallback or f"Thread ({path.stem[-8:]})", cwd, created_at
     return None
 
 

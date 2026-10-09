@@ -78,3 +78,16 @@ def test_existing_database_gets_optional_title_columns(store):
     assert migrated.name == "existing"
     assert migrated.title is None
     assert migrated.auto_title is False
+
+
+@pytest.mark.parametrize("user_request", ["Are you there?", "<voice>Are you &lt;there&gt;?</voice>", ""])
+def test_manual_title_strips_context_before_shortening(store, user_request):
+    from super_agents.claude_prompts import with_claude_turn_context
+
+    session = store.create_session("internal", cwd="/workspace/project", auto_title=True)
+    prompt = with_claude_turn_context(user_request, cwd=session.cwd, developer_instructions="private context " * 50)
+    store.create_turn(session.id, prompt)
+    title = store.get_session(session.id).title
+    expected = "Are you <there>?" if user_request.startswith("<voice>") else user_request or "project"
+    assert title == f"{expected} ({session.id[-8:]})"
+    assert "context" not in title

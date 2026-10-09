@@ -3,6 +3,25 @@
 from __future__ import annotations
 
 
+CLAUDE_CONTEXT_OPEN = "<openbase-claude-code-context>"
+CLAUDE_CONTEXT_CLOSE = "</openbase-claude-code-context>"
+
+
+def user_prompt_for_title(prompt: str) -> str:
+    """Remove leading transport framing before shortening a user request."""
+    text = prompt.strip()
+    while text.startswith(CLAUDE_CONTEXT_OPEN):
+        _, closing_tag, text = text.partition(CLAUDE_CONTEXT_CLOSE)
+        if not closing_tag:
+            # A truncated context block contains no safe user title text.
+            return ""
+        text = text.strip()
+    if text.startswith("<voice>") and text.endswith("</voice>"):
+        text = text[len("<voice>") : -len("</voice>")]
+        text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    return text.strip()
+
+
 def with_claude_turn_context(
     prompt: str,
     *,
@@ -10,7 +29,7 @@ def with_claude_turn_context(
     developer_instructions: str | None,
 ) -> str:
     context_parts = [
-        "<openbase-claude-code-context>",
+        CLAUDE_CONTEXT_OPEN,
         f"Current working directory: {cwd}",
         (
             "When the user asks you to create or edit files in the current working directory, "
@@ -25,7 +44,7 @@ def with_claude_turn_context(
                 developer_instructions.strip(),
             ]
         )
-    context_parts.append("</openbase-claude-code-context>")
+    context_parts.append(CLAUDE_CONTEXT_CLOSE)
     return "\n".join(context_parts) + "\n\n" + prompt
 
 
