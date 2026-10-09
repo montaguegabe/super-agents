@@ -166,6 +166,16 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             timeout_seconds=approval_timeout_seconds,
         )
 
+    def handle_notification(self, method: str, params: JsonObject) -> None:
+        """Embedding hook for Codex-shaped turn and assistant-message events."""
+
+    def _notify_turn(self, method: str, session_id: str, turn_id: str, **fields: Any) -> None:
+        # Delivery is advisory: a broken embedding must not fail a persisted turn.
+        try:
+            self.handle_notification(method, {"threadId": session_id, "turnId": turn_id, **fields})
+        except Exception:
+            logger.exception("Turn notification delivery failed: %s", method)
+
     async def status(self) -> JsonObject:
         self._reconcile_orphaned_turns_once()
         sessions = self.store.list_sessions(include_inactive=True)
@@ -672,6 +682,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                     return
+                self._notify_turn("turn/started", session_id, turn_id)
                 sdk_client = await self._sdk_client_for(
                     session,
                     model,
@@ -956,6 +967,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 turn_id,
                 last_useful_message=useful,
             )
+        # ResultMessage repeats the final response. Only assistant content
+        # produces items, never user/tool-result blocks or result summaries.
+        if useful and isinstance(getattr(message, "content", None), list):
+            self._notify_turn(
+                "item/completed", session_id, turn_id,
+                item={"type": "agentMessage", "id": uuid.uuid4().hex, "text": useful},
+            )
         _note_task_lifecycle(active_background_tasks, message)
         return useful
 
@@ -1174,6 +1192,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             return
         if current.active_turn_id == turn_id:
             self.store.update_session(session_id, **fields)
+        status = fields.get("status")
+        if status in {"completed", "cancelled", "failed"}:
+            error = {"message": fields.get("last_observed_state")} if status == "failed" else None
+            self._notify_turn(
+                "turn/failed" if status == "failed" else "turn/completed",
+                session_id, turn_id, **({"error": error} if error else {}),
+            )
 
     def _finish_cancelled_turn(self, session_id: str, turn_id: str) -> None:
         self._finish_session_turn(
