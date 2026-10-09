@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .backend_config import BACKENDS, execution_backend
+from .claude_prompts import user_prompt_for_title
 from .state import state_file_lock
 
 logger = logging.getLogger(__name__)
@@ -488,7 +489,7 @@ class Store:
             # The first accepted prompt owns the automatic title, even when
             # execution later fails. The guarded update shares the turn insert
             # transaction, so concurrent writers cannot replace the first title.
-            title = conversation_title(prompt, session_id) if prompt.strip() else None
+            title = conversation_title(prompt, session_id)
             conn.execute(
                 "update sessions set title = coalesce(?, title), auto_title = 0 where id = ? and auto_title = 1",
                 (title, session_id),
@@ -641,9 +642,11 @@ def preview(text: str | None, limit: int = 180) -> str | None:
     return compact[: limit - 1] + "..."
 
 
-def conversation_title(text: str, session_id: str) -> str:
+def conversation_title(text: str, session_id: str) -> str | None:
     """A compact display title; repeated prompts still identify distinct chats."""
-    compact = " ".join(text.split())
+    compact = " ".join(user_prompt_for_title(text).split())
+    if not compact:
+        return None
     if len(compact) > 80:
         compact = compact[:77].rstrip() + "..."
     return f"{compact} ({session_id[-8:]})"
