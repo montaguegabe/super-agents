@@ -1712,3 +1712,51 @@ async def test_claude_sdk_skips_intro_for_unnamed_threads(monkeypatch: pytest.Mo
     result = await client.start_turn_by_label(LabelQueryInput(label="dispatcher"), {"prompt": "hello"})
     await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
     assert announced == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+async def test_turn_notifications_follow_persisted_state(tmp_path, outcome):
+    class EventSdkClient(FakeClaudeSDKClient):
+        async def receive_response(self):
+            yield FakeAssistantMessage([FakeTextBlock("first reply")])
+            if outcome == "failed":
+                raise RuntimeError("stream failed")
+            if outcome == "cancelled":
+                turn = client.store.get_session(thread_id).active_turn_id
+                client.store.update_turn(turn, status="cancelled")
+            yield FakeResultMessage("first reply")
+
+    class EventSdk(FakeSdk):
+        ClaudeSDKClient = EventSdkClient
+
+    events = []
+
+    class EventClient(ClaudeAgentSdkClient):
+        def handle_notification(self, method, params):
+            events.append((method, params, self.store.get_turn(params["turnId"]).status))
+
+    client = EventClient(store=Store(tmp_path / "events.sqlite3"), sdk_loader=EventSdk)
+    thread_id = (await client.start_thread({"name": "events", "cwd": str(tmp_path)}))["threadId"]
+    result = await client.start_turn_by_label(LabelQueryInput(thread_id=thread_id), {"prompt": "hello"})
+    await wait_for(lambda: len(events) == 3)
+    assert [event[0] for event in events] == [
+        "turn/started", "item/completed", "turn/failed" if outcome == "failed" else "turn/completed"
+    ]
+    assert events[1][1]["item"]["text"] == "first reply"
+    assert events[-1][2] == outcome
+    assert all(event[1]["threadId"] == thread_id and event[1]["turnId"] == result["turnId"] for event in events)
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_notification_hook_failure_does_not_fail_turn(tmp_path):
+    class BrokenHookClient(ClaudeAgentSdkClient):
+        def handle_notification(self, method, params):
+            raise RuntimeError("embedding unavailable")
+
+    client = BrokenHookClient(store=Store(tmp_path / "events.sqlite3"), sdk_loader=fake_sdk_loader)
+    await client.start_thread({"name": "events", "cwd": str(tmp_path)})
+    turn = await client.start_turn_by_label(LabelQueryInput(label="events"), {"prompt": "hello"})
+    await wait_for(lambda: client.store.get_turn(turn["turnId"]).status == "completed")
+    await client.close()
