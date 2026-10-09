@@ -95,7 +95,10 @@ def _sweep(store: Store) -> int:
             title = latest_custom_title(path) or ""
             if title != synced_title:
                 updates["transcript_title"] = title
-                if title and title != session.name:
+                if title and session.title is not None:
+                    updates["title"] = title
+                    updates["auto_title"] = False
+                elif title and title != session.name:
                     with store.connect() as conn:
                         updates["name"] = _unique_session_name(conn, title, exclude_id=session.id)
             store.update_session(session.id, **updates)

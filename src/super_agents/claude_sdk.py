@@ -243,6 +243,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             developer_instructions=developer_instructions,
             model=_optional_str(input_data.get("model")) or self._default_model(),
             command=["claude-agent-sdk"],
+            auto_title=bool(input_data.get("autoTitle")),
         )
         return {"backend": self.backend, "threadId": session.id, "session": session.to_json()}
 
@@ -322,12 +323,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject:
         session = self._resolve_session(input_data)
-        renamed = self.store.rename_session(session.id, new_name)
+        if session.title is not None:
+            # Display titles are not lookup labels and need not be unique.
+            renamed = self.store.update_session(session.id, title=new_name, auto_title=False)
+        else:
+            renamed = self.store.rename_session(session.id, new_name)
         return {
             "backend": self.backend,
             "renamed": True,
             "name": renamed.name,
             "previousName": session.name,
+            **({"title": renamed.title, "previousTitle": session.title} if renamed.title is not None else {}),
             "threadId": renamed.id,
         }
 

@@ -197,6 +197,8 @@ need a brand-new session and conversation under an existing name can pass
 `"fresh": true`, which retires the old session by renaming it aside before
 creating the new one.
 
+Library callers creating ordinary conversations should instead supply a unique internal `name` and `"autoTitle": true`. These sessions expose a separate `title`: initially the project basename plus a short session ID, then a whitespace-normalized excerpt of the first accepted prompt plus that ID. Titles persist even if the turn fails, stay unchanged on later turns, and do not participate in label uniqueness. `rename_by_label` changes the display title of these sessions and disables automatic titling; named sessions without `autoTitle` retain their existing rename and reuse semantics. The SQLite store adds optional `title` and `auto_title` columns on open; existing rows remain named sessions.
+
 If the SDK package is not installed, the backend reports `ready=false` with an
 install hint.
 

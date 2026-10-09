@@ -42,11 +42,14 @@ class Session:
     last_exit_code: int | None = None
     log_path: str | None = None
     raw_log_path: str | None = None
+    title: str | None = None
+    auto_title: bool = False
 
     def to_json(self, include_paths: bool = True) -> JsonObject:
         data: JsonObject = {
             "id": self.id,
             "name": self.name,
+            "title": self.title,
             "agentName": self.agent_name,
             "developerInstructions": self.developer_instructions,
             "cwd": self.cwd,
@@ -252,6 +255,10 @@ class Store:
                 conn.execute("alter table sessions add column backend text")
             if "transcript_title" not in session_columns:
                 conn.execute("alter table sessions add column transcript_title text")
+            if "title" not in session_columns:
+                conn.execute("alter table sessions add column title text")
+            if "auto_title" not in session_columns:
+                conn.execute("alter table sessions add column auto_title integer not null default 0")
             self._claim_legacy_rows(conn)
 
     @staticmethod
@@ -283,6 +290,7 @@ class Store:
         developer_instructions: str | None = None,
         model: str | None = None,
         command: list[str] | None = None,
+        auto_title: bool = False,
     ) -> Session:
         now = iso_now()
         session_id = f"s_{uuid.uuid4().hex}"
@@ -296,8 +304,8 @@ class Store:
                 """
                 insert into sessions (
                     id, name, agent_name, developer_instructions, cwd, command_json, model, status,
-                    backend, log_path, raw_log_path, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    backend, log_path, raw_log_path, created_at, updated_at, title, auto_title
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -313,6 +321,8 @@ class Store:
                     raw_log_path,
                     now,
                     now,
+                    conversation_title(Path(resolved_cwd).name or "Thread", session_id) if auto_title else None,
+                    auto_title,
                 ),
             )
         return self.get_session(session_id)
@@ -408,6 +418,8 @@ class Store:
 
     def update_session(self, session_id: str, **fields: object) -> Session:
         allowed = {
+            "title",
+            "auto_title",
             "agent_name",
             "developer_instructions",
             "cwd",
@@ -472,6 +484,14 @@ class Store:
                     now,
                     now,
                 ),
+            )
+            # The first accepted prompt owns the automatic title, even when
+            # execution later fails. The guarded update shares the turn insert
+            # transaction, so concurrent writers cannot replace the first title.
+            title = conversation_title(prompt, session_id) if prompt.strip() else None
+            conn.execute(
+                "update sessions set title = coalesce(?, title), auto_title = 0 where id = ? and auto_title = 1",
+                (title, session_id),
             )
             active_turn_id = (
                 turn_id
@@ -621,10 +641,20 @@ def preview(text: str | None, limit: int = 180) -> str | None:
     return compact[: limit - 1] + "..."
 
 
+def conversation_title(text: str, session_id: str) -> str:
+    """A compact display title; repeated prompts still identify distinct chats."""
+    compact = " ".join(text.split())
+    if len(compact) > 80:
+        compact = compact[:77].rstrip() + "..."
+    return f"{compact} ({session_id[-8:]})"
+
+
 def row_to_session(row: sqlite3.Row) -> Session:
     return Session(
         id=row["id"],
         name=row["name"],
+        title=row["title"],
+        auto_title=bool(row["auto_title"]),
         agent_name=row["agent_name"],
         developer_instructions=row["developer_instructions"],
         cwd=row["cwd"],

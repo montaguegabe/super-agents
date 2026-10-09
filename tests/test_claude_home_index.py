@@ -161,3 +161,18 @@ def test_transcript_titles_are_uniquified_against_other_sessions(projects: Path,
     assert refresh_last_interaction_index(store, now=time.monotonic() + 100) == 2
     names = sorted(session.name for session in store.list_sessions(include_inactive=True))
     assert names == ["taken", "taken (2)"]
+
+
+def test_transcript_rename_updates_display_title_without_changing_internal_name(projects: Path, tmp_path: Path) -> None:
+    path = _transcript_path(projects, "/tmp/proj", SESSION_UUID)
+    _write_entries(path, [*_base_entries("/tmp/proj", "first prompt"), _custom_title("User title")], time.time())
+    store = Store(tmp_path / "state.sqlite3")
+    session = store.create_session("internal-label", auto_title=True)
+    store.update_session(session.id, backend_session_id=SESSION_UUID)
+
+    refresh_last_interaction_index(store, now=time.monotonic())
+
+    renamed = store.get_session(session.id)
+    assert renamed.title == "User title"
+    assert renamed.name == "internal-label"
+    assert renamed.auto_title is False
