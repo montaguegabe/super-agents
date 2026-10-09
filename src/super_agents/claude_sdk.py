@@ -31,6 +31,7 @@ from super_agents.app_protocol import (
 from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
+from super_agents.claude_cancellation import TurnCancellationMixin
 from super_agents.claude_home_index import refresh_last_interaction_index
 from super_agents.claude_inbox import (
     deliver_steer as _deliver_inbox_steer,
@@ -113,7 +114,7 @@ async def _chain_async(first: Any, rest: Any):
         yield item
 
 
-class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
+class ClaudeAgentSdkClient(TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin):
     """Super Agents backend using Claude Code without Anthropic API keys."""
 
     backend = "claude_code"
@@ -243,6 +244,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             developer_instructions=developer_instructions,
             model=_optional_str(input_data.get("model")) or self._default_model(),
             command=["claude-agent-sdk"],
+            auto_title=bool(input_data.get("autoTitle")),
         )
         return {"backend": self.backend, "threadId": session.id, "session": session.to_json()}
 
@@ -322,12 +324,17 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
 
     async def rename_by_label(self, input_data: LabelQueryInput, new_name: str) -> JsonObject:
         session = self._resolve_session(input_data)
-        renamed = self.store.rename_session(session.id, new_name)
+        if session.title is not None:
+            # Display titles are not lookup labels and need not be unique.
+            renamed = self.store.update_session(session.id, title=new_name, auto_title=False)
+        else:
+            renamed = self.store.rename_session(session.id, new_name)
         return {
             "backend": self.backend,
             "renamed": True,
             "name": renamed.name,
             "previousName": session.name,
+            **({"title": renamed.title, "previousTitle": session.title} if renamed.title is not None else {}),
             "threadId": renamed.id,
         }
 
@@ -452,22 +459,6 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             input_data,
             {**(turn_input or {}), "prompt": prompt},
         )
-
-    async def cancel_by_label(self, input_data: LabelQueryInput) -> JsonObject:
-        session = self._resolve_session(input_data)
-        self._permission_gate.cancel_scope(thread_id=session.id, turn_id=session.active_turn_id)
-        sdk_client = self._sdk_clients.get(session.id)
-        if sdk_client and hasattr(sdk_client, "interrupt"):
-            await sdk_client.interrupt()
-        if session.active_turn_id:
-            self.store.update_turn(session.active_turn_id, status="cancelled", finished_at=iso_now())
-        refreshed = self.store.update_session(
-            session.id,
-            status="cancelled",
-            active_turn_id=None,
-            last_observed_state="interrupt sent",
-        )
-        return {"backend": self.backend, "cancelled": True, "threadId": refreshed.id, "name": refreshed.name}
 
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         self._reconcile_orphaned_turns_once()
@@ -678,6 +669,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             # Re-read after acquiring the locks: another process may have run
             # turns (advancing the conversation) while this one waited.
             session = self.store.get_session(session_id)
+            cancellation_watch = asyncio.create_task(
+                self._watch_turn_cancellation(turn_id, asyncio.current_task())
+            )
             try:
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
@@ -698,6 +692,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         thread_name=session.name,
                         thread_id=session.id,
                     )
+                if self._turn_was_cancelled(turn_id):
+                    raise asyncio.CancelledError
                 last_useful_message = ""
                 self._register_pending_result(session_id)
                 await sdk_client.query(prompt)
@@ -732,6 +728,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     draining_background_tasks = self._session_pending_results.get(session_id, 0) <= 0
                     background_stream_ended = False
                     stream = sdk_client.receive_response()
+                    next_message = None
                     try:
                         if draining_background_tasks:
                             # Every expected response is consumed but spawned
@@ -829,6 +826,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                                 if getattr(message, "num_turns", None) is not None:
                                     result_message = message
                     finally:
+                        if next_message is not None:
+                            next_message.cancel()
+                            await asyncio.gather(next_message, return_exceptions=True)
                         aclose = getattr(stream, "aclose", None)
                         if aclose is not None:
                             with contextlib.suppress(Exception):
@@ -855,6 +855,7 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         await asyncio.to_thread(
                             self.store.update_turn,
                             turn_id,
+                            only_if_active=True,
                             response_finished_at=iso_now(),
                         )
                         # A steer can register a pending result while the
@@ -873,8 +874,9 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                     # process without a local interrupt). Drop the client so
                     # the next turn starts on a clean stream instead of
                     # inheriting a stale response.
-                    await self._disconnect_sdk_client(session_id)
+                    cancellation_watch.cancel()
                     self._finish_cancelled_turn(session_id, turn_id)
+                    await self._stop_cancelled_sdk_client(session_id)
                 else:
                     if last_result_message is None:
                         raise RuntimeError(
@@ -882,12 +884,15 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         )
                     if getattr(last_result_message, "is_error", False):
                         raise RuntimeError("Claude Code returned an error result; task completion is unverified.")
-                    self.store.update_turn(
+                    completed = self.store.update_turn(
                         turn_id,
+                        only_if_active=True,
                         status="completed",
                         finished_at=iso_now(),
                         last_useful_message=last_useful_message or None,
                     )
+                    if completed.status == "cancelled":
+                        raise asyncio.CancelledError
                     # "completed", not "waiting": waiting means blocked on
                     # user input (pending approval/callback) and counts as
                     # active. A finished turn left every thread looking
@@ -900,7 +905,14 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         last_observed_state="Claude Code response completed",
                         last_useful_message=last_useful_message or None,
                     )
+            except asyncio.CancelledError:
+                cancellation_watch.cancel()
+                if not self._turn_was_cancelled(turn_id):
+                    raise
+                self._finish_cancelled_turn(session_id, turn_id)
+                await self._stop_cancelled_sdk_client(session_id)
             except Exception as exc:
+                cancellation_watch.cancel()
                 append_log(session.log_path, f"[{iso_now()}] ERROR {type(exc).__name__}: {exc}\n")
                 # The stream may hold unread messages from this turn; a
                 # reused client would hand them to the next turn's
@@ -923,7 +935,12 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
-                    self.store.update_turn(turn_id, status="failed", finished_at=iso_now(), last_error=str(exc))
+                    failed = self.store.update_turn(
+                        turn_id, only_if_active=True, status="failed", finished_at=iso_now(), last_error=str(exc)
+                    )
+                    if failed.status == "cancelled":
+                        self._finish_cancelled_turn(session_id, turn_id)
+                        return
                     self._finish_session_turn(
                         session_id,
                         turn_id,
@@ -932,6 +949,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
                         last_observed_state=str(exc),
                     )
             finally:
+                cancellation_watch.cancel()
+                await asyncio.gather(cancellation_watch, return_exceptions=True)
                 self._permission_gate.cancel_scope(thread_id=session_id, turn_id=turn_id)
                 if self._closed:
                     await self._disconnect_sdk_client(session_id)
@@ -953,6 +972,8 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         workers) drop audio frames whenever a slow fsync stalls it, truncating
         user speech.
         """
+        if self._turn_was_cancelled(turn_id):
+            raise asyncio.CancelledError
         await asyncio.to_thread(append_log, session.log_path, _message_to_log(message))
         if claude_session_id := _message_session_id(message):
             await asyncio.to_thread(
@@ -962,11 +983,14 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
             )
         useful = _message_preview(message)
         if useful:
-            await asyncio.to_thread(
+            turn = await asyncio.to_thread(
                 self.store.update_turn,
                 turn_id,
+                only_if_active=True,
                 last_useful_message=useful,
             )
+            if turn.status == "cancelled":
+                raise asyncio.CancelledError
         # ResultMessage repeats the final response. Only assistant content
         # produces items, never user/tool-result blocks or result summaries.
         if useful and isinstance(getattr(message, "content", None), list):
@@ -1272,7 +1296,13 @@ class ClaudeAgentSdkClient(OrphanReconciliationMixin, SessionViewMixin):
         )
         replace_super_agents_stdio_server(options, client=self)
         client = sdk.ClaudeSDKClient(options=options)
-        await client.connect()
+        try:
+            await client.connect()
+        except asyncio.CancelledError:
+            # This client may already have spawned its subprocess, but is not
+            # cached yet. Clean up only the SDK instance we just created.
+            await client.disconnect()
+            raise
         if disallowed_tools:
             logger.info(
                 "dispatch_timing stage=super_agent_tool_policy_connected thread_id=%s disallowed_tools=%s",
