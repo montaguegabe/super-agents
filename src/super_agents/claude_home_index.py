@@ -31,7 +31,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from super_agents.agent_store import Session, Store, conversation_title, preview
+from super_agents.agent_store import Session, Store, conversation_title, preview, unique_session_name
 from super_agents.claude_prompts import CLAUDE_CONTEXT_OPEN, user_prompt_for_title
 from super_agents.claude_transcript import CLAUDE_PROJECTS_DIR_NAME, claude_config_dir
 
@@ -107,14 +107,14 @@ def _sweep(store: Store) -> int:
                     updates["auto_title"] = False
                 elif title and title != session.name:
                     with store.connect() as conn:
-                        updates["name"] = _unique_session_name(conn, title, exclude_id=session.id)
+                        updates["name"] = unique_session_name(conn, title, exclude_id=session.id)
             if repair_name and not title:
                 # Older importers shortened the context block into the name.
                 # Re-read the original prompt even for an idle transcript;
                 # do not alter its history, identity or last-activity time.
                 if parsed := _parse_transcript_head(path):
                     with store.connect() as conn:
-                        updates["name"] = _unique_session_name(conn, parsed[0], exclude_id=session.id)
+                        updates["name"] = unique_session_name(conn, parsed[0], exclude_id=session.id)
             store.update_session(session.id, **updates)
             changed += 1
             continue
@@ -170,7 +170,7 @@ def _register_transcript_session(
     with store.connect() as conn:
         if conn.execute("select 1 from sessions where id = ?", (session_id,)).fetchone():
             return False
-        unique_name = _unique_session_name(conn, custom_title or name)
+        unique_name = unique_session_name(conn, custom_title or name)
         conn.execute(
             """
             insert into sessions (
@@ -237,8 +237,8 @@ def _parse_transcript_head(path: Path) -> tuple[str, str | None, str | None] | N
     if saw_user_text:
         # Context-only/truncated prompts must still yield an identifiable
         # conversation, without surfacing internal instructions.
-        fallback = conversation_title(Path(cwd or "").name or "Thread", path.stem)
-        return fallback or f"Thread ({path.stem[-8:]})", cwd, created_at
+        # The name is made unique on registration.
+        return conversation_title(Path(cwd or "").name or "Thread") or "Thread", cwd, created_at
     return None
 
 
@@ -308,18 +308,6 @@ def latest_custom_title(path: Path) -> str | None:
         _TITLE_SCAN_STATE.clear()
     _TITLE_SCAN_STATE[key] = (scanned, title)
     return preview(title, limit=80)
-
-
-def _unique_session_name(conn, base_name: str, exclude_id: str | None = None) -> str:
-    candidate = base_name
-    suffix = 2
-    while True:
-        row = conn.execute("select id from sessions where name = ?", (candidate,)).fetchone()
-        if row is None or row["id"] == exclude_id:
-            return candidate
-        suffix_text = f" ({suffix})"
-        candidate = f"{base_name[: 80 - len(suffix_text)]}{suffix_text}"
-        suffix += 1
 
 
 def _iso_from_epoch(epoch_seconds: float) -> str:
