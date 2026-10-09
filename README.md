@@ -189,6 +189,8 @@ files the user touched recently — including Claude Code sessions started
 outside Super Agents — are registered and kept fresh, and all listings sort
 most-recently-interacted first across backends.
 
+A Claude Code session running in a terminal (one this library did not launch) is steered through Claude Code's per-session inbox socket (`super_agents.claude_inbox`). Claude Code exports the socket and its token only to the session's own hooks, so an integrator records them at SessionStart, one JSON file per session (`sessionId`, `socket`, `token`, `cwd`, `recordedAt`), in `$CLAUDE_INBOX_REGISTRY_DIR` or `<Claude home>/inbox-registry`. `steer_by_label` then delivers into a live inbox instead of resuming the transcript the terminal is driving; `claude_inbox.resolve_inbox` and `claude_inbox.deliver_steer` are usable directly, and `claude_home_index.latest_custom_title` reads a transcript's user-set name. A receiver running with permissions bypassed holds such a message until approved in that terminal, unless its settings set `crossSessionInbound` to `accept`.
+
 On this backend, `start_thread` reuses an existing session with the same
 `name` (refreshing its cwd, instructions, and model). Library callers that
 need a brand-new session and conversation under an existing name can pass

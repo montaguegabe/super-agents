@@ -92,7 +92,7 @@ def _sweep(store: Store) -> int:
             # Idle rows only reach here for the one-time title backfill; keep
             # their real last-activity time instead of bumping it to "now".
             updates: dict[str, object] = {"updated_at": interacted_at if fresh else session.updated_at}
-            title = _latest_custom_title(path) or ""
+            title = latest_custom_title(path) or ""
             if title != synced_title:
                 updates["transcript_title"] = title
                 if title and title != session.name:
@@ -148,7 +148,7 @@ def _register_transcript_session(
     if parsed is None:
         return False
     name, cwd, created_at = parsed
-    custom_title = _latest_custom_title(path)
+    custom_title = latest_custom_title(path)
     session_id = f"claude_{backend_session_id.replace('-', '')}"
     with store.connect() as conn:
         if conn.execute("select 1 from sessions where id = ?", (session_id,)).fetchone():
@@ -244,7 +244,7 @@ _TITLE_SCAN_STATE: dict[str, tuple[int, str | None]] = {}
 _TITLE_SCAN_MAX_ENTRIES = 512
 
 
-def _latest_custom_title(path: Path) -> str | None:
+def latest_custom_title(path: Path) -> str | None:
     """Last user-set title from the transcript's ``custom-title`` entries.
 
     /rename appends these, so the newest one wins. The substring pre-filter

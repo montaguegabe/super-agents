@@ -93,20 +93,20 @@ def test_transcript_append_is_parsed_incrementally(tmp_path, monkeypatch):
 def test_latest_custom_title_scans_only_appended_bytes(tmp_path):
     path = tmp_path / "t.jsonl"
     path.write_text(json.dumps({"type": "custom-title", "customTitle": "one"}) + "\n")
-    assert claude_home_index._latest_custom_title(path) == "one"
+    assert claude_home_index.latest_custom_title(path) == "one"
     scanned_after_first = claude_home_index._TITLE_SCAN_STATE[str(path)][0]
     assert scanned_after_first == path.stat().st_size
 
     with path.open("a") as handle:
         handle.write(_entry("user", "x", "2026-09-01T00:00:00Z") + "\n")
         handle.write(json.dumps({"type": "custom-title", "customTitle": "two"}))  # partial line
-    assert claude_home_index._latest_custom_title(path) == "one"
+    assert claude_home_index.latest_custom_title(path) == "one"
     with path.open("a") as handle:
         handle.write("\n")
-    assert claude_home_index._latest_custom_title(path) == "two"
+    assert claude_home_index.latest_custom_title(path) == "two"
 
     path.write_text(_entry("user", "fresh", "2026-09-01T00:00:00Z") + "\n")
-    assert claude_home_index._latest_custom_title(path) is None
+    assert claude_home_index.latest_custom_title(path) is None
 
 
 def test_latest_turns_by_session_matches_per_session_lookup(tmp_path):
