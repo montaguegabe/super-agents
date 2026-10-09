@@ -118,6 +118,46 @@ def test_reopening_strips_legacy_session_id_suffixes_once(store):
     assert reopened.get_session(titled.id).title == "Hi there"
     assert reopened.get_session(imported.id).name == "project (2)"
     assert reopened.get_session(retired.id).name == "dispatcher (retired)"
-    # A title that merely ends in parentheses is the user's own text.
-    reopened.update_session(titled.id, title="Fix bug (12345678)")
-    assert Store(store.path).get_session(titled.id).title == "Fix bug (12345678)"
+    with reopened.connect() as conn:
+        assert conn.execute("pragma user_version").fetchone()[0] == 1
+    deliberate_title = f"Fix bug ({titled.id[-8:]})"
+    deliberate_name = f"project ({imported.id[-8:]})"
+    reopened.update_session(titled.id, title=deliberate_title)
+    reopened.rename_session(imported.id, deliberate_name)
+    reopened_again = Store(store.path)
+    assert reopened_again.get_session(titled.id).title == deliberate_title
+    assert reopened_again.get_session(imported.id).name == deliberate_name
+
+
+def test_migration_preserves_other_ids_and_parenthesized_user_text(store):
+    session = store.create_session("placeholder")
+    other = store.create_session("other")
+    for text in (f"Fix bug ({other.id[-8:]})", "Fix bug (2)", "Fix bug (retired)"):
+        with store.connect() as conn:
+            conn.execute("update sessions set name = ?, title = ? where id = ?", (text, text, session.id))
+            conn.execute("pragma user_version = 0")
+        migrated = Store(store.path).get_session(session.id)
+        assert migrated.name == text
+        assert migrated.title == text
+
+
+def test_migration_numbers_colliding_imported_and_retired_names(store):
+    for base in ("project", "dispatcher (retired)"):
+        store.create_session(base)
+        store.create_session(f"{base} (2)")
+    imported = [store.create_session(f"import-{index}") for index in range(2)]
+    retired = [store.create_session(f"retired-{index}") for index in range(2)]
+    with store.connect() as conn:
+        for session in imported:
+            conn.execute("update sessions set name = ? where id = ?", (f"project ({session.id[-8:]})", session.id))
+        for session in retired:
+            conn.execute(
+                "update sessions set name = ? where id = ?", (f"dispatcher (retired {session.id[-8:]})", session.id)
+            )
+        conn.execute("pragma user_version = 0")
+    reopened = Store(store.path)
+    assert {reopened.get_session(session.id).name for session in imported} == {"project (3)", "project (4)"}
+    assert {reopened.get_session(session.id).name for session in retired} == {
+        "dispatcher (retired) (3)",
+        "dispatcher (retired) (4)",
+    }
