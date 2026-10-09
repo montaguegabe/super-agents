@@ -259,21 +259,18 @@ def write_state_file(path: Path, state: StateFile) -> None:
     """Persist ``state`` atomically, leaving the file untouched when nothing changed.
 
     Callers rewrite the whole file on every update, including no-op ones, and
-    a rewrite that only bumps the mtime misleads anything that keys on it: a
-    container image upgrade copies this directory onto the data volume and
-    the Cloud refuses the redeploy when the live store looks newer than the
-    copy (staging, 2026-10-09).
+    a rewrite that only bumps the mtime misleads consumers tracking changes.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(state.to_json(), indent=2) + "\n"
+    payload = (json.dumps(state.to_json(), indent=2) + "\n").encode("utf-8")
     try:
-        if path.read_text(encoding="utf-8") == payload:
+        if path.read_bytes() == payload:
             return
     except OSError:
         pass
     tmp_name: str | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False) as tmp:
             tmp.write(payload)
             tmp_name = tmp.name
         os.replace(tmp_name, path)

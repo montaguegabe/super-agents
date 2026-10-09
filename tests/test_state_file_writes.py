@@ -58,3 +58,21 @@ def test_first_write_creates_the_file(tmp_path: Path) -> None:
     path = tmp_path / "missing" / "state.json"
     write_state_file(path, StateFile())
     assert read_state_file(path).to_json() == StateFile().to_json()
+
+
+def test_write_replaces_invalid_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b"\xff")
+    update_state_file(path, lambda state: None)
+    assert read_state_file(path).to_json() == StateFile().to_json()
+    assert path.read_bytes() != b"\xff"
+
+
+def test_different_bytes_are_rewritten(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    state = StateFile()
+    write_state_file(path, state)
+    payload = path.read_bytes()
+    path.write_bytes(payload.replace(b"\n", b"\r\n"))
+    write_state_file(path, state)
+    assert path.read_bytes() == payload
