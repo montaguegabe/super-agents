@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
@@ -136,6 +136,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         approval_timeout_seconds: float = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
         backend_identity: str | None = None,
         disallowed_tools_for_session: Callable[[Session], tuple[str, ...]] | None = None,
+        configure_session: Callable[[Session, Any, Any], None] | None = None,
+        validate_turn_result: Callable[[Session, Turn, Any], Awaitable[None]] | None = None,
     ) -> None:
         self.backend = normalize_backend(backend_identity or CLAUDE_CODE_BACKEND)
         if execution_backend(self.backend) != CLAUDE_CODE_BACKEND:
@@ -145,6 +147,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
         self._disallowed_tools_for_session = disallowed_tools_for_session
+        self._configure_session = configure_session
+        self._validate_turn_result = validate_turn_result
         self._sdk_client_tool_policies: dict[str, tuple[str, ...]] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._sdk_client_models: dict[str, str | None] = {}
@@ -961,6 +965,24 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         )
                     if getattr(last_result_message, "is_error", False):
                         raise RuntimeError("Claude Code returned an error result; task completion is unverified.")
+                    if self._validate_turn_result is not None:
+                        if active_background_tasks:
+                            raise RuntimeError(
+                                "Claude Code stream ended with unfinished background tasks; validation is unsafe."
+                            )
+                        if self._turn_was_cancelled(turn_id):
+                            raise asyncio.CancelledError
+                        await self._validate_turn_result(
+                            self.store.get_session(session_id),
+                            self.store.get_turn(turn_id),
+                            last_result_message,
+                        )
+                        if self._turn_was_cancelled(turn_id):
+                            raise asyncio.CancelledError
+                        if self._session_pending_results.get(session_id, 0):
+                            raise RuntimeError(
+                                "Claude Code received new work during result validation; task completion is unverified."
+                            )
                     completed = self.store.update_turn(
                         turn_id,
                         only_if_active=True,
@@ -1292,6 +1314,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             system_prompt=system_prompt,
         )
         replace_super_agents_stdio_server(options, client=self)
+        if self._configure_session is not None:
+            self._configure_session(session, options, sdk)
         client = sdk.ClaudeSDKClient(options=options)
         try:
             await client.connect()
