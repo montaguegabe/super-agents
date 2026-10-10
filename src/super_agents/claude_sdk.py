@@ -1185,7 +1185,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             self._record_session_leaf_owner(session.id)
             return existing
         await self._disconnect_sdk_client(session.id)
-        options = _agent_options(
+        options = await asyncio.to_thread(
+            _agent_options,
             sdk,
             session.cwd,
             model,

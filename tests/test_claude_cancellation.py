@@ -1,6 +1,7 @@
 """Cancellation must stop the SDK owner and preserve per-turn output."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,60 @@ import pytest
 from super_agents.agent_store import Store
 from super_agents.app_models import LabelQueryInput
 from super_agents.claude_sdk import ClaudeAgentSdkClient
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_machine_token_wait_keeps_event_loop_responsive(tmp_path, monkeypatch, cancel):
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_CODE_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("super_agents.claude_options.claude_state_path", lambda: tmp_path / "claude.json")
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    finished = asyncio.Event()
+    connected = []
+
+    def read_token(*args, **kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(2), "Token read blocked the event loop"
+            return SimpleNamespace(returncode=0, stdout="obmt_test")
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr("super_agents.claude_options.subprocess.run", read_token)
+
+    class SDK:
+        def __init__(self, **kwargs):
+            pass
+
+        async def connect(self):
+            connected.append(self)
+
+        async def disconnect(self):
+            pass
+
+    sdk = SimpleNamespace(ClaudeSDKClient=SDK, ClaudeAgentOptions=lambda **kwargs: SimpleNamespace(**kwargs))
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: sdk, backend_identity="openbase_cloud")
+    session = store.create_session(name="token", cwd=str(tmp_path))
+    task = asyncio.create_task(client._sdk_client_for(session, None, None, None, sdk))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert not task.done()
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        release.set()
+        await asyncio.wait_for(finished.wait(), 1)
+        if not cancel:
+            await task
+        assert len(connected) == (0 if cancel else 1)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.close()
 
 
 def assistant(text):
