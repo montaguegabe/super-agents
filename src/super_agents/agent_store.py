@@ -568,11 +568,13 @@ class Store:
         """Record a steering message delivered into a running turn."""
         now = iso_now()
         with self.connect() as conn:
+            conn.execute("begin immediate")
             row = conn.execute("select steers_json from turns where id = ?", (turn_id,)).fetchone()
             if row is None:
                 raise KeyError(f"No turn with id {turn_id}")
             steers = list(steers_from_json(row["steers_json"]))
-            steers.append({"text": text, "createdAt": now})
+            output_count = conn.execute("select count(*) from turn_output where turn_id = ?", (turn_id,)).fetchone()[0]
+            steers.append({"text": text, "createdAt": now, "outputCount": output_count})
             conn.execute(
                 "update turns set steers_json = ?, updated_at = ? where id = ?",
                 (json.dumps(steers), now, turn_id),
