@@ -906,13 +906,17 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                             self.store.update_turn,
                             turn_id,
                             only_if_active=True,
-                            response_finished_at=iso_now(),
+                            response_finished_at=(
+                                iso_now() if self._session_pending_results.get(session_id, 0) <= 1 else None
+                            ),
                         )
                         # A steer can register a pending result while the
                         # background drain is already reading; whichever cycle
                         # consumes a response settles the debt.
                         if self._session_pending_results.get(session_id, 0) > 0:
                             self._consume_pending_result(session_id)
+                        if active_background_tasks:
+                            self._notify_turn("turn/updated", session_id, turn_id)
                         # A follow-up response ran; if tasks remain, the next
                         # drain cycle re-announces what it is waiting on.
                         background_wait_logged = False
@@ -1033,6 +1037,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 backend_session_id=claude_session_id,
             )
         useful = _message_preview(message)
+        if isinstance(getattr(message, "content", None), list) and not hasattr(message, "tool_use_result"):
+            await asyncio.to_thread(
+                self.store.update_turn, turn_id, only_if_active=True, response_finished_at=None,
+            )
         if useful:
             turn = await asyncio.to_thread(
                 self.store.update_turn,
@@ -1045,9 +1053,14 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         # ResultMessage repeats the final response. Only assistant content
         # produces items, never user/tool-result blocks or result summaries.
         if useful and isinstance(getattr(message, "content", None), list):
+            from super_agents.claude_turn_output import append_turn_output
+
+            item_id = await asyncio.to_thread(append_turn_output, self.store, turn_id, useful)
+            if item_id is None:
+                return useful
             self._notify_turn(
                 "item/completed", session_id, turn_id,
-                item={"type": "agentMessage", "id": uuid.uuid4().hex, "text": useful},
+                item={"type": "agentMessage", "id": item_id, "text": useful},
             )
         _note_task_lifecycle(active_background_tasks, message)
         return useful
@@ -1275,6 +1288,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
 
     def _register_pending_result(self, session_id: str) -> None:
         self._session_pending_results[session_id] = self._session_pending_results.get(session_id, 0) + 1
+        session = self.store.get_session(session_id)
+        if session.active_turn_id:
+            self.store.update_turn(session.active_turn_id, only_if_active=True, response_finished_at=None)
 
     def _consume_pending_result(self, session_id: str) -> None:
         pending = self._session_pending_results.get(session_id, 0)

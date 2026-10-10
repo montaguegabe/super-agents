@@ -7,6 +7,7 @@ from typing import Any
 from super_agents.agent_store import Session
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import LabelQueryInput
+from super_agents.claude_turn_output import read_turn_output
 
 JsonObject = dict[str, Any]
 
@@ -75,6 +76,8 @@ class SessionViewMixin:
 
     def _turn_view(self, session: Session, turn: Any, *, include_prompt: bool = False) -> JsonObject:
         data = turn.to_json()
+        if include_prompt:
+            data["items"] = read_turn_output(self.store, turn.id)
         if include_prompt and turn.prompt:
             # Thread reads feed history UIs that render what the user actually
             # said; the 180-char promptPreview alone cuts transport envelopes
