@@ -29,3 +29,26 @@ def read_turn_output(store: Any, turn_id: str) -> list[dict[str, str]]:
             "select id, text from turn_output where turn_id = ? order by rowid", (turn_id,)
         ).fetchall()
     return [{"type": "agentMessage", "id": row["id"], "text": row["text"]} for row in rows]
+
+
+def ordered_turn_items(store: Any, turn: Any) -> list[dict[str, Any]]:
+    """Keep delivered user inputs between the assistant messages they followed."""
+    output = read_turn_output(store, turn.id)
+    items: list[dict[str, Any]] = []
+    if turn.prompt:
+        items.append({"type": "userMessage", "id": "prompt", "content": [{"type": "text", "text": turn.prompt}]})
+    cursor = 0
+    for index, steer in enumerate(turn.steers):
+        # Older stores did not record the boundary. Preserve all their output
+        # before follow-ups rather than moving new input above an old answer.
+        boundary = steer.get("outputCount", len(output))
+        if not isinstance(boundary, int):
+            boundary = len(output)
+        boundary = max(cursor, min(boundary, len(output)))
+        items.extend(output[cursor:boundary])
+        cursor = boundary
+        items.append(
+            {"type": "userMessage", "id": f"steer:{index}", "content": [{"type": "text", "text": steer["text"]}]}
+        )
+    items.extend(output[cursor:])
+    return items
