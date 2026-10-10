@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -148,6 +149,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self.store.scope_backend(self.backend)
         self._sdk_loader = sdk_loader or _load_sdk
         self._sdk_clients: dict[str, Any] = {}
+        self._sdk_client_contexts: dict[str, tuple[int, asyncio.AbstractEventLoop]] = {}
         self._disallowed_tools_for_session = disallowed_tools_for_session
         self._configure_session = configure_session
         self._validate_turn_result = validate_turn_result
@@ -320,6 +322,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         """
         session = self._resolve_session(input_data)
         turn_input = turn_input or {}
+        if self._transport_outside_context(session):
+            return self._warm_result(session, warmed=False, reason="owner_outside_execution_context")
         if self._session_is_busy(session):
             return self._warm_result(session, warmed=False, reason="busy")
         sdk = self._require_sdk()
@@ -498,7 +502,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         turn_input: JsonObject | None = None,
     ) -> JsonObject:
         session = self._resolve_session(input_data)
-        owner = self._active_owner(session.id)
+        owner = self._active_owner(session.id) or self._transport_owner(session)
         if owner is not None and owner is not self:
             return await owner.steer_by_label(input_data, prompt, turn_input)
         # A session with no in-process SDK client that still has a live inbox
@@ -507,12 +511,22 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         # process is also driving, so deliver the steer into its inbox instead.
         # This is the only path that reaches a turn started from a plain
         # terminal (there is no shared app-server daemon for Claude Code).
-        if self._sdk_clients.get(session.id) is None:
+        if input_data.turn_id and session.active_turn_id != input_data.turn_id:
+            raise RuntimeError(
+                f"Expected active turn id `{input_data.turn_id}` but found `{session.active_turn_id}`. "
+                "Nothing was delivered or queued."
+            )
+        other_loop = self._transport_outside_context(session)
+        if not other_loop and self._sdk_clients.get(session.id) is not None and not self._owns_session_leaf(session):
+            await self._disconnect_sdk_client(session.id)
+        if other_loop or self._sdk_clients.get(session.id) is None:
             delivered = await self._try_inbox_steer(session, prompt, turn_input or {})
             if delivered is not None:
-                if delivered.get("steered") is False and self._session_is_busy(session):
-                    return await self._queue_unavailable_steer(session, prompt, turn_input or {})
+                # A written or ambiguous frame must never also become a queued
+                # turn. A live foreign inbox is not a managed continuation ACK.
                 return delivered
+            if other_loop:
+                return self._unavailable_transport_result(session)
         if self._session_is_busy(session):
             return await self._steer_active_turn(
                 session,
@@ -528,6 +542,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
+        if self._transport_outside_context(session):
+            return self._unavailable_transport_result(session)
         if self._session_is_busy(session):
             return await self._steer_active_turn(
                 session,
@@ -1148,51 +1164,32 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             from_name=_steer_from_name(turn_input),
             priority="now",
         )
-        if not result.written:
-            if result.reason == "socket_unreachable":
-                # Not connectable → the owning process has exited. The record is
-                # stale; drop it and let the caller resume locally (a fresh turn
-                # from the transcript tip), which is now safe.
-                _forget_inbox(backend_session_id)
-                return None
-            # Connected but the frame was rejected (stale/mismatched record) or
-            # the write broke: the owning process is still alive, so resuming
-            # locally would fork the transcript it is driving. Report a soft
-            # failure instead of falling through. Prune a mismatched record so a
-            # later SessionStart sweep can re-register the correct coordinates.
-            if result.reason == "rejected_by_peer":
-                _forget_inbox(backend_session_id)
-            return {
-                "backend": self.backend,
-                "threadId": session.id,
-                "name": session.name,
-                "turnId": session.active_turn_id,
-                "queued": False,
-                "steered": False,
-                "delivery": "inbox_unavailable",
-                "message": "Nothing was delivered or queued. The Claude Code inbox rejected the steering message.",
-                "reason": result.reason,
-                "drain": "inbox_socket",
-            }
+        if not result.written and not result.may_have_been_written and result.reason == "socket_unreachable":
+            _forget_inbox(backend_session_id)
+            return None
+        # EOF, resets and drain timeouts after writing are ambiguous, not proof
+        # of rejection. Keep the registry and never enqueue/resume as a fallback.
         self.store.update_session(
-            session.id,
-            last_observed_state="steer delivered to Claude Code inbox socket",
+            session.id, last_observed_state="Claude Code inbox submission unconfirmed",
         )
         return {
             "backend": self.backend,
             "threadId": session.id,
             "name": session.name,
-            "turnId": session.active_turn_id,
+            "turnId": None,
+            "activeTurnId": session.active_turn_id,
             "queued": False,
-            "steered": True,
+            "steered": False,
             "nativeSteer": False,
             "startedImmediately": False,
-            "delivery": "inbox",
-            # The socket accepted the frame; delivery to the model is subject to
-            # the receiver's crossSessionInbound policy and cannot be confirmed
-            # synchronously unless a status reply was read.
-            "confirmed": result.confirmed,
-            **({"deliveryStatus": result.status} if result.status else {}),
+            "delivery": "inbox" if result.written or result.may_have_been_written else "inbox_unavailable",
+            **result.to_json(),
+            "message": (
+                "Inbox submission is unconfirmed; no managed turn was started or queued. "
+                "Inspect thread state before any retry; the frame may still be consumed."
+                if result.written or result.may_have_been_written else
+                "Nothing was delivered or queued. The foreign inbox is unavailable; no local resume was attempted."
+            ),
             "drain": "inbox_socket",
         }
 
@@ -1263,6 +1260,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         *,
         developer_instructions: str | None = None,
     ) -> Any:
+        if self._transport_outside_context(session):
+            raise RuntimeError("Managed SDK transport belongs to another event loop; nothing was submitted.")
         system_prompt = compose_system_prompt(
             _system_prompt_option(),
             self._session_developer_instructions(session, developer_instructions),
@@ -1337,6 +1336,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 ",".join(disallowed_tools),
             )
         self._sdk_clients[session.id] = client
+        self._sdk_client_contexts[session.id] = (os.getpid(), asyncio.get_running_loop())
+        self._register_transport_owner(session.id)
         self._sdk_client_system_prompts[session.id] = prompt_fingerprint
         self._sdk_client_tool_policies[session.id] = disallowed_tools
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
@@ -1370,6 +1371,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     async def _disconnect_sdk_client(self, session_id: str) -> None:
         # A dropped client means a fresh stream on the next connect; any
         # unconsumed responses died with the old stream.
+        if not self._transport_context_matches(session_id):
+            raise RuntimeError("SDK transport must be disconnected in its owning process and event loop.")
+        self._sdk_client_contexts.pop(session_id, None)
+        self._unregister_transport_owner(session_id)
         self._clear_pending_results(session_id)
         client = self._sdk_clients.pop(session_id, None)
         self._sdk_client_tool_policies.pop(session_id, None)
@@ -1394,6 +1399,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         when that turn finishes (see _run_turn) rather than being killed
         mid-answer here.
         """
+        if any(not self._transport_context_matches(sid) for sid in self._sdk_clients):
+            raise RuntimeError("SDK transports must be closed in their owning process and event loop.")
         self._closed = True
         self._permission_gate.cancel_scope()
         queue_tasks = list(self._queue_tasks.values())

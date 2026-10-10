@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 from weakref import WeakValueDictionary
 
@@ -16,11 +17,12 @@ logger = logging.getLogger(__name__)
 # owner across initial responses AND background-task drain cycles, and never
 # use another event loop's transport. Foreign processes use the durable queue.
 _ACTIVE_OWNERS: WeakValueDictionary = WeakValueDictionary()
+_TRANSPORT_OWNERS: WeakValueDictionary = WeakValueDictionary()
 
 
 class ActiveSteeringMixin:
     def _owner_key(self, session_id: str) -> tuple:
-        return (str(self.store.path.resolve()), self.backend, session_id, asyncio.get_running_loop())
+        return (os.getpid(), str(self.store.path.resolve()), self.backend, session_id, asyncio.get_running_loop())
 
     def _register_active_owner(self, session_id: str) -> None:
         _ACTIVE_OWNERS[self._owner_key(session_id)] = self
@@ -32,6 +34,48 @@ class ActiveSteeringMixin:
 
     def _active_owner(self, session_id: str) -> Any | None:
         return _ACTIVE_OWNERS.get(self._owner_key(session_id))
+
+    def _transport_context_matches(self, session_id: str) -> bool:
+        context = self._sdk_client_contexts.get(session_id)
+        return context is None or context == (os.getpid(), asyncio.get_running_loop())
+
+    def _register_transport_owner(self, session_id: str) -> None:
+        # Transport lifetime extends beyond a turn, including idle continuations.
+        _TRANSPORT_OWNERS[self._owner_key(session_id)] = self
+
+    def _unregister_transport_owner(self, session_id: str) -> None:
+        key = self._owner_key(session_id)
+        if _TRANSPORT_OWNERS.get(key) is self:
+            _TRANSPORT_OWNERS.pop(key, None)
+
+    def _transport_owner(self, session: Session) -> Any | None:
+        owner = _TRANSPORT_OWNERS.get(self._owner_key(session.id))
+        if owner is not None and not owner._closed and owner._sdk_clients.get(session.id) is not None:
+            if owner._owns_session_leaf(session):
+                return owner
+        return None
+
+    def _has_other_loop_transport(self, session: Session) -> bool:
+        key = self._owner_key(session.id)
+        # This is only in-process evidence. Never use a foreign loop's client,
+        # and exclude registries inherited across fork by comparing process IDs.
+        return any(
+            other_key[:-1] == key[:-1] and other_key[-1] is not key[-1]
+            and owner._sdk_clients.get(session.id) is not None
+            for other_key, owner in list(_TRANSPORT_OWNERS.items())
+        )
+
+    def _transport_outside_context(self, session: Session) -> bool:
+        return not self._transport_context_matches(session.id) or self._has_other_loop_transport(session)
+
+    def _unavailable_transport_result(self, session: Session) -> JsonObject:
+        return {
+            "backend": self.backend, "threadId": session.id, "name": session.name,
+            "turnId": None, "queued": False, "steered": False,
+            "startedImmediately": False, "confirmed": False,
+            "delivery": "unavailable", "reason": "owner_outside_execution_context",
+            "message": "Nothing was delivered or queued. The managed SDK transport belongs to another process or event loop.",
+        }
 
     async def _steer_active_turn(
         self,
@@ -135,6 +179,8 @@ class ActiveSteeringMixin:
             "queued": False,
             "steered": True,
             "nativeSteer": True,
+            "delivery": "sdk",
+            "confirmed": True,
             "interruptedCurrentWork": turn_input.get("interruptCurrentWork") is True,
             "startedImmediately": False,
             "drain": "steered_active_turn",

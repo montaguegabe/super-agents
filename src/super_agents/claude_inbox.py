@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -105,26 +106,30 @@ class InboxRecord:
 class InboxDeliveryResult:
     """Outcome of a delivery attempt.
 
-    ``written`` means the auth+message lines were written to the socket without
-    error — the strongest guarantee available synchronously. ``confirmed`` is
-    set only when a ``peer_message_status`` reply was read back (best-effort,
-    off by default); ``status`` carries its verdict (``delivered`` / ``held`` /
-    ``dropped``) when known.
+    ``written`` means the local writer drained, not that the model consumed
+    the frame. A write error or EOF after submission is ambiguous; callers
+    must not retry when ``may_have_been_written`` is true. There is currently
+    no correlated peer ACK, so ``confirmed`` remains false.
     """
 
     written: bool
     reason: str | None = None
     confirmed: bool = False
     status: str | None = None
+    message_id: str | None = None
+    may_have_been_written: bool = False
 
     def to_json(self) -> dict[str, object]:
-        payload: dict[str, object] = {"written": self.written}
+        payload: dict[str, object] = {
+            "written": self.written, "confirmed": self.confirmed,
+            "mayHaveBeenWritten": self.written or self.may_have_been_written,
+        }
+        if self.message_id is not None:
+            payload["messageId"] = self.message_id
         if self.reason is not None:
             payload["reason"] = self.reason
-        if self.confirmed:
-            payload["confirmed"] = True
         if self.status is not None:
-            payload["status"] = self.status
+            payload["deliveryStatus"] = self.status
         return payload
 
 
@@ -220,12 +225,13 @@ async def deliver_steer(
         return InboxDeliveryResult(written=False, reason="empty_text")
 
     session_id = target_session_id or record.session_id
+    message_id = f"super-agents-steer-{uuid.uuid4().hex}"
     payload = _message_line(
         target_session_id=session_id,
         text=text,
         from_name=from_name,
         priority=priority,
-        msg_id=f"openbase-steer-{uuid.uuid4().hex}",
+        msg_id=message_id,
     )
 
     try:
@@ -236,7 +242,12 @@ async def deliver_steer(
     except (TimeoutError, OSError) as exc:
         # Socket gone (session ended) or refused. Caller falls back.
         logger.info("Claude inbox socket unreachable at %s: %s", record.socket, exc)
-        return InboxDeliveryResult(written=False, reason="socket_unreachable")
+        # Only missing/refused sockets prove this endpoint is dead. A timeout
+        # or permission error must not authorize resuming a live conversation.
+        dead = isinstance(exc, OSError) and exc.errno in {errno.ENOENT, errno.ECONNREFUSED}
+        return InboxDeliveryResult(
+            written=False, reason="socket_unreachable" if dead else "connect_unavailable", message_id=message_id,
+        )
 
     try:
         if record.token:
@@ -246,32 +257,31 @@ async def deliver_steer(
     except (TimeoutError, OSError) as exc:
         logger.info("Claude inbox write failed at %s: %s", record.socket, exc)
         _close_writer(writer)
-        return InboxDeliveryResult(written=False, reason="write_failed")
+        return InboxDeliveryResult(
+            written=False, reason="write_failed", message_id=message_id, may_have_been_written=True,
+        )
 
-    # A same-line rejection (bad auth / session_id mismatch) closes the
-    # connection immediately without consuming the frame; give the peer a brief
-    # moment to slam it shut so we can report a miss instead of a false hit.
-    rejected = await _peer_closed_immediately(reader)
-    _close_writer(writer)
-    if rejected:
-        return InboxDeliveryResult(written=False, reason="rejected_by_peer")
-    return InboxDeliveryResult(written=True)
+    # A peer can consume the frame and then close without an ACK. EOF cannot
+    # distinguish that from rejection; it must not authorize a second delivery.
+    try:
+        closed = await _peer_closed_immediately(reader)
+    finally:
+        _close_writer(writer)
+    return InboxDeliveryResult(
+        written=True, message_id=message_id, may_have_been_written=True,
+        reason="peer_closed_without_ack" if closed else None,
+    )
 
 
 async def _peer_closed_immediately(reader: asyncio.StreamReader, *, window: float = 0.15) -> bool:
-    """True if the peer closed the connection within a short window.
-
-    An accepted frame leaves the connection open (the receiver keeps it for an
-    optional reply); a malformed/auth-failed/session-mismatched frame is
-    dropped and the connection closed. Reading EOF quickly is the miss signal.
-    """
+    """Observe EOF only; a byte or an open connection is not a correlated ACK."""
     try:
         data = await asyncio.wait_for(reader.read(1), timeout=window)
     except TimeoutError:
-        return False  # still open → accepted
+        return False
     except OSError:
         return True
-    return data == b""  # EOF → closed by peer
+    return data == b""
 
 
 def _close_writer(writer: asyncio.StreamWriter) -> None:
