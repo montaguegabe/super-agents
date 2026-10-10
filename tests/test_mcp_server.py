@@ -19,6 +19,10 @@ async def test_cli_entrypoint_serves_tools_over_stdio(tmp_path) -> None:
         "OPENBASE_CODING_BACKEND": "codex",
         "SUPER_AGENTS_WS_URL": "ws://127.0.0.1:1",
         "SUPER_AGENTS_STATE_FILE": str(tmp_path / "state.json"),
+        # The multi-backend entrypoint also opens Claude storage and the
+        # ownership index; never read or modify the operator's real sessions.
+        "SUPER_AGENTS_CLAUDE_CODE_HOME": str(tmp_path / "claude"),
+        "SUPER_AGENTS_BACKEND_PROVENANCE_FILE": str(tmp_path / "provenance.json"),
     }
     params = StdioServerParameters(command=sys.executable, args=["-m", "super_agents"], env=env)
 

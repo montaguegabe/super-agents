@@ -12,6 +12,7 @@ from .backend_config import OPENBASE_CLOUD_BACKEND, configured_backend_from_envi
 from .config_profiles import CLAUDE_MCP_CONFIG_PATH_ENV, CLAUDE_SETTINGS_PATH_ENV
 
 JsonObject = dict[str, Any]
+_UNSET_SYSTEM_PROMPT = object()
 
 CLAUDE_PERMISSION_MODE = "bypassPermissions"
 CLAUDE_PERMISSION_MODE_ENV = "SUPER_AGENTS_CLAUDE_PERMISSION_MODE"
@@ -72,8 +73,13 @@ def agent_options(
     can_use_tool: Any | None = None,
     backend: str | None = None,
     disallowed_tools: tuple[str, ...] = (),
+    system_prompt: Any = _UNSET_SYSTEM_PROMPT,
 ) -> Any:
     managed_options = managed_claude_config_options()
+    if system_prompt is not _UNSET_SYSTEM_PROMPT:
+        managed_options.pop("system_prompt", None)
+        if system_prompt is not None:
+            managed_options["system_prompt"] = system_prompt
     permission_mode = resolve_permission_mode()
     # AGENT_MODEL mirrors the Codex-side shell injection: agents that spawn
     # Super Agents inherit their own model as the child default.

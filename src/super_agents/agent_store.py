@@ -188,7 +188,10 @@ class Store:
                 self._init_schema()
 
     def _init_schema(self) -> None:
+        from .claude_turn_output import initialize_turn_output
+
         with self.connect() as conn:
+            initialize_turn_output(conn)
             conn.executescript(
                 """
                 create table if not exists sessions (

@@ -289,6 +289,8 @@ Openbase, `~/.openbase/dispatcher-config.json`.
 
 Profiles are opt-in for embedding applications. Selected files must exist and parse successfully. They do not rewrite user configuration or relocate authentication and history. Codex's runtime `--profile` flag is not accepted by `app-server`; the client loads TOML into per-thread config instead. Native file hooks are not guaranteed to execute from app-server config overrides; Super Agents supplies its thread identity through developer instructions and shell environment independently.
 
+With a Claude SDK supporting system-prompt snapshots and Claude Code CLI 2.1.257 or later, session `developerInstructions` and assigned identity are composed into the configured system prompt. Append mode preserves the stock preset and global base; replace mode preserves the custom base. Snapshotting is disabled so resumed sessions receive current policy without losing their history. A cached client reconnects at the next turn only when its effective policy changes. Active steers retain their existing per-query delivery without interrupting the client. Older SDKs keep the legacy user-context instruction path; no dependency upgrade is performed automatically. Explicit quiet instructions remain intact, and this integration does not add announcement hooks.
+
 Openbase-specific defaults:
 
 | Config key | Description |
