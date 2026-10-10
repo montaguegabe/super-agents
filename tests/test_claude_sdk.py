@@ -1763,3 +1763,57 @@ async def test_notification_hook_failure_does_not_fail_turn(tmp_path):
     turn = await client.start_turn_by_label(LabelQueryInput(label="events"), {"prompt": "hello"})
     await wait_for(lambda: client.store.get_turn(turn["turnId"]).status == "completed")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_warm_session_connects_the_cli_ahead_of_the_first_turn(tmp_path):
+    store = Store(tmp_path / "warm.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
+    thread_id = started["threadId"]
+    before = FakeClaudeSDKClient.disconnect_count
+
+    result = await client.warm_session_by_label(
+        LabelQueryInput(thread_id=thread_id), {"model": "claude-opus", "reasoningEffort": "high"}
+    )
+    assert result["warmed"] is True and result["connected"] is True
+    assert result["threadId"] == thread_id and result["backend"] == client.backend
+    warmed = client._sdk_clients[thread_id]
+    assert warmed.connected is True
+    assert warmed.options.kwargs["model"] == "claude-opus"
+    assert warmed.prompt == ""  # nothing queried
+
+    # Warming again is idempotent: same client, nothing reconnected.
+    again = await client.warm_session_by_label(
+        LabelQueryInput(thread_id=thread_id), {"model": "claude-opus", "reasoningEffort": "high"}
+    )
+    assert again["warmed"] is True and again["connected"] is False
+    assert client._sdk_clients[thread_id] is warmed
+
+    # The first turn with the same model and effort reuses the warmed client.
+    sdk = fake_sdk_loader()
+    session = store.get_session(thread_id)
+    same = await client._sdk_client_for(session, "claude-opus", "high", None, sdk)
+    assert same is warmed
+    assert FakeClaudeSDKClient.disconnect_count == before
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_warm_session_leaves_a_busy_session_alone(tmp_path):
+    store = Store(tmp_path / "busy.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
+    thread_id = started["threadId"]
+    store.update_session(thread_id, status="running", active_turn_id="turn-busy")
+
+    result = await client.warm_session_by_label(LabelQueryInput(thread_id=thread_id))
+    assert result == {
+        "backend": client.backend,
+        "threadId": thread_id,
+        "name": "worker",
+        "warmed": False,
+        "reason": "busy",
+    }
+    assert thread_id not in client._sdk_clients
+    await client.close()

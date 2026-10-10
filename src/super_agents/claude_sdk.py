@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -288,6 +289,49 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             "threadId": session.id,
             "session": session.to_json(),
         }
+
+    async def warm_session_by_label(
+        self, input_data: LabelQueryInput, turn_input: JsonObject | None = None
+    ) -> JsonObject:
+        """Connect a session's Claude CLI now so its next turn finds it open.
+
+        A turn on a session this client has not driven yet spawns the CLI
+        with ``--resume`` and waits for its handshake before the prompt goes
+        out (about 2.4 s on a cloud workspace for a voice dispatcher). Callers
+        that know a turn is coming call this ahead of time, concurrently with
+        whatever else they are starting. ``turn_input`` carries the ``model``,
+        ``reasoningEffort`` and ``serviceTier`` the coming turn will use, so
+        the connected client matches it and is reused rather than replaced.
+        A busy session (a turn in flight) is left alone. Nothing is queried;
+        the session's conversation is unchanged.
+        """
+        session = self._resolve_session(input_data)
+        turn_input = turn_input or {}
+        if self._session_is_busy(session):
+            return self._warm_result(session, warmed=False, reason="busy")
+        sdk = self._require_sdk()
+        model = _optional_str(turn_input.get("model")) or session.model or self._default_model()
+        reasoning_effort = _optional_str(turn_input.get("reasoningEffort")) or self._default_reasoning_effort()
+        service_tier = _optional_str(turn_input.get("serviceTier"))
+        started = time.monotonic()
+        lock = self._session_locks.setdefault(session.id, asyncio.Lock())
+        async with lock, self._cross_process_session_lock(session.id):
+            session = self.store.get_session(session.id)
+            if self._session_is_busy(session):
+                return self._warm_result(session, warmed=False, reason="busy")
+            already = self._sdk_clients.get(session.id)
+            client = await self._sdk_client_for(session, model, reasoning_effort, service_tier, sdk)
+        connected = client is not already
+        logger.info(
+            "dispatch_timing stage=super_agent_session_warmed thread_id=%s connected=%s elapsed_ms=%d",
+            session.id,
+            connected,
+            int((time.monotonic() - started) * 1000),
+        )
+        return self._warm_result(session, warmed=True, connected=connected)
+
+    def _warm_result(self, session: Session, *, warmed: bool, **fields: Any) -> JsonObject:
+        return {"backend": self.backend, "threadId": session.id, "name": session.name, "warmed": warmed, **fields}
 
     async def read_by_label(self, input_data: LabelQueryInput, include_turns: bool = False) -> JsonObject:
         # Thread reads are sqlite queries, a log tail, and — for imported
