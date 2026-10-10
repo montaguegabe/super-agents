@@ -64,6 +64,7 @@ from super_agents.claude_options import (  # noqa: F401  (constants re-exported 
     CLAUDE_SERVICE_TIER_EFFORTS,
 )
 from super_agents.claude_options import (
+    _system_prompt_option,
     agent_options as _agent_options,
 )
 from super_agents.claude_options import (
@@ -79,6 +80,11 @@ from super_agents.claude_prompts import (
 )
 from super_agents.claude_prompts import (
     with_claude_turn_context as _with_claude_turn_context,
+)
+from super_agents.claude_system_prompt import (
+    compose_system_prompt,
+    supports_refreshable_system_prompt,
+    system_prompt_fingerprint,
 )
 from super_agents.claude_transcript import transcript_turn_views
 from super_agents.claude_steering import ActiveSteeringMixin
@@ -142,6 +148,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._sdk_client_tool_policies: dict[str, tuple[str, ...]] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._sdk_client_models: dict[str, str | None] = {}
+        self._sdk_client_system_prompts: dict[str, str] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._queue_tasks: dict[str, asyncio.Task[None]] = {}
         self._turn_tasks: set[asyncio.Task[None]] = set()
@@ -320,7 +327,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             if self._session_is_busy(session):
                 return self._warm_result(session, warmed=False, reason="busy")
             already = self._sdk_clients.get(session.id)
-            client = await self._sdk_client_for(session, model, reasoning_effort, service_tier, sdk)
+            client = await self._sdk_client_for(
+                session, model, reasoning_effort, service_tier, sdk,
+                developer_instructions=_optional_str(turn_input.get("developerInstructions")),
+            )
         connected = client is not already
         logger.info(
             "dispatch_timing stage=super_agent_session_warmed thread_id=%s connected=%s elapsed_ms=%d",
@@ -670,6 +680,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             service_tier,
             sdk,
             announce_intro=announce_intro,
+            developer_instructions=_optional_str(turn_input.get("developerInstructions")),
         )
         return turn
 
@@ -684,6 +695,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         sdk: Any,
         *,
         announce_intro: bool = False,
+        developer_instructions: str | None = None,
     ) -> None:
         """Run a turn in the background, retaining the task so it cannot be garbage collected."""
         task = asyncio.create_task(
@@ -696,6 +708,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 service_tier,
                 sdk,
                 announce_intro=announce_intro,
+                developer_instructions=developer_instructions,
             )
         )
         self._turn_tasks.add(task)
@@ -712,6 +725,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         sdk: Any,
         *,
         announce_intro: bool = False,
+        developer_instructions: str | None = None,
     ) -> None:
         lock = self._session_locks.setdefault(session_id, asyncio.Lock())
         async with lock, self._cross_process_session_lock(session_id):
@@ -733,7 +747,16 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     reasoning_effort,
                     service_tier,
                     sdk,
+                    developer_instructions=developer_instructions,
                 )
+                if supports_refreshable_system_prompt(sdk):
+                    # Policy/identity were rebuilt from the locked session for
+                    # the system prompt. Keep the original user task separate.
+                    prompt = _with_claude_turn_context(
+                        self.store.get_turn(turn_id).prompt,
+                        cwd=session.cwd,
+                        developer_instructions=None,
+                    )
                 if announce_intro:
                     # The greeting precedes the first prompt so the user hears
                     # who picked up the task before any work starts.
@@ -1209,7 +1232,15 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
+        *,
+        developer_instructions: str | None = None,
     ) -> Any:
+        system_prompt = compose_system_prompt(
+            _system_prompt_option(),
+            self._session_developer_instructions(session, developer_instructions),
+            sdk,
+        )
+        prompt_fingerprint = system_prompt_fingerprint(system_prompt)
         effective_effort = _claude_effort(reasoning_effort, service_tier)
         policy = self._disallowed_tools_for_session
         disallowed_tools = tuple(policy(session)) if policy else ()
@@ -1226,6 +1257,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             existing is not None
             and self._sdk_client_efforts.get(session.id) == (effective_effort, service_tier)
             and self._sdk_client_tool_policies.get(session.id, ()) == disallowed_tools
+            and self._sdk_client_system_prompts.get(session.id) == prompt_fingerprint
         ):
             resolved_model = _openbase_cloud_claude_model(model, self.backend)
             # Reasserting the same model adds a control-protocol round trip
@@ -1257,6 +1289,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             ),
             backend=self.backend,
             disallowed_tools=disallowed_tools,
+            system_prompt=system_prompt,
         )
         replace_super_agents_stdio_server(options, client=self)
         client = sdk.ClaudeSDKClient(options=options)
@@ -1274,6 +1307,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 ",".join(disallowed_tools),
             )
         self._sdk_clients[session.id] = client
+        self._sdk_client_system_prompts[session.id] = prompt_fingerprint
         self._sdk_client_tool_policies[session.id] = disallowed_tools
         self._sdk_client_efforts[session.id] = (effective_effort, service_tier)
         self._sdk_client_models[session.id] = _openbase_cloud_claude_model(model, self.backend)
@@ -1311,6 +1345,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._sdk_client_tool_policies.pop(session_id, None)
         self._sdk_client_efforts.pop(session_id, None)
         self._sdk_client_models.pop(session_id, None)
+        self._sdk_client_system_prompts.pop(session_id, None)
         if client is None:
             return
         disconnect = getattr(client, "disconnect", None)
@@ -1429,22 +1464,23 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         except KeyError:
             return None
 
-    def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
-        prompt = str(turn_input["prompt"])
-        developer_instructions = _combine_developer_instructions(
-            session.developer_instructions,
-            _optional_str(turn_input.get("developerInstructions")),
-        )
-        developer_instructions = with_super_agent_identity_instructions(
-            developer_instructions,
+    def _session_developer_instructions(self, session: Session, overlay: str | None = None) -> str | None:
+        return with_super_agent_identity_instructions(
+            _combine_developer_instructions(session.developer_instructions, overlay),
             session.name,
             session.id,
             session.agent_name,
         )
+
+    def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
+        # Also used by active steers: retain their existing per-query context;
+        # never disconnect or replace a running client's system prompt mid-turn.
         return _with_claude_turn_context(
-            prompt,
+            str(turn_input["prompt"]),
             cwd=session.cwd,
-            developer_instructions=developer_instructions,
+            developer_instructions=self._session_developer_instructions(
+                session, _optional_str(turn_input.get("developerInstructions"))
+            ),
         )
 
     def _require_sdk(self) -> Any:
