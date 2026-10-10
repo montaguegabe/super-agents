@@ -279,9 +279,19 @@ def test_machine_token_timeout_does_not_blame_sign_in(monkeypatch) -> None:
     assert "login" not in message
 
 
-def test_machine_token_missing_login_keeps_the_login_hint(monkeypatch) -> None:
-    timeouts = _token_runs(monkeypatch, [SimpleNamespace(returncode=1, stdout="")])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        OSError("CLI unavailable"),
+        SimpleNamespace(returncode=1, stdout=""),
+        SimpleNamespace(returncode=0, stdout=" \n"),
+    ],
+)
+@pytest.mark.parametrize("after_timeout", [False, True])
+def test_machine_token_missing_login_keeps_the_login_hint(monkeypatch, outcome, after_timeout) -> None:
+    outcomes = [subprocess.TimeoutExpired(["openbase-coder"], 30)] if after_timeout else []
+    timeouts = _token_runs(monkeypatch, [*outcomes, outcome])
 
     with pytest.raises(RuntimeError, match="openbase-coder login"):
         _openbase_cloud_anthropic_auth_token()
-    assert timeouts == [30]
+    assert timeouts == ([30, 60] if after_timeout else [30])
