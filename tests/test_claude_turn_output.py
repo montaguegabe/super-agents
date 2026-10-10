@@ -54,3 +54,26 @@ async def test_new_tool_work_clears_response_finished_marker(tmp_path):
     assert store.get_turn(turn.id).response_finished_at is None
     assert read_turn_output(store, turn.id) == []
     await client.close()
+
+
+def test_steers_remain_between_replies_after_reopen(tmp_path):
+    from super_agents.claude_turn_output import append_turn_output, ordered_turn_items
+
+    store = Store(tmp_path / "state.sqlite3")
+    session = store.create_session(name="chat", cwd=str(tmp_path), command=[])
+    turn = store.create_turn(session.id, "Hello", status="running")
+    append_turn_output(store, turn.id, "First answer")
+    store.append_turn_steer(turn.id, "Follow up")
+    store.append_turn_steer(turn.id, "Clarification")
+    append_turn_output(store, turn.id, "Second answer")
+    store.update_turn(turn.id, status="cancelled")
+    reopened = Store(store.path)
+    items = ordered_turn_items(reopened, reopened.get_turn(turn.id))
+    assert [item.get("text") or item["content"][0]["text"] for item in items] == [
+        "Hello",
+        "First answer",
+        "Follow up",
+        "Clarification",
+        "Second answer",
+    ]
+    assert len({item["id"] for item in items}) == 5
