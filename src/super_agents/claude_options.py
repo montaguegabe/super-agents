@@ -141,28 +141,43 @@ def _openbase_cloud_anthropic_base_url() -> str:
     return f"{configured}{OPENBASE_CLOUD_ANTHROPIC_PATH}"
 
 
+# The CLI starts a full Python process just to print the token; on a machine
+# that is badly overloaded that can take tens of seconds, so one slow attempt
+# is retried with more time before the turn fails.
+MACHINE_TOKEN_TIMEOUTS_SECONDS = (30, 60)
+MACHINE_TOKEN_LOGIN_HINT = (
+    "Unable to get an Openbase Cloud machine token. Run `openbase-coder login`, then restart services."
+)
+
+
 def _openbase_cloud_anthropic_auth_token() -> str:
     configured = os.environ.get(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, "").strip()
     if configured:
         return configured
-    try:
-        result = subprocess.run(
-            ["openbase-coder", "auth", "print-machine-token"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(
-            "Unable to get an Openbase Cloud machine token. Run `openbase-coder login`, then restart services."
-        ) from exc
-    token = result.stdout.strip()
-    if result.returncode != 0 or not token:
-        raise RuntimeError(
-            "Unable to get an Openbase Cloud machine token. Run `openbase-coder login`, then restart services."
-        )
-    return token
+    for timeout in MACHINE_TOKEN_TIMEOUTS_SECONDS:
+        try:
+            result = subprocess.run(
+                ["openbase-coder", "auth", "print-machine-token"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError as exc:
+            raise RuntimeError(MACHINE_TOKEN_LOGIN_HINT) from exc
+        token = result.stdout.strip()
+        if result.returncode != 0 or not token:
+            raise RuntimeError(MACHINE_TOKEN_LOGIN_HINT)
+        return token
+    # Not a sign-in problem: telling the user to log in again would send them
+    # the wrong way (field test 2026-10-09, a valid token on a CPU-starved Mac).
+    raise RuntimeError(
+        "Timed out reading the Openbase Cloud machine token: `openbase-coder auth "
+        f"print-machine-token` took longer than {MACHINE_TOKEN_TIMEOUTS_SECONDS[-1]} "
+        "seconds. This computer may be overloaded; try again in a moment."
+    )
 
 
 def claude_extra_args() -> dict[str, str | None] | None:

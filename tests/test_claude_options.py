@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from super_agents.claude_options import (
     CLAUDE_EXTRA_ARGS_ENV,
     OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV,
     OPENBASE_CLOUD_ANTHROPIC_BASE_URL_ENV,
+    _openbase_cloud_anthropic_auth_token,
     agent_options,
     claude_extra_args,
 )
@@ -228,3 +230,58 @@ def test_cloud_family_aliases_pin_latest_but_explicit_old_ids_still_resolve():
         assert openbase_cloud_claude_model(model, "openbase_cloud") == model
     for old in ("claude-fable-5", "claude-opus-4-8", "claude-haiku-4-5"):
         assert openbase_cloud_claude_model(old, "openbase_cloud") == old
+
+
+def _token_runs(monkeypatch, outcomes):
+    """Patch subprocess.run to play ``outcomes`` in order; returns the timeouts used."""
+    monkeypatch.delenv(OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV, raising=False)
+    timeouts: list[float] = []
+    queue = list(outcomes)
+
+    def fake_run(argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        outcome = queue.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("super_agents.claude_options.subprocess.run", fake_run)
+    return timeouts
+
+
+def test_machine_token_retries_a_slow_cli_with_more_time(monkeypatch) -> None:
+    timeouts = _token_runs(
+        monkeypatch,
+        [
+            subprocess.TimeoutExpired(["openbase-coder"], 30),
+            SimpleNamespace(returncode=0, stdout="obmt_token\n"),
+        ],
+    )
+
+    assert _openbase_cloud_anthropic_auth_token() == "obmt_token"
+    assert timeouts == [30, 60]
+
+
+def test_machine_token_timeout_does_not_blame_sign_in(monkeypatch) -> None:
+    _token_runs(
+        monkeypatch,
+        [
+            subprocess.TimeoutExpired(["openbase-coder"], 30),
+            subprocess.TimeoutExpired(["openbase-coder"], 60),
+        ],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _openbase_cloud_anthropic_auth_token()
+
+    message = str(exc_info.value)
+    assert "Timed out" in message
+    assert "login" not in message
+
+
+def test_machine_token_missing_login_keeps_the_login_hint(monkeypatch) -> None:
+    timeouts = _token_runs(monkeypatch, [SimpleNamespace(returncode=1, stdout="")])
+
+    with pytest.raises(RuntimeError, match="openbase-coder login"):
+        _openbase_cloud_anthropic_auth_token()
+    assert timeouts == [30]
