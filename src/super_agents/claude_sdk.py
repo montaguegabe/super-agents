@@ -126,6 +126,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     """Super Agents backend using Claude Code without Anthropic API keys."""
 
     backend = "claude_code"
+    # Version 1 includes both optional callbacks and crash-safe validation.
+    embedding_callbacks_version = 1
 
     def __init__(
         self,

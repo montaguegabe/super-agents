@@ -1,6 +1,7 @@
 """Application callbacks run at SDK connection and verified turn boundaries."""
 
 import asyncio
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -20,6 +21,14 @@ from test_claude_sdk import (
     reset_fake_claude_sdk,  # noqa: F401 -- isolate managed configuration
     wait_for,
 )
+
+
+def test_embedding_callback_capability_advertises_optional_constructor_contract():
+    assert getattr(ClaudeAgentSdkClient, "embedding_callbacks_version", 0) == 1
+    parameters = inspect.signature(ClaudeAgentSdkClient).parameters
+    for name in ("configure_session", "validate_turn_result"):
+        assert parameters[name].default is None
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 @pytest.mark.parametrize("permission_mode", ["default", "bypassPermissions"])
