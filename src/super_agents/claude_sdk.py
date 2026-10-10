@@ -338,7 +338,11 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 return self._warm_result(session, warmed=False, reason="busy")
             already = self._sdk_clients.get(session.id)
             client = await self._sdk_client_for(
-                session, model, reasoning_effort, service_tier, sdk,
+                session,
+                model,
+                reasoning_effort,
+                service_tier,
+                sdk,
                 developer_instructions=_optional_str(turn_input.get("developerInstructions")),
             )
         connected = client is not already
@@ -755,9 +759,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             # turns (advancing the conversation) while this one waited.
             session = self.store.get_session(session_id)
             self._register_active_owner(session_id)
-            cancellation_watch = asyncio.create_task(
-                self._watch_turn_cancellation(turn_id, asyncio.current_task())
-            )
+            cancellation_watch = asyncio.create_task(self._watch_turn_cancellation(turn_id, asyncio.current_task()))
             try:
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
@@ -771,9 +773,15 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     sdk,
                     developer_instructions=developer_instructions,
                 )
-                if supports_refreshable_system_prompt(sdk):
-                    # Policy/identity were rebuilt from the locked session for
-                    # the system prompt. Keep the original user task separate.
+                if supports_refreshable_system_prompt(sdk) and not session.backend_session_id:
+                    # A fresh session: policy/identity were rebuilt from the
+                    # locked session for the system prompt. Keep the original
+                    # user task separate. A resumed CLI session is not given
+                    # that trust: on 2026-10-10 the Dispatcher thread ran
+                    # every turn after the policy moved out of the per-turn
+                    # context with no dispatcher instructions in effect and
+                    # refused to transfer ("that capability was available
+                    # earlier"), so resumed turns keep them in-band too.
                     prompt = _with_claude_turn_context(
                         self.store.get_turn(turn_id).prompt,
                         cwd=session.cwd,
@@ -1106,7 +1114,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         useful = _message_preview(message)
         if isinstance(getattr(message, "content", None), list) and not hasattr(message, "tool_use_result"):
             await asyncio.to_thread(
-                self.store.update_turn, turn_id, only_if_active=True, response_finished_at=None,
+                self.store.update_turn,
+                turn_id,
+                only_if_active=True,
+                response_finished_at=None,
             )
         if useful:
             turn = await asyncio.to_thread(
@@ -1126,7 +1137,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             if item_id is None:
                 return useful
             self._notify_turn(
-                "item/completed", session_id, turn_id,
+                "item/completed",
+                session_id,
+                turn_id,
                 item={"type": "agentMessage", "id": item_id, "text": useful},
             )
         _note_task_lifecycle(active_background_tasks, message)
@@ -1170,7 +1183,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         # EOF, resets and drain timeouts after writing are ambiguous, not proof
         # of rejection. Keep the registry and never enqueue/resume as a fallback.
         self.store.update_session(
-            session.id, last_observed_state="Claude Code inbox submission unconfirmed",
+            session.id,
+            last_observed_state="Claude Code inbox submission unconfirmed",
         )
         return {
             "backend": self.backend,
@@ -1187,8 +1201,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             "message": (
                 "Inbox submission is unconfirmed; no managed turn was started or queued. "
                 "Inspect thread state before any retry; the frame may still be consumed."
-                if result.written or result.may_have_been_written else
-                "Nothing was delivered or queued. The foreign inbox is unavailable; no local resume was attempted."
+                if result.written or result.may_have_been_written
+                else "Nothing was delivered or queued. The foreign inbox is unavailable; no local resume was attempted."
             ),
             "drain": "inbox_socket",
         }
@@ -1232,7 +1246,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             error = {"message": fields.get("last_observed_state")} if status == "failed" else None
             self._notify_turn(
                 "turn/failed" if status == "failed" else "turn/completed",
-                session_id, turn_id, **({"error": error} if error else {}),
+                session_id,
+                turn_id,
+                **({"error": error} if error else {}),
             )
 
     def _finish_cancelled_turn(self, session_id: str, turn_id: str) -> None:
