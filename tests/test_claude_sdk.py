@@ -1620,7 +1620,9 @@ async def test_steer_routes_foreign_session_to_inbox_socket(monkeypatch: pytest.
             await server.stop()
 
     assert result["delivery"] == "inbox"
-    assert result["steered"] is True
+    assert result["steered"] is False
+    assert result["confirmed"] is False
+    assert result["turnId"] is None
     assert result["nativeSteer"] is False
     # The steer went to the socket, not into a locally-run turn.
     assert FakeClaudeSDKClient.prompts == []
@@ -1646,9 +1648,12 @@ async def test_steer_falls_back_to_local_when_inbox_socket_dead(
     client._sdk_clients = {}
 
     # Record points at a socket that does not exist: the owning process is gone.
-    (registry / "claude-dead-1.json").write_text(
-        json.dumps({"sessionId": "claude-dead-1", "socket": str(tmp_path / "gone.sock")})
-    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="dead-inbox-", dir="/tmp") as socket_root:
+        (registry / "claude-dead-1.json").write_text(
+            json.dumps({"sessionId": "claude-dead-1", "socket": str(Path(socket_root) / "gone.sock")})
+        )
 
     result = await client.steer_by_label(
         LabelQueryInput(label="dead-sess"),

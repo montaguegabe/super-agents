@@ -532,9 +532,12 @@ def _tool_super_agents_steer(client: SuperAgentsClient) -> ToolDefinition:
         title="Steer Super Agents By Name",
         description=(
             "Send steering input to the latest active Super Agents turn matching a thread name. "
-            "If no active turn exists, starts a new turn on the same thread. "
-            "If the active Claude SDK owner is unavailable, saves a queued follow-up instead. "
-            "Report queued or steered only when the result explicitly confirms it; an error queues nothing automatically."
+            "An idle managed Claude session with a retained owner on this event loop continues through that owner. "
+            "Otherwise idle sessions can start a new turn only when no live foreign inbox owns the conversation. "
+            "A foreign inbox write is unconfirmed submission, not resumed work: delivery=inbox, confirmed=false, "
+            "startedImmediately=false and turnId=null. Never blindly retry or queue after a written or ambiguous frame. "
+            "An unavailable active SDK owner may save a durable queued follow-up; inspect queued and its turnId. "
+            "startedImmediately with turnId confirms a started turn, not completion. Errors queue nothing automatically."
         ),
         input_schema=object_schema(
             {**name_query_properties(include_output_options=False), "prompt": {"type": "string"},

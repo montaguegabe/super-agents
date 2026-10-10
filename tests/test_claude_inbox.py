@@ -133,7 +133,8 @@ async def test_deliver_steer_writes_expected_frame(short_sock_dir: Path) -> None
     assert msg["priority"] == "now"
     assert msg["from"] == "openbase"
     assert msg["message"] == {"role": "user", "content": "stop and refactor instead"}
-    assert isinstance(msg["msg_id"], str) and msg["msg_id"]
+    assert msg["msg_id"] == result.message_id
+    assert result.to_json()["confirmed"] is False
 
 
 @pytest.mark.asyncio
@@ -152,7 +153,7 @@ async def test_deliver_steer_without_token_sends_no_auth_line(short_sock_dir: Pa
 
 
 @pytest.mark.asyncio
-async def test_deliver_steer_session_mismatch_is_reported_as_rejected(short_sock_dir: Path) -> None:
+async def test_deliver_steer_peer_close_is_unconfirmed(short_sock_dir: Path) -> None:
     sock = short_sock_dir / "sess.sock"
     server = FakeInboxServer(sock, expect_token=None, session_id="the-real-one")
     await server.start()
@@ -162,13 +163,15 @@ async def test_deliver_steer_session_mismatch_is_reported_as_rejected(short_sock
     finally:
         await server.stop()
 
-    assert result.written is False
-    assert result.reason == "rejected_by_peer"
+    assert result.written is True
+    assert result.may_have_been_written is True
+    assert result.confirmed is False
+    assert result.reason == "peer_closed_without_ack"
 
 
 @pytest.mark.asyncio
-async def test_deliver_steer_dead_socket_is_unreachable(tmp_path: Path) -> None:
-    record = InboxRecord(session_id="x", socket=str(tmp_path / "nope.sock"), token=None)
+async def test_deliver_steer_dead_socket_is_unreachable(short_sock_dir: Path) -> None:
+    record = InboxRecord(session_id="x", socket=str(short_sock_dir / "nope.sock"), token=None)
     result = await deliver_steer(record, "go", target_session_id="x")
     assert result.written is False
     assert result.reason == "socket_unreachable"
@@ -234,3 +237,14 @@ def test_registry_dir_defaults_into_claude_home(tmp_path: Path, monkeypatch: pyt
     monkeypatch.delenv("CLAUDE_INBOX_REGISTRY_DIR", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     assert inbox_registry_dir() == tmp_path / ".claude" / "inbox-registry"
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), PermissionError(13, "denied")])
+async def test_connect_failure_without_dead_socket_proof_does_not_allow_resume(monkeypatch, error):
+    async def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(asyncio, "open_unix_connection", fail)
+    result = await deliver_steer(InboxRecord(session_id="s", socket="unused"), "followup")
+    assert result.reason == "connect_unavailable"
+    assert not result.written and not result.may_have_been_written
+    assert result.message_id
