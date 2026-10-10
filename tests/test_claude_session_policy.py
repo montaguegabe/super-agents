@@ -41,7 +41,9 @@ def test_replace_mode_keeps_custom_base(tmp_path):
     path = tmp_path / "base.md"
     path.write_text("Custom replacement base.")
     assert compose_system_prompt({"type": "file", "path": str(path)}, "Session policy", CurrentSdk()) == {
-        "type": "custom", "prompt": "Custom replacement base.\n\nSession policy", "snapshot": False,
+        "type": "custom",
+        "prompt": "Custom replacement base.\n\nSession policy",
+        "snapshot": False,
     }
 
 
@@ -59,10 +61,14 @@ async def test_fresh_worker_policy_and_identity_are_system_not_user(tmp_path, mo
     monkeypatch.setenv("SUPER_AGENTS_BASE_INSTRUCTIONS_PATH", str(base))
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=CurrentSdk)
-    thread = await client.start_thread({
-        "name": "reader", "agentName": "Cooper", "cwd": str(tmp_path),
-        "developerInstructions": "Report completion. Respect explicit quiet requests.",
-    })
+    thread = await client.start_thread(
+        {
+            "name": "reader",
+            "agentName": "Cooper",
+            "cwd": str(tmp_path),
+            "developerInstructions": "Report completion. Respect explicit quiet requests.",
+        }
+    )
     await _turn(client, store, thread["threadId"], "Read the file silently. No speech.")
     options = FakeClaudeSDKClient.options_seen[-1].kwargs
     system = options["system_prompt"]
@@ -77,6 +83,13 @@ async def test_fresh_worker_policy_and_identity_are_system_not_user(tmp_path, mo
     assert "Your name is Cooper." not in query
     assert "Report completion." not in query
     assert f"Current working directory: {tmp_path}" in query
+    # A resumed session (the CLI keeps the system prompt it was created with;
+    # 2026-10-10 Dispatcher refusal) gets the policy in-band on later turns.
+    await _turn(client, store, thread["threadId"], "Read it again.")
+    resumed = FakeClaudeSDKClient.prompts[-1]
+    assert resumed.endswith("Read it again.")
+    assert "Report completion." in resumed
+    assert "Your name is Cooper." in resumed
     await client.close()
 
 
@@ -84,10 +97,14 @@ async def test_fresh_worker_policy_and_identity_are_system_not_user(tmp_path, mo
 async def test_resumed_policy_identity_changes_refresh_without_new_session(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=CurrentSdk)
-    thread = await client.start_thread({
-        "name": "reader", "agentName": "Old Name", "cwd": str(tmp_path),
-        "developerInstructions": "Old rules.",
-    })
+    thread = await client.start_thread(
+        {
+            "name": "reader",
+            "agentName": "Old Name",
+            "cwd": str(tmp_path),
+            "developerInstructions": "Old rules.",
+        }
+    )
     sid = thread["threadId"]
     first = await _turn(client, store, sid)
     backend_id = store.get_session(sid).backend_session_id
@@ -114,16 +131,25 @@ async def test_active_quiet_steer_preserves_client_and_pending_context(tmp_path)
     FakeClaudeSDKClient.blocked_prompts = {"first"}
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=CurrentSdk)
-    sid = (await client.start_thread({
-        "name": "reader", "cwd": str(tmp_path),
-        "developerInstructions": "Respect explicit requests for silence.",
-    }))["threadId"]
+    sid = (
+        await client.start_thread(
+            {
+                "name": "reader",
+                "cwd": str(tmp_path),
+                "developerInstructions": "Respect explicit requests for silence.",
+            }
+        )
+    )["threadId"]
     first = await client.start_turn_by_label(LabelQueryInput(thread_id=sid), {"prompt": "first"})
     await wait_for(lambda: bool(FakeClaudeSDKClient.prompts))
     existing = client._sdk_clients[sid]
-    followup = await client.start_turn_by_label(LabelQueryInput(thread_id=sid), {
-        "prompt": "Finish silently.", "developerInstructions": "No speech for this update.",
-    })
+    followup = await client.start_turn_by_label(
+        LabelQueryInput(thread_id=sid),
+        {
+            "prompt": "Finish silently.",
+            "developerInstructions": "No speech for this update.",
+        },
+    )
     await wait_for(lambda: store.get_turn(first["turnId"]).status == "completed")
     assert followup["turnId"] == first["turnId"]
     assert client._sdk_clients[sid] is existing
@@ -157,9 +183,13 @@ async def test_new_process_resumes_same_history_with_latest_stored_policy(tmp_pa
 async def test_turn_overlay_is_scoped_and_warm_options_match(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=CurrentSdk)
-    thread = await client.start_thread({
-        "name": "reader", "cwd": str(tmp_path), "developerInstructions": "Persistent policy.",
-    })
+    thread = await client.start_thread(
+        {
+            "name": "reader",
+            "cwd": str(tmp_path),
+            "developerInstructions": "Persistent policy.",
+        }
+    )
     sid = thread["threadId"]
     turn_options = {"developerInstructions": "Only this turn: stay silent."}
     await client.warm_session_by_label(LabelQueryInput(thread_id=sid), turn_options)
