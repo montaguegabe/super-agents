@@ -926,15 +926,18 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     if not _is_noop_result(result_message):
                         last_result_message = result_message
                         consumed_any_result = True
-                        # The response is done even if background tasks keep
-                        # the turn open; record that so a process exit later
-                        # cannot turn finished work into a "failed" turn.
+                        # The default can recover finished model work after a
+                        # process exit. An embedding validator must succeed
+                        # before that recovery shortcut is safe to persist.
                         await asyncio.to_thread(
                             self.store.update_turn,
                             turn_id,
                             only_if_active=True,
                             response_finished_at=(
-                                iso_now() if self._session_pending_results.get(session_id, 0) <= 1 else None
+                                iso_now()
+                                if self._validate_turn_result is None
+                                and self._session_pending_results.get(session_id, 0) <= 1
+                                else None
                             ),
                         )
                         # A steer can register a pending result while the
@@ -989,6 +992,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         status="completed",
                         finished_at=iso_now(),
                         last_useful_message=last_useful_message or None,
+                        **({"response_finished_at": iso_now()} if self._validate_turn_result is not None else {}),
                     )
                     if completed.status == "cancelled":
                         raise asyncio.CancelledError

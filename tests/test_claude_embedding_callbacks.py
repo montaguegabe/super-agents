@@ -116,6 +116,7 @@ async def test_validator_runs_after_background_work_and_before_completion(tmp_pa
         release.set()
         await asyncio.gather(*client._turn_tasks)
         assert store.get_turn(turn_id).status == "completed"
+        assert store.get_turn(turn_id).response_finished_at is not None
         assert observed == ["synthesized findings"]
     finally:
         release.set()
@@ -256,3 +257,42 @@ async def test_cancellation_interrupts_awaiting_validator(tmp_path):
     assert store.get_session(thread["threadId"]).active_turn_id is None
     assert not client._sdk_clients
     await client.close()
+
+
+@pytest.mark.parametrize("with_validator", [False, True])
+async def test_orphan_recovery_never_completes_unvalidated_work(tmp_path, monkeypatch, with_validator):
+    monkeypatch.setattr("super_agents.claude_orphans._ORPHAN_SWEEP_MIN_AGE_SECONDS", 0)
+    BackgroundTaskClaudeSDKClient.tasks_done = asyncio.Event()
+    BackgroundTaskClaudeSDKClient.followup = True
+    entered = asyncio.Event()
+    store = Store(tmp_path / "store.sqlite3")
+
+    async def validate(*args):
+        entered.set()
+        await asyncio.Event().wait()
+
+    owner = ClaudeAgentSdkClient(
+        store=store, sdk_loader=lambda: BackgroundTaskSdk(),
+        validate_turn_result=validate if with_validator else None,
+    )
+    thread_id = (await owner.start_thread({"name": "worker", "cwd": str(tmp_path)}))["threadId"]
+    turn_id = (await owner.start_turn_by_label(LabelQueryInput(label="worker"), {"prompt": "inspect"}))["turnId"]
+    await wait_for(lambda: "waiting on 2 background" in (store.get_session(thread_id).last_observed_state or ""))
+    if with_validator:
+        BackgroundTaskClaudeSDKClient.tasks_done.set()
+        await asyncio.wait_for(entered.wait(), 2)
+    # Model work has finished in both cases, but application validation has not.
+    assert bool(store.get_turn(turn_id).response_finished_at) is not with_validator
+    tasks = list(owner._turn_tasks)
+    for task in tasks:
+        task.cancel()  # Lose the owner without recording a user cancellation.
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await owner.close()
+    assert store.get_turn(turn_id).status == "running"
+
+    observer = ClaudeAgentSdkClient(store=Store(store.path), sdk_loader=fake_sdk_loader)
+    try:
+        assert observer.reconcile_orphaned_turns() == 1
+        assert store.get_turn(turn_id).status == ("failed" if with_validator else "completed")
+    finally:
+        await observer.close()
