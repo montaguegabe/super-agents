@@ -1956,3 +1956,61 @@ async def test_status_resweeps_turns_orphaned_after_startup(monkeypatch, tmp_pat
     assert store.get_turn(turn_id).status == "failed"
     assert store.get_session(started["threadId"]).active_turn_id is None
     await client.close()
+
+
+def test_pending_wakeup_survives_solicited_and_task_responses(monkeypatch) -> None:
+    """376, 2026-10-11 05:53Z: a steer's response (Pieter) and a background
+    task's follow-up (Zanele) were taken for the wakeup firing, the turns
+    closed, and the wakeups later ran untracked."""
+    from super_agents import claude_sdk
+
+    tasks = claude_sdk._BackgroundTasks()
+    tasks.begin_cycle()
+    claude_sdk._note_task_lifecycle(
+        tasks, FakeAssistantMessage([FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 2})])
+    )
+    tasks.end_cycle(unsolicited=False)  # the scheduling response itself
+    assert claude_sdk._WAKEUP in tasks
+
+    tasks.begin_cycle()
+    tasks.end_cycle(unsolicited=False)  # a steer's response
+    assert claude_sdk._WAKEUP in tasks
+
+    tasks.begin_cycle()
+    claude_sdk._note_task_lifecycle(tasks, FakeTaskMessage("task_notification", "bash-1", status="completed"))
+    tasks.end_cycle(unsolicited=True)  # a background task's follow-up
+    assert claude_sdk._WAKEUP in tasks
+
+    tasks.begin_cycle()
+    claude_sdk._note_task_lifecycle(
+        tasks, FakeAssistantMessage([FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 60})])
+    )
+    tasks.end_cycle(unsolicited=True)  # the wakeup fired and scheduled the next one
+    assert claude_sdk._WAKEUP in tasks
+
+    tasks.begin_cycle()
+    tasks.end_cycle(unsolicited=True)  # the last wakeup fired and did its work
+    assert claude_sdk._WAKEUP not in tasks
+
+
+def test_pending_wakeup_stops_on_request_and_expires_when_it_never_fires(monkeypatch) -> None:
+    from super_agents import claude_sdk
+
+    tasks = claude_sdk._BackgroundTasks()
+    claude_sdk._note_task_lifecycle(
+        tasks, FakeAssistantMessage([FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 60})])
+    )
+    claude_sdk._note_task_lifecycle(tasks, FakeAssistantMessage([FakeToolUseBlock("ScheduleWakeup", {"stop": True})]))
+    assert claude_sdk._WAKEUP not in tasks
+
+    now = [1000.0]
+    monkeypatch.setattr(claude_sdk.time, "monotonic", lambda: now[0])
+    claude_sdk._note_task_lifecycle(
+        tasks, FakeAssistantMessage([FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 90})])
+    )
+    now[0] += 90 + claude_sdk._WAKEUP_GRACE_SECONDS - 1
+    tasks.expire_wakeup()
+    assert claude_sdk._WAKEUP in tasks
+    now[0] += 2
+    tasks.expire_wakeup()
+    assert claude_sdk._WAKEUP not in tasks

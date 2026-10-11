@@ -11,6 +11,7 @@ import contextlib
 import importlib
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -860,13 +861,14 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 # the CLI later starts a follow-up response on this same stream
                 # when they finish. Reporting the turn "completed" before this
                 # drains empty is a lie, and the tasks' results rot unread.
-                active_background_tasks: dict[str, str] = {}
+                active_background_tasks = _BackgroundTasks()
                 background_wait_logged = False
                 while self._session_pending_results.get(session_id, 0) > 0 or (
                     consumed_any_result and active_background_tasks and not self._turn_was_cancelled(turn_id)
                 ):
                     result_message: Any = None
                     draining_background_tasks = self._session_pending_results.get(session_id, 0) <= 0
+                    active_background_tasks.begin_cycle()
                     background_stream_ended = False
                     stream = sdk_client.receive_response()
                     next_message = None
@@ -901,6 +903,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                                     timeout=self._background_task_poll_seconds,
                                 )
                                 if not done:
+                                    active_background_tasks.expire_wakeup()
                                     if self._turn_was_cancelled(turn_id) or not active_background_tasks:
                                         next_message.cancel()
                                         with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
@@ -988,6 +991,11 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         self._clear_pending_results(session_id)
                         break
                     if not _is_noop_result(result_message):
+                        # A response nobody asked for (no query pending) that
+                        # no task completion preceded is the scheduled wakeup
+                        # firing; a steer's or a task follow-up's response is
+                        # not, and must not clear it (376, 2026-10-11 05:53Z).
+                        active_background_tasks.end_cycle(unsolicited=draining_background_tasks)
                         last_result_message = result_message
                         consumed_any_result = True
                         # The default can recover finished model work after a
@@ -1710,50 +1718,102 @@ def _is_noop_result(message: Any) -> bool:
 # Statuses on which a spawned task is finished for good, mirroring the SDK's
 # TERMINAL_TASK_STATUSES ("pending"/"running"/"paused" are non-terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
-# Pseudo task ids for a scheduled wakeup (see _note_wakeup_lifecycle).
-_WAKEUP_SCHEDULED = "wakeup"
-_WAKEUP_ARMED = "wakeup:armed"
+# Pseudo task id for a pending ScheduleWakeup (see _BackgroundTasks).
+_WAKEUP = "wakeup"
+# A wakeup that has not fired this long after its scheduled time is dropped,
+# so a missed or cancelled-elsewhere wakeup cannot hold a turn open forever.
+_WAKEUP_GRACE_SECONDS = 120.0
+_WAKEUP_IN_RE = re.compile(r"Next wakeup scheduled for [^(]*\(in (\d+)s\)")
+
+
+class _BackgroundTasks(dict):
+    """Tasks that can outlive a response, plus a pending ScheduleWakeup.
+
+    Claude Code's ScheduleWakeup ends the model's response and fires the
+    scheduled prompt later inside the same still-connected CLI, with no task
+    events; it has a single slot (a new call replaces the pending one). The
+    turn stays open while one is pending. Only an *unsolicited* response
+    (none of our queries pending) that no task completion preceded counts as
+    the wakeup firing: on 376 (2026-10-11 05:53Z) treating any later result
+    as the fire let a steer's response (and, on another agent, a background
+    task's follow-up) close the turn while the wakeup was still pending, and
+    the agent then ran an untracked self-rescheduling chain that ignored the
+    "stop at H" steer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wakeup_generation = 0
+        self.wakeup_deadline: float | None = None
+        self._cycle_generation = 0
+        self._cycle_saw_task_end = False
+
+    def schedule_wakeup(self, description: str, delay_seconds: float | None) -> None:
+        self[_WAKEUP] = description
+        self.wakeup_generation += 1
+        delay = max(float(delay_seconds or 0), 60.0)
+        self.wakeup_deadline = time.monotonic() + delay
+
+    def note_wakeup_confirmation(self, text: str) -> None:
+        if _WAKEUP not in self:
+            return
+        if match := _WAKEUP_IN_RE.search(text):
+            self.wakeup_deadline = time.monotonic() + float(match.group(1))
+
+    def stop_wakeup(self) -> None:
+        self.pop(_WAKEUP, None)
+        self.wakeup_deadline = None
+
+    def note_task_end(self) -> None:
+        self._cycle_saw_task_end = True
+
+    def begin_cycle(self) -> None:
+        self._cycle_generation = self.wakeup_generation
+        self._cycle_saw_task_end = False
+
+    def end_cycle(self, *, unsolicited: bool) -> None:
+        if (
+            unsolicited
+            and _WAKEUP in self
+            and not self._cycle_saw_task_end
+            and self.wakeup_generation == self._cycle_generation
+        ):
+            self.stop_wakeup()
+
+    def expire_wakeup(self) -> None:
+        if (
+            _WAKEUP in self
+            and self.wakeup_deadline is not None
+            and time.monotonic() > self.wakeup_deadline + _WAKEUP_GRACE_SECONDS
+        ):
+            self.stop_wakeup()
 
 
 def _note_wakeup_lifecycle(active_background_tasks: dict[str, str], message: Any) -> None:
-    """Keep a turn open across a ScheduleWakeup wait.
-
-    Claude Code's ScheduleWakeup ends the model's response ("Scheduled!") and
-    fires the scheduled prompt later inside the same still-connected CLI,
-    with no task_started/task_notification events. Treating that response's
-    result as the turn's end hid the real work: on 2026-10-11 an agent asked
-    to "wait 60 s then write bravo.txt" was reported completed at the
-    schedule, the file appeared two minutes later with no recorded turn, and
-    the Dispatcher relayed stale status. A ScheduleWakeup call now registers
-    a pseudo background task: the scheduling response's result arms it, the
-    wakeup response's result (or an explicit stop) clears it, and a wakeup
-    that schedules again keeps the turn open.
-    """
+    """Record ScheduleWakeup calls and their confirmations (see _BackgroundTasks)."""
+    if not isinstance(active_background_tasks, _BackgroundTasks):
+        return
     content = getattr(message, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            if getattr(block, "name", None) != "ScheduleWakeup":
-                continue
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if getattr(block, "name", None) == "ScheduleWakeup":
             tool_input = getattr(block, "input", None)
             tool_input = tool_input if isinstance(tool_input, dict) else {}
             if tool_input.get("stop") is True:
-                active_background_tasks.pop(_WAKEUP_SCHEDULED, None)
-                active_background_tasks.pop(_WAKEUP_ARMED, None)
+                active_background_tasks.stop_wakeup()
                 continue
             delay = tool_input.get("delaySeconds")
-            active_background_tasks[_WAKEUP_SCHEDULED] = (
-                f"scheduled wakeup in {delay:g} s" if isinstance(delay, (int, float)) else "scheduled wakeup"
+            delay = delay if isinstance(delay, (int, float)) else None
+            active_background_tasks.schedule_wakeup(
+                f"scheduled wakeup in {delay:g} s" if delay is not None else "scheduled wakeup", delay
             )
-        return
-    if getattr(message, "num_turns", None) is None:
-        return
-    # A response ended. A wakeup scheduled during it is now armed; a wakeup
-    # that was armed before this response has fired and finished.
-    if _WAKEUP_SCHEDULED in active_background_tasks:
-        active_background_tasks.pop(_WAKEUP_ARMED, None)
-        active_background_tasks[_WAKEUP_ARMED] = active_background_tasks.pop(_WAKEUP_SCHEDULED)
-    elif _WAKEUP_ARMED in active_background_tasks:
-        active_background_tasks.pop(_WAKEUP_ARMED, None)
+            continue
+        result_text = getattr(block, "content", None)
+        if isinstance(result_text, list):
+            result_text = " ".join(str(getattr(part, "text", None) or part) for part in result_text)
+        if isinstance(result_text, str) and "Next wakeup scheduled" in result_text:
+            active_background_tasks.note_wakeup_confirmation(result_text)
 
 
 def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) -> None:
@@ -1786,6 +1846,8 @@ def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) 
             status = patch.get("status")
     if status in _TERMINAL_TASK_STATUSES:
         active_background_tasks.pop(task_id, None)
+        if isinstance(active_background_tasks, _BackgroundTasks):
+            active_background_tasks.note_task_end()
 
 
 def _resume_transcript_missing(session: Session) -> bool:
