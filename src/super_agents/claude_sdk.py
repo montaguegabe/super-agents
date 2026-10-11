@@ -34,6 +34,12 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
+from super_agents.claude_cwd_access import (
+    BLOCKED_PERMISSION_DIALOG,
+    MAX_WAIT_SECONDS,
+    PROBE_GRACE_SECONDS,
+    await_cwd_access,
+)
 from super_agents.claude_home_index import refresh_last_interaction_index
 from super_agents.claude_inbox import (
     deliver_steer as _deliver_inbox_steer,
@@ -170,6 +176,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._session_interrupted_steer_followups: set[str] = set()
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
         self._interrupted_steer_start_timeout_seconds = 90.0
+        self._cwd_access_grace_seconds = PROBE_GRACE_SECONDS
+        self._cwd_access_max_wait_seconds = MAX_WAIT_SECONDS
         self._background_task_poll_seconds = _BACKGROUND_TASK_POLL_SECONDS
         self._orphan_sweep_done = False
         # Identifies this client instance in the shared store so instances in
@@ -1327,6 +1335,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             self._record_session_leaf_owner(session.id)
             return existing
         await self._disconnect_sdk_client(session.id)
+        await self._await_cwd_access(session)
         options = await asyncio.to_thread(
             _agent_options,
             sdk,
@@ -1378,6 +1387,65 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._sdk_client_models[session.id] = _openbase_cloud_claude_model(model, self.backend)
         self._record_session_leaf_owner(session.id)
         return client
+
+    async def _await_cwd_access(self, session: Session) -> None:
+        """Hold the start until the thread's folder can be opened.
+
+        A Claude Code process spawned into a folder whose macOS consent dialog
+        is still pending hangs in getcwd() and only fails a minute later as
+        "Control request timeout: initialize". Probing the folder here first
+        raises that same dialog at once, marks the active turn
+        ``blocked_permission_dialog`` within seconds so every surface can say
+        what to click, and lets the turn carry on by itself once the user
+        answers (see ``claude_cwd_access``).
+        """
+        turn_id = self._active_turn_id(session.id)
+
+        async def on_blocked(message: str) -> None:
+            logger.warning(
+                "dispatch_timing stage=claude_cwd_access_blocked thread_id=%s turn_id=%s cwd=%s",
+                session.id,
+                turn_id,
+                session.cwd,
+            )
+            if turn_id:
+                await asyncio.to_thread(
+                    self.store.update_turn, turn_id, only_if_active=True, error_kind=BLOCKED_PERMISSION_DIALOG
+                )
+            await asyncio.to_thread(self.store.update_session, session.id, last_observed_state=message)
+            if turn_id:
+                self._notify_turn(
+                    "turn/updated",
+                    session.id,
+                    turn_id,
+                    blocked={"errorKind": BLOCKED_PERMISSION_DIALOG, "message": message},
+                )
+
+        async def on_unblocked() -> None:
+            logger.info(
+                "dispatch_timing stage=claude_cwd_access_granted thread_id=%s turn_id=%s cwd=%s",
+                session.id,
+                turn_id,
+                session.cwd,
+            )
+            if turn_id:
+                await asyncio.to_thread(self.store.update_turn, turn_id, only_if_active=True, error_kind=None)
+            await asyncio.to_thread(
+                self.store.update_session,
+                session.id,
+                last_observed_state="Folder access granted; Claude Code is starting",
+            )
+            if turn_id:
+                self._notify_turn("turn/updated", session.id, turn_id)
+
+        await await_cwd_access(
+            session.cwd,
+            on_blocked=on_blocked,
+            on_unblocked=on_unblocked,
+            is_cancelled=lambda: bool(turn_id) and self._turn_was_cancelled(turn_id),
+            grace_seconds=self._cwd_access_grace_seconds,
+            max_wait_seconds=self._cwd_access_max_wait_seconds,
+        )
 
     def _owns_session_leaf(self, session: Session) -> bool:
         return session.last_client_instance in (None, self._instance_id)
