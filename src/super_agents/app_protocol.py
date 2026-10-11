@@ -300,6 +300,39 @@ def turn_error_message(value: JsonObject | None) -> str | None:
     return None
 
 
+AUTHENTICATION_FAILED = "authentication_failed"
+
+
+def turn_error_kind(value: JsonObject | None) -> str | None:
+    """Structured reason a turn failed, when the backend reported one.
+
+    Uses only structured fields: an explicit ``errorKind`` (the Claude Agent
+    SDK's ``AssistantMessage.error``), or Codex's ``codexErrorInfo`` HTTP
+    status, where 401 means the backend could not authenticate.
+    """
+    if not isinstance(value, dict):
+        return None
+    if isinstance(kind := value.get("errorKind"), str) and kind:
+        return kind
+    error = value.get("error")
+    if error is None:
+        for key in ("turn", "payload", "item"):
+            nested = value.get(key)
+            if isinstance(nested, dict) and nested.get("error") is not None:
+                error = nested["error"]
+                break
+    if not isinstance(error, dict):
+        return None
+    if isinstance(kind := error.get("errorKind"), str) and kind:
+        return kind
+    info = error.get("codexErrorInfo")
+    if isinstance(info, dict):
+        for detail in info.values():
+            if isinstance(detail, dict) and detail.get("httpStatusCode") == 401:
+                return AUTHENTICATION_FAILED
+    return None
+
+
 def _unwrap_error_message(message: str) -> str | None:
     text = message.strip()
     if not text:

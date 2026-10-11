@@ -195,7 +195,7 @@ def compact_turn_summary(
     max_items: int,
     max_output_chars: int,
 ) -> JsonObject:
-    from .app_protocol import normalize_turn_status, turn_error_message
+    from .app_protocol import normalize_turn_status, turn_error_kind, turn_error_message
 
     status = normalize_turn_status(persisted_turn) or (tracked_turn.status if tracked_turn else None)
     error_message = turn_error_message(persisted_turn)
@@ -207,6 +207,7 @@ def compact_turn_summary(
             "startedAt": scalar_field(persisted_turn, "startedAt"),
             "completedAt": scalar_field(persisted_turn, "completedAt"),
             "lastError": error_message,
+            "errorKind": turn_error_kind(persisted_turn),
             "lastUsefulMessage": error_message or turn_text_preview(persisted_turn),
             "eventCount": len(tracked_turn.events) if tracked_turn else None,
             "pendingRequestCount": len(tracked_turn.pending_requests) if tracked_turn else None,

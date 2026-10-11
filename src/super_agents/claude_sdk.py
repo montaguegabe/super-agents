@@ -1113,6 +1113,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 backend_session_id=claude_session_id,
             )
         useful = _message_preview(message)
+        if isinstance(error_kind := getattr(message, "error", None), str) and error_kind:
+            # The SDK's structured failure reason (AssistantMessage.error),
+            # e.g. "authentication_failed" when Claude Code is signed out.
+            await asyncio.to_thread(self.store.update_turn, turn_id, only_if_active=True, error_kind=error_kind)
         if isinstance(getattr(message, "content", None), list) and not hasattr(message, "tool_use_result"):
             await asyncio.to_thread(
                 self.store.update_turn,
@@ -1244,7 +1248,12 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             self.store.update_session(session_id, **fields)
         status = fields.get("status")
         if status in {"completed", "cancelled", "failed"}:
-            error = {"message": fields.get("last_observed_state")} if status == "failed" else None
+            error = None
+            if status == "failed":
+                error = {"message": fields.get("last_observed_state")}
+                with contextlib.suppress(KeyError):
+                    if error_kind := self.store.get_turn(turn_id).error_kind:
+                        error["errorKind"] = error_kind
             self._notify_turn(
                 "turn/failed" if status == "failed" else "turn/completed",
                 session_id,

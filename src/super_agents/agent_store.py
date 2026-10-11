@@ -90,6 +90,9 @@ class Turn:
     finished_at: str | None = None
     attempts: int = 0
     last_error: str | None = None
+    # The backend's structured reason for the failure, when it gave one
+    # (Claude Agent SDK AssistantMessage.error, e.g. "authentication_failed").
+    error_kind: str | None = None
     last_useful_message: str | None = None
     # Set once the model's response for this turn has completed, even if the
     # turn stays "running" to wait on background tasks it spawned (a dev
@@ -117,6 +120,7 @@ class Turn:
                 "finishedAt": self.finished_at,
                 "attempts": self.attempts,
                 "lastError": self.last_error,
+                "errorKind": self.error_kind,
                 "lastUsefulMessage": self.last_useful_message,
                 "responseFinishedAt": self.response_finished_at,
                 "steers": list(self.steers) or None,
@@ -248,6 +252,8 @@ class Store:
                 conn.execute("alter table turns add column steers_json text")
             if "response_finished_at" not in columns:
                 conn.execute("alter table turns add column response_finished_at text")
+            if "error_kind" not in columns:
+                conn.execute("alter table turns add column error_kind text")
             session_columns = {row["name"] for row in conn.execute("pragma table_info(sessions)").fetchall()}
             if "developer_instructions" not in session_columns:
                 conn.execute("alter table sessions add column developer_instructions text")
@@ -547,7 +553,15 @@ class Store:
         concurrent cancellation wins over late stream output or completion.
         Return the current row even when the conditional write is skipped.
         """
-        allowed = {"status", "attempts", "last_error", "finished_at", "last_useful_message", "response_finished_at"}
+        allowed = {
+            "status",
+            "attempts",
+            "last_error",
+            "error_kind",
+            "finished_at",
+            "last_useful_message",
+            "response_finished_at",
+        }
         updates = {key: value for key, value in fields.items() if key in allowed}
         updates["updated_at"] = iso_now()
         assignments = ", ".join(f"{key} = ?" for key in updates)
@@ -776,6 +790,7 @@ def row_to_turn(row: sqlite3.Row) -> Turn:
         status=row["status"],
         attempts=row["attempts"],
         last_error=row["last_error"],
+        error_kind=row["error_kind"],
         last_useful_message=row["last_useful_message"],
         response_finished_at=row["response_finished_at"],
         steers=steers_from_json(row["steers_json"]),
