@@ -1836,3 +1836,27 @@ async def test_warm_session_leaves_a_busy_session_alone(tmp_path):
     }
     assert thread_id not in client._sdk_clients
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_cli_start_disconnects_the_spawned_client(tmp_path):
+    """VM2, 2026-10-11: Claude Code hung at startup ("Control request timeout:
+    initialize"); every failed turn left that hung CLI process running."""
+
+    class HangingStartClient(FakeClaudeSDKClient):
+        async def connect(self) -> None:
+            self.connected = True
+            raise Exception("Control request timeout: initialize")
+
+    class HangingSdk(FakeSdk):
+        ClaudeSDKClient = HangingStartClient
+
+    store = Store(tmp_path / "start.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=HangingSdk)
+    thread = await client.start_thread({"name": "hang", "cwd": str(tmp_path)})
+    before = FakeClaudeSDKClient.disconnect_count
+    with pytest.raises(RuntimeError, match="Claude Code did not start in .*initialize"):
+        await client._sdk_client_for(store.get_session(thread["threadId"]), None, None, None, HangingSdk())
+    assert FakeClaudeSDKClient.disconnect_count == before + 1
+    assert thread["threadId"] not in client._sdk_clients
+    await client.close()

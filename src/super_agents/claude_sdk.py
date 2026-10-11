@@ -1356,6 +1356,13 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             # cached yet. Clean up only the SDK instance we just created.
             await client.disconnect()
             raise
+        except Exception as exc:
+            # Same for a failed start (e.g. "Control request timeout:
+            # initialize" when the CLI hangs before answering): without this
+            # every failed turn left a hung Claude Code process behind.
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            raise RuntimeError(f"Claude Code did not start in {session.cwd}: {exc}") from exc
         if disallowed_tools:
             logger.info(
                 "dispatch_timing stage=super_agent_tool_policy_connected thread_id=%s disallowed_tools=%s",
