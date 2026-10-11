@@ -291,11 +291,11 @@ def turn_error_message(value: JsonObject | None) -> str | None:
     if error is None:
         return None
     if isinstance(error, str):
-        return _unwrap_error_message(error)
+        return unwrap_error_message(error)
     if isinstance(error, dict):
         message = error.get("message") or error.get("detail") or error.get("text")
         if isinstance(message, str) and message.strip():
-            return _unwrap_error_message(message)
+            return unwrap_error_message(message)
         return "Turn failed with an unspecified error."
     return None
 
@@ -333,29 +333,46 @@ def turn_error_kind(value: JsonObject | None) -> str | None:
     return None
 
 
-def _unwrap_error_message(message: str) -> str | None:
+def unwrap_error_message(message: str) -> str | None:
+    """The human-readable core of a backend error string.
+
+    Provider errors usually arrive as a JSON envelope, either on its own or
+    after a short prefix such as ``API Error: 524 {...}``. People reading a
+    thread need the innermost ``message``, not the envelope's diagnostics, so
+    the prefix is kept and the envelope is reduced to that message. Text
+    without a parseable envelope is returned as is.
+    """
     text = message.strip()
     if not text:
         return None
-    # Provider errors often arrive as a JSON envelope in the message string;
-    # surface the innermost human message when one exists.
-    if text.startswith("{"):
-        import json
+    start = text.find("{")
+    if start < 0:
+        return text
+    import json
 
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return text
-        while isinstance(payload, dict):
-            inner = payload.get("error")
-            message_value = payload.get("message")
-            if isinstance(inner, dict):
-                payload = inner
-                continue
-            if isinstance(message_value, str) and message_value.strip():
-                return message_value.strip()
-            break
-    return text
+    try:
+        payload, end = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError:
+        return text
+    inner_message = _innermost_error_message(payload)
+    if inner_message is None:
+        return text
+    prefix = text[:start].rstrip()
+    suffix = text[end:].strip()
+    return " ".join(part for part in (prefix, inner_message, suffix) if part)
+
+
+def _innermost_error_message(payload: Any) -> str | None:
+    while isinstance(payload, dict):
+        inner = payload.get("error")
+        message_value = payload.get("message")
+        if isinstance(inner, dict):
+            payload = inner
+            continue
+        if isinstance(message_value, str) and message_value.strip():
+            return message_value.strip()
+        break
+    return None
 
 
 def normalize_turn_status(turn: JsonObject | None) -> str | None:

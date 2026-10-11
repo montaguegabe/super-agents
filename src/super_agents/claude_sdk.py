@@ -28,6 +28,7 @@ from super_agents.app_models import (
 from super_agents.app_protocol import (
     _without_super_agent_identity_lines,
     is_active_status,
+    unwrap_error_message,
     with_super_agent_identity_instructions,
 )
 from super_agents.app_sessions import required_label
@@ -1073,8 +1074,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
+                    failure_text = _turn_failure_text(exc)
                     failed = self.store.update_turn(
-                        turn_id, only_if_active=True, status="failed", finished_at=iso_now(), last_error=str(exc)
+                        turn_id, only_if_active=True, status="failed", finished_at=iso_now(), last_error=failure_text
                     )
                     if failed.status == "cancelled":
                         self._finish_cancelled_turn(session_id, turn_id)
@@ -1084,7 +1086,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         turn_id,
                         status="failed",
                         active_turn_id=None,
-                        last_observed_state=str(exc),
+                        last_observed_state=failure_text,
                     )
             finally:
                 self._unregister_active_owner(session_id)
@@ -1647,8 +1649,17 @@ def _error_result_message(message: Any) -> str:
     login or an API error apart from an unverified completion."""
     result = getattr(message, "result", None)
     if isinstance(result, str) and result.strip():
-        return f"{result.strip()} ({_ERROR_RESULT_MESSAGE})"
+        # Provider failures arrive as the raw error envelope (e.g. a Cloud
+        # proxy timeout's JSON); readers need its message, not its internals.
+        return f"{unwrap_error_message(result) or result.strip()} ({_ERROR_RESULT_MESSAGE})"
     return _ERROR_RESULT_MESSAGE
+
+
+def _turn_failure_text(exc: BaseException) -> str:
+    """What a failed turn shows for ``exc``: the readable core of a provider
+    envelope when there is one, else the exception text or type."""
+    text = str(exc)
+    return unwrap_error_message(text) or text or type(exc).__name__
 
 
 def _is_noop_result(message: Any) -> bool:

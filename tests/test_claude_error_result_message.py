@@ -7,13 +7,42 @@ import pytest
 from super_agents.agent_store import Store
 from super_agents.app_models import LabelQueryInput
 from super_agents.app_protocol import AUTHENTICATION_FAILED, turn_error_kind
-from super_agents.claude_sdk import _ERROR_RESULT_MESSAGE, ClaudeAgentSdkClient, _error_result_message
+from super_agents.claude_sdk import (
+    _ERROR_RESULT_MESSAGE,
+    ClaudeAgentSdkClient,
+    _error_result_message,
+    _turn_failure_text,
+)
 
 
 def test_error_result_keeps_claude_login_failure_text() -> None:
     message = SimpleNamespace(result="Not logged in · Please run /login", is_error=True)
 
     assert _error_result_message(message) == (f"Not logged in · Please run /login ({_ERROR_RESULT_MESSAGE})")
+
+
+CLOUD_TIMEOUT_ENVELOPE = (
+    "API Error: 524 "
+    '{"error": {"type": "api_error", "code": "origin_response_timeout", '
+    '"message": "The model provider did not respond in time. Retry the request.", '
+    '"request_id": "req_123", "operator": "check the Cloud proxy logs for req_123"}}'
+)
+
+
+def test_error_result_reduces_provider_envelope_to_its_message() -> None:
+    message = SimpleNamespace(result=CLOUD_TIMEOUT_ENVELOPE, is_error=True)
+
+    assert _error_result_message(message) == (
+        f"API Error: 524 The model provider did not respond in time. Retry the request. ({_ERROR_RESULT_MESSAGE})"
+    )
+
+
+def test_turn_failure_text_reduces_envelope_and_keeps_plain_errors() -> None:
+    assert _turn_failure_text(RuntimeError(CLOUD_TIMEOUT_ENVELOPE)) == (
+        "API Error: 524 The model provider did not respond in time. Retry the request."
+    )
+    assert _turn_failure_text(RuntimeError("boom")) == "boom"
+    assert _turn_failure_text(RuntimeError("")) == "RuntimeError"
 
 
 def test_error_result_without_text_falls_back_to_unverified() -> None:
