@@ -129,8 +129,12 @@ async def test_connecting_owner_queues_without_losing_instruction(tmp_path):
     first = await owner.start_turn_by_label(LabelQueryInput(label="birch"), {"prompt": "initial"})
     try:
         result = await caller.steer_by_label(LabelQueryInput(label="birch"), "followup")
-        assert result["queued"] is True
-        assert store.get_turn(result["turnId"]).status == "queued"
+        # The owner has not sent its first prompt yet: the correction is held
+        # for that turn and sent right after its prompt, in the same turn,
+        # never ahead of it (voice review finding 12, 2026-10-11).
+        assert result["steered"] is True and result["confirmed"] is True and result["buffered"] is True
+        assert result["turnId"] == first["turnId"]
+        assert store.queued_turns(thread["threadId"]) == []
         assert store.get_turn(first["turnId"]).status == "running"
     finally:
         connected.set()

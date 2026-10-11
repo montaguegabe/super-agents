@@ -116,6 +116,13 @@ class ActiveSteeringMixin:
                 "Nothing was delivered or queued."
             )
 
+        launched = getattr(self, "_launched_turns", set())
+        if active_turn_id in launched and active_turn_id not in getattr(self, "_initial_query_sent", set()):
+            # The active turn is ours but has not sent its own prompt yet (it
+            # waits behind a compaction, another turn or a cold connect).
+            # Sending now would put the correction first; hand it to the turn,
+            # which sends it right after its prompt (voice review finding 12).
+            return await self._buffer_steer_for_pending_turn(session, active_turn_id, prompt, turn_input)
         sdk_client = await self._wait_for_active_sdk_client(session.id)
         owner = self._active_owner(session.id)
         if owner is not None and owner is not self:
@@ -189,6 +196,35 @@ class ActiveSteeringMixin:
             "interruptedCurrentWork": turn_input.get("interruptCurrentWork") is True,
             "startedImmediately": False,
             "drain": "steered_active_turn",
+        }
+
+    async def _buffer_steer_for_pending_turn(
+        self, session: Session, turn_id: str, prompt: str, turn_input: JsonObject
+    ) -> JsonObject:
+        self._buffered_steers.setdefault(turn_id, []).append(
+            self._prompt_for_session(session, {**turn_input, "prompt": prompt})
+        )
+        current_turn = await asyncio.to_thread(self._record_steer, session.id, turn_id, prompt)
+        logger.info(
+            "dispatch_timing stage=super_agent_steer_buffered_until_turn_starts thread_id=%s turn_id=%s",
+            session.id,
+            turn_id,
+        )
+        return {
+            "backend": self.backend,
+            "threadId": session.id,
+            "name": session.name,
+            "turnId": turn_id,
+            "turn": current_turn.to_json(),
+            "queued": False,
+            "steered": True,
+            "nativeSteer": True,
+            "delivery": "sdk",
+            "confirmed": True,
+            "buffered": True,
+            "interruptedCurrentWork": False,
+            "startedImmediately": False,
+            "drain": "steered_pending_turn",
         }
 
     async def _queue_unavailable_steer(self, session: Session, prompt: str, turn_input: JsonObject) -> JsonObject:

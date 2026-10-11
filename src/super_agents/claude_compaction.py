@@ -130,11 +130,23 @@ class SessionCompactionMixin:
                 # The stream may still owe the compaction's result; never hand
                 # it to the next turn.
                 await self._disconnect_sdk_client(session.id)
+            except asyncio.CancelledError:
+                # The query may already be in the stream: never leave a
+                # half-read transport behind for the next turn.
+                with contextlib.suppress(Exception):
+                    await self._disconnect_sdk_client(session.id)
+                raise
             except Exception:
                 outcome = "error"
                 await self._disconnect_sdk_client(session.id)
                 logger.warning("Claude session compaction failed thread_id=%s", session.id, exc_info=True)
             finally:
+                if self._closed:
+                    # close() skips a locked session and relies on its
+                    # operation to disconnect when done (voice review
+                    # finding 13, as for turns and warm-ups).
+                    with contextlib.suppress(Exception):
+                        await self._disconnect_sdk_client(session.id)
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(self.store.update_session, session.id, last_observed_state=previous_state)
         elapsed_ms = int((time.monotonic() - started) * 1000)

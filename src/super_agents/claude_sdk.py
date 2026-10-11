@@ -184,6 +184,14 @@ class ClaudeAgentSdkClient(
         # only those extra reads use the short drain timeout.
         self._session_pending_results = PendingResults()
         self._session_interrupted_steer_followups: set[str] = set()
+        # Turns whose own first prompt is already in the SDK stream. A steer
+        # may join an active turn only after that, so it can never overtake
+        # the request it corrects (voice review finding 12, 2026-10-11).
+        self._initial_query_sent: set[str] = set()
+        # Turns launched by this process whose first prompt is not sent yet,
+        # and corrections accepted for them meanwhile (sent right after it).
+        self._launched_turns: set[str] = set()
+        self._buffered_steers: dict[str, list[str]] = {}
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
         self._interrupted_steer_start_timeout_seconds = 90.0
         self._cwd_access_grace_seconds = PROBE_GRACE_SECONDS
@@ -792,6 +800,7 @@ class ClaudeAgentSdkClient(
                 developer_instructions=developer_instructions,
             )
         )
+        self._launched_turns.add(turn_id)
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
 
@@ -843,6 +852,19 @@ class ClaudeAgentSdkClient(
                         # only standing policy lives in the system prompt.
                         developer_instructions=developer_instructions,
                     )
+                elif session.backend_session_id:
+                    # Rebuilt under the session lock from the current
+                    # transcript: a turn that waited (behind a compaction or
+                    # another turn) must not send an instruction reference
+                    # whose block was just compacted away (voice review
+                    # finding 14, 2026-10-11).
+                    prompt = self._prompt_for_session(
+                        session,
+                        {
+                            "prompt": self.store.get_turn(turn_id).prompt,
+                            "developerInstructions": developer_instructions,
+                        },
+                    )
                 if announce_intro:
                     # The greeting precedes the first prompt so the user hears
                     # who picked up the task before any work starts.
@@ -856,6 +878,13 @@ class ClaudeAgentSdkClient(
                 last_useful_message = ""
                 self._register_pending_result(session_id)
                 await sdk_client.query(prompt)
+                self._initial_query_sent.add(turn_id)
+                # Corrections accepted while this turn waited (behind a
+                # compaction, another turn, or a cold connect) follow its own
+                # prompt, in the order they arrived (voice review finding 12).
+                for buffered in self._buffered_steers.pop(turn_id, []):
+                    self._register_pending_result(session_id)
+                    await sdk_client.query(buffered)
                 # Every query sent into this session (this turn's prompt plus
                 # any steers that joined while it ran) produces a response on
                 # the shared SDK stream — except that the CLI can COALESCE
@@ -1180,6 +1209,16 @@ class ClaudeAgentSdkClient(
                     )
             finally:
                 self._unregister_active_owner(session_id)
+                self._initial_query_sent.discard(turn_id)
+                self._launched_turns.discard(turn_id)
+                if dropped := self._buffered_steers.pop(turn_id, None):
+                    logger.warning(
+                        "Claude turn ended before its first prompt was sent; %d buffered correction(s) "
+                        "remain recorded on it thread_id=%s turn_id=%s",
+                        len(dropped),
+                        session_id,
+                        turn_id,
+                    )
                 cancellation_watch.cancel()
                 await asyncio.gather(cancellation_watch, return_exceptions=True)
                 self._permission_gate.cancel_scope(thread_id=session_id, turn_id=turn_id)
