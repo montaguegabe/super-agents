@@ -4,6 +4,7 @@ from unittest.mock import ANY
 
 import asyncio
 import json
+import re
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -1539,19 +1540,27 @@ async def test_claude_sdk_startup_sweep_preserves_last_activity_time(
     assert session.updated_at == old
 
 
-def test_unresumable_session_error_detection() -> None:
-    """Only the deterministic missing-transcript resume failure clears the
-    pointer; transient launch/stream errors must never do so."""
-    from super_agents.claude_sdk import _unresumable_session_error
+def test_resume_pointer_cleared_only_when_transcript_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The decision comes from the filesystem, not from error wording: a
+    session whose transcript exists keeps its resume pointer whatever the
+    failure said."""
+    from super_agents.claude_sdk import _resume_transcript_missing
 
-    assert _unresumable_session_error(
-        RuntimeError(
-            "Command failed with exit code 1: No conversation found with "
-            "session ID: ee69d7eb-c602-47dd-bd41-7b11e41695ee"
-        )
-    )
-    assert not _unresumable_session_error(RuntimeError("stream disconnected"))
-    assert not _unresumable_session_error(TimeoutError("turn timed out"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    store = Store(tmp_path / "state.sqlite3")
+    session = store.create_session("sdk", cwd=str(tmp_path / "proj"))
+    assert not _resume_transcript_missing(session)
+
+    session = store.update_session(session.id, backend_session_id="ee69d7eb-c602-47dd-bd41-7b11e41695ee")
+    assert _resume_transcript_missing(session)
+
+    project_dir = tmp_path / "claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", session.cwd)
+    project_dir.mkdir(parents=True)
+    (project_dir / "ee69d7eb-c602-47dd-bd41-7b11e41695ee.jsonl").write_text("{}\n")
+    assert not _resume_transcript_missing(session)
 
 
 class _InboxProbeServer:

@@ -88,7 +88,7 @@ from super_agents.claude_system_prompt import (
     supports_refreshable_system_prompt,
     system_prompt_fingerprint,
 )
-from super_agents.claude_transcript import transcript_turn_views
+from super_agents.claude_transcript import transcript_path, transcript_turn_views
 from super_agents.claude_views import SessionViewMixin
 from super_agents.defaults import (
     default_super_agents_model,
@@ -1048,17 +1048,18 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 # receive_response(). Drop the client so the next turn
                 # resumes from the transcript tip on a clean stream.
                 await self._disconnect_sdk_client(session_id)
-                if _unresumable_session_error(exc):
-                    # The recorded backend session no longer exists on disk
-                    # (e.g. its transcript was orphaned by a config-directory
-                    # move), so resuming it fails identically on every turn —
-                    # forever. Drop the pointer so the next turn starts a
-                    # fresh backend session instead of replaying this failure
-                    # on every request.
+                current = self.store.get_session(session_id)
+                if _resume_transcript_missing(current):
+                    # The recorded backend session's transcript is gone (e.g.
+                    # orphaned by a config-directory move), so resuming it
+                    # fails identically on every turn — forever. Drop the
+                    # pointer so the next turn starts a fresh backend session.
+                    # Decided from the filesystem, never from error wording: a
+                    # transient failure with the transcript present keeps it.
                     append_log(
                         session.log_path,
                         f"[{iso_now()}] RECOVER clearing unresumable backend session "
-                        f"{session.backend_session_id}; the next turn starts fresh\n",
+                        f"{current.backend_session_id}: transcript not found; the next turn starts fresh\n",
                     )
                     self.store.update_session(session_id, backend_session_id=None)
                 if self._turn_was_cancelled(turn_id):
@@ -1606,15 +1607,10 @@ def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) 
         active_background_tasks.pop(task_id, None)
 
 
-# Claude Code's exact wording when `--resume <id>` targets a session whose
-# transcript is gone (deleted, or orphaned by a CLAUDE_CONFIG_DIR change).
-# This failure is deterministic and permanent for that id, unlike transient
-# launch/stream errors, which must NOT clear the resume pointer.
-_UNRESUMABLE_SESSION_MARKER = "no conversation found with session id"
-
-
-def _unresumable_session_error(exc: BaseException) -> bool:
-    return _UNRESUMABLE_SESSION_MARKER in str(exc).lower()
+def _resume_transcript_missing(session: Session) -> bool:
+    """True when the session points at a backend session whose transcript no
+    longer exists, so ``--resume`` can never succeed for that id."""
+    return bool(session.backend_session_id) and transcript_path(session) is None
 
 
 def _load_sdk() -> Any:
