@@ -36,6 +36,7 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
+from super_agents.claude_compaction import SessionCompactionMixin
 from super_agents.claude_completion import ResultValidation
 from super_agents.claude_responses import PendingQuery, PendingResults
 from super_agents.claude_failure_kinds import classify_turn_failure
@@ -134,7 +135,9 @@ async def _chain_async(first: Any, rest: Any):
         yield item
 
 
-class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin):
+class ClaudeAgentSdkClient(
+    ActiveSteeringMixin, TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin, SessionCompactionMixin
+):
     """Super Agents backend using Claude Code without Anthropic API keys."""
 
     backend = "claude_code"
@@ -906,7 +909,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                                 if not background_wait_logged:
                                     background_wait_logged = True
                                     waiting_on = ", ".join(
-                                        description or task_id for task_id, description in active_background_tasks.items()
+                                        description or task_id
+                                        for task_id, description in active_background_tasks.items()
                                     )
                                     await asyncio.to_thread(
                                         self.store.update_session,

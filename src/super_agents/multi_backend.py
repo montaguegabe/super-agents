@@ -199,6 +199,18 @@ class MultiBackendClient:
             lambda client: client.rename_by_label(input_data, new_name),
         )
 
+    async def compact_session_by_label(
+        self, input_data: LabelQueryInput, turn_input: JsonObject | None = None, **kwargs: Any
+    ) -> JsonObject:
+        async def compact(client: Any) -> JsonObject:
+            method = getattr(client, "compact_session_by_label", None)
+            if method is None:
+                # Codex compacts its own threads; nothing to do here.
+                return {"compacted": False, "reason": "unsupported"}
+            return await method(input_data, turn_input, **kwargs)
+
+        return await self._route_label(input_data, compact)
+
     async def archive_by_label(self, input_data: LabelQueryInput) -> JsonObject:
         async def archive(client: Any) -> JsonObject:
             method = getattr(client, "archive_by_label", None)
