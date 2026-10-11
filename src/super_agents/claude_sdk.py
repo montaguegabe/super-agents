@@ -37,6 +37,7 @@ from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApp
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
 from super_agents.claude_completion import ResultValidation
+from super_agents.claude_responses import PendingQuery, PendingResults
 from super_agents.claude_failure_kinds import classify_turn_failure
 from super_agents.claude_cwd_access import (
     BLOCKED_PERMISSION_DIALOG,
@@ -175,9 +176,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         # been consumed from the SDK stream. Every query (turn prompt or
         # steer) must be matched by one consumed result, or the unread
         # response shifts every later turn's answer by one (off-by-one).
-        # The CLI may coalesce rapid queries into one response, so extra
-        # reads are bounded by this timeout instead of blocking forever.
-        self._session_pending_results: dict[str, int] = {}
+        # Queries already present at result receipt may have coalesced;
+        # only those extra reads use the short drain timeout.
+        self._session_pending_results = PendingResults()
         self._session_interrupted_steer_followups: set[str] = set()
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
         self._interrupted_steer_start_timeout_seconds = 90.0
@@ -878,11 +879,18 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 # Validation is a provisional drain phase. New work cancels
                 # its side effects and returns us to the same response reader.
                 while True:
-                    while self._session_pending_results.get(session_id, 0) > 0 or (
+                    while self._session_pending_results.count(session_id) > 0 or (
                         consumed_any_result and active_background_tasks and not self._turn_was_cancelled(turn_id)
                     ):
+                        # Queries registered after the last result need a new
+                        # terminal response, regardless of how long it takes.
+                        if self._session_pending_results.requires_result(session_id):
+                            if consumed_any_result:
+                                self._session_interrupted_steer_followups.discard(session_id)
+                            consumed_any_result = False
+                            last_result_message = None
                         result_message: Any = None
-                        draining_background_tasks = self._session_pending_results.get(session_id, 0) <= 0
+                        draining_background_tasks = self._session_pending_results.count(session_id) <= 0
                         active_background_tasks.begin_cycle()
                         background_stream_ended = False
                         stream = sdk_client.receive_response()
@@ -956,6 +964,11 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                                             ),
                                         )
                                     except (TimeoutError, StopAsyncIteration):
+                                        if self._session_pending_results.requires_result(session_id):
+                                            # A query joined this timed read after
+                                            # the previous result. It cannot be
+                                            # dismissed as coalesced work.
+                                            continue
                                         if session_id in self._session_interrupted_steer_followups:
                                             raise RuntimeError(
                                                 "Interrupted steer did not begin its follow-up response; task completion is unverified."
@@ -1002,23 +1015,14 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                                 # no follow-up response; the loop condition
                                 # decides which.
                                 continue
+                            if self._session_pending_results.requires_result(session_id):
+                                raise RuntimeError(
+                                    "Claude Code stream ended without a terminal result; task completion is unverified."
+                                )
                             # Stream ended without a result; nothing more to read.
                             self._clear_pending_results(session_id)
                             break
                         if not _is_noop_result(result_message):
-                            # A response nobody asked for (no query pending) that
-                            # no task completion preceded is the scheduled wakeup
-                            # firing; a steer's or a task follow-up's response is
-                            # not, and must not clear it (376, 2026-10-11 05:53Z).
-                            # Decided now, not when the reader opened: a steer that
-                            # arrived during the wait registered a pending query
-                            # whose response lands on this same reader, and must
-                            # never be taken for the wakeup (voice review,
-                            # 2026-10-11).
-                            active_background_tasks.end_cycle(
-                                unsolicited=draining_background_tasks
-                                and self._session_pending_results.get(session_id, 0) <= 0
-                            )
                             last_result_message = result_message
                             consumed_any_result = True
                             # The default can recover finished model work after a
@@ -1036,11 +1040,12 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                                 only_if_active=True,
                                 response_finished_at=(iso_now() if self._validate_turn_result is None else None),
                             )
-                            # A steer can register a pending result while the
-                            # background drain is already reading; whichever cycle
-                            # consumes a response settles the debt.
-                            if self._session_pending_results.get(session_id, 0) > 0:
-                                self._consume_pending_result(session_id)
+                            if self._session_pending_results.requires_result(session_id):
+                                # Registration may have cleared this stamp while
+                                # the older result's write was still in flight.
+                                await asyncio.to_thread(
+                                    self.store.update_turn, turn_id, only_if_active=True, response_finished_at=None
+                                )
                             if active_background_tasks:
                                 self._notify_turn("turn/updated", session_id, turn_id)
                             # A follow-up response ran; if tasks remain, the next
@@ -1050,6 +1055,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                             break
                     if self._turn_was_cancelled(turn_id):
                         break
+                    if self._session_pending_results.requires_result(session_id):
+                        # Stream cleanup can also yield after a timed drain.
+                        continue
                     if last_result_message is None:
                         raise RuntimeError(
                             "Claude Code stream ended without a terminal result; task completion is unverified."
@@ -1074,15 +1082,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         if self._turn_was_cancelled(turn_id):
                             raise asyncio.CancelledError
                         if not validated:
-                            if self._session_pending_results.get(session_id, 0):
-                                # This query arrived AFTER the previous response
-                                # drained. It cannot have coalesced into it: wait
-                                # for a fresh result, never reuse the old success.
-                                consumed_any_result = False
-                                last_result_message = None
-                                # There is no original response left to interrupt;
-                                # the fresh blocking read settles this follow-up.
-                                self._session_interrupted_steer_followups.discard(session_id)
+                            # The same ownership check handles new queries at
+                            # every boundary, including validation cancellation.
                             continue
                     break
                 if self._turn_was_cancelled(turn_id):
@@ -1199,6 +1200,13 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         """
         if self._turn_was_cancelled(turn_id):
             raise asyncio.CancelledError
+        if getattr(message, "num_turns", None) is not None and not _is_noop_result(message):
+            # This runs before the first await after receipt. Classification and
+            # query consumption must share that event-loop operation: logging,
+            # store writes and generator cleanup can all accept a newer steer.
+            solicited = self._session_pending_results.receive(session_id)
+            if isinstance(active_background_tasks, _BackgroundTasks):
+                active_background_tasks.end_cycle(unsolicited=not solicited)
         await asyncio.to_thread(append_log, session.log_path, _message_to_log(message))
         if claude_session_id := _message_session_id(message):
             await asyncio.to_thread(
@@ -1540,22 +1548,16 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     def _record_session_leaf_owner(self, session_id: str) -> None:
         self.store.update_session(session_id, last_client_instance=self._instance_id)
 
-    def _register_pending_result(self, session_id: str) -> None:
+    def _register_pending_result(self, session_id: str) -> PendingQuery:
         self._result_validation.invalidate(session_id)
-        self._session_pending_results[session_id] = self._session_pending_results.get(session_id, 0) + 1
+        query = self._session_pending_results.register(session_id)
         session = self.store.get_session(session_id)
         if session.active_turn_id:
             self.store.update_turn(session.active_turn_id, only_if_active=True, response_finished_at=None)
-
-    def _consume_pending_result(self, session_id: str) -> None:
-        pending = self._session_pending_results.get(session_id, 0)
-        if pending > 1:
-            self._session_pending_results[session_id] = pending - 1
-        else:
-            self._session_pending_results.pop(session_id, None)
+        return query
 
     def _clear_pending_results(self, session_id: str) -> None:
-        self._session_pending_results.pop(session_id, None)
+        self._session_pending_results.clear(session_id)
         self._session_interrupted_steer_followups.discard(session_id)
 
     async def _disconnect_sdk_client(self, session_id: str) -> None:

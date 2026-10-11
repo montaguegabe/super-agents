@@ -149,7 +149,7 @@ class ActiveSteeringMixin:
         # The steered query produces its own response on the shared stream;
         # register it so the active turn's reader consumes it instead of
         # leaving it to shift the next turn's answer (off-by-one).
-        self._register_pending_result(session.id)
+        pending_query = self._register_pending_result(session.id)
         try:
             if turn_input.get("interruptCurrentWork") is True:
                 self._session_interrupted_steer_followups.add(session.id)
@@ -167,7 +167,7 @@ class ActiveSteeringMixin:
                 turn_input.get("interruptCurrentWork") is True,
             )
         except BaseException:
-            self._consume_pending_result(session.id)
+            self._session_pending_results.discard(session.id, pending_query)
             self._session_interrupted_steer_followups.discard(session.id)
             raise
         self._record_session_leaf_owner(session.id)
