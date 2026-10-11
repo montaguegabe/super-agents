@@ -1,6 +1,9 @@
+"""Voice review findings 12-14 (2026-10-11), reproductions by the reviewer."""
+
 import asyncio
+
 import pytest
-from test_claude_sdk import FakeClaudeSDKClient, wait_for
+from test_claude_sdk import FakeClaudeSDKClient, reset_fake_claude_sdk, wait_for  # noqa: F401  (autouse reset)
 from test_claude_compaction import CompactingClient, CompactingSdk
 from super_agents.agent_store import Store
 from super_agents.app_models import LabelQueryInput
