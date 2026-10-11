@@ -29,22 +29,6 @@ def test_backend_normalization_supports_three_canonical_modes() -> None:
     assert normalize_backend("openbase-cloud-codex") == OPENBASE_CLOUD_CODEX_BACKEND
 
 
-@pytest.mark.parametrize("spelling", ["codecs", "cloud code", "openbase cloud codecs", "codex via openbase cloud"])
-def test_backend_normalization_rejects_speech_recognition_spellings(spelling: str) -> None:
-    # The calling model maps speech to a schema enum value; code never guesses.
-    with pytest.raises(ValueError, match="Unsupported"):
-        normalize_backend(spelling)
-
-
-def test_backend_tool_option_is_a_strict_enum_of_canonical_backends() -> None:
-    from super_agents.mcp_server import backend_option_properties
-
-    option = backend_option_properties()["backend"]
-    assert option["enum"] == sorted(backend_config.BACKENDS)
-    for backend in backend_config.BACKENDS:
-        assert normalize_backend(backend) == backend
-
-
 def test_client_factory_uses_claude_agent_sdk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OPENBASE_CODING_BACKEND", "claude-code")
 

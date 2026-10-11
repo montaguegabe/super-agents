@@ -24,15 +24,16 @@ CODEX_COMPATIBLE_BACKENDS = {CODEX_BACKEND, OPENBASE_CLOUD_CODEX_BACKEND}
 CODING_BACKEND_ENV_KEY = "OPENBASE_CODING_BACKEND"
 DEFAULT_BACKEND_ENV_KEY = "SUPER_AGENTS_DEFAULT_BACKEND"
 DEFAULT_ENV_FILE = Path.home() / ".openbase" / ".env"
-# Canonical names only, accepted with ``_``, ``-`` or space separators. No
-# speech-recognition spellings ("codecs", "cloud code"): the model that calls
-# the tools picks a value from the schema enum, so it maps what the user said.
 BACKEND_ALIASES = {
     "": CODEX_BACKEND,
     "codex": CODEX_BACKEND,
+    "codecs": CODEX_BACKEND,
     "openbase cloud": OPENBASE_CLOUD_BACKEND,
     "claude code": CLAUDE_CODE_BACKEND,
+    "cloud code": CLAUDE_CODE_BACKEND,
     "openbase cloud codex": OPENBASE_CLOUD_CODEX_BACKEND,
+    "openbase cloud codecs": OPENBASE_CLOUD_CODEX_BACKEND,
+    "codex via openbase cloud": OPENBASE_CLOUD_CODEX_BACKEND,
 }
 
 
