@@ -35,6 +35,7 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
+from super_agents.claude_failure_kinds import classify_turn_failure
 from super_agents.claude_cwd_access import (
     BLOCKED_PERMISSION_DIALOG,
     MAX_WAIT_SECONDS,
@@ -1075,8 +1076,18 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
                     failure_text = _turn_failure_text(exc)
+                    failure_fields: dict[str, object] = {}
+                    if not self.store.get_turn(turn_id).error_kind and (kind := classify_turn_failure(exc)):
+                        # A stable kind for retry/speech decisions; the stream
+                        # or the consent wait may already have set one.
+                        failure_fields["error_kind"] = kind
                     failed = self.store.update_turn(
-                        turn_id, only_if_active=True, status="failed", finished_at=iso_now(), last_error=failure_text
+                        turn_id,
+                        only_if_active=True,
+                        status="failed",
+                        finished_at=iso_now(),
+                        last_error=failure_text,
+                        **failure_fields,
                     )
                     if failed.status == "cancelled":
                         self._finish_cancelled_turn(session_id, turn_id)
