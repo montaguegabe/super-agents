@@ -340,7 +340,9 @@ def unwrap_error_message(message: str) -> str | None:
     after a short prefix such as ``API Error: 524 {...}``. People reading a
     thread need the innermost ``message``, not the envelope's diagnostics, so
     the prefix is kept and the envelope is reduced to that message. Text
-    without a parseable envelope is returned as is.
+    without a parseable envelope is returned as is. HTTP problem-details
+    responses use detail/title instead; origin timeouts get concise retry
+    guidance without the response's operator diagnostics.
     """
     text = message.strip()
     if not text:
@@ -371,6 +373,17 @@ def _innermost_error_message(payload: Any) -> str | None:
             continue
         if isinstance(message_value, str) and message_value.strip():
             return message_value.strip()
+        # HTTP problem-details responses use title/detail, not error/message.
+        # A 524 describes an origin timeout; keep the retry advice concise
+        # without exposing its operator actions, trace IDs, or diagnostics.
+        status = payload.get("status")
+        if type(status) is int and 400 <= status < 600:
+            detail = payload.get("detail")
+            title = payload.get("title")
+            if any(isinstance(value, str) and value.strip() for value in (detail, title)):
+                if status == 524:
+                    return "The model provider did not respond in time. Retry the request."
+                return next(value.strip() for value in (detail, title) if isinstance(value, str) and value.strip())
         break
     return None
 
