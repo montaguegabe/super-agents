@@ -112,3 +112,72 @@ async def test_request_waiting_for_compaction_rechecks_instruction_presence(tmp_
         if compaction:
             await asyncio.wait_for(compaction, 3)
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_live_steer_cannot_overtake_second_buffered_steer(tmp_path, monkeypatch):
+    """Finding 12 follow-up: a correction arriving while older buffered ones
+    drain must not overtake them (observed A/B/D/C instead of A/B/C/D)."""
+    CompactingClient.release = asyncio.Event()
+    CompactingClient.compacts = []
+    first_written = asyncio.Event()
+    release_first_write = asyncio.Event()
+    newest_waiting = asyncio.Event()
+
+    class OrderedTransport(CompactingClient):
+        def __init__(self, options):
+            super().__init__(options)
+            self.write_lock = asyncio.Lock()
+
+        async def query(self, prompt):
+            user = prompt.rsplit("\n\n", 1)[-1]
+            if user == "Use folder D instead":
+                newest_waiting.set()
+            # The installed SDK serializes transport.write with an anyio Lock.
+            async with self.write_lock:
+                await super().query(prompt)
+                if user == "Use folder B instead":
+                    first_written.set()
+                    await release_first_write.wait()
+
+    class Sdk(CompactingSdk):
+        ClaudeSDKClient = OrderedTransport
+
+    monkeypatch.setattr(ClaudeAgentSdkClient, "session_context_tokens", lambda *_: 150000)
+    store = Store(tmp_path / "ordered.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=Sdk)
+    compaction = newest = None
+    try:
+        thread = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
+        query = LabelQueryInput(thread_id=thread["threadId"])
+        compaction = asyncio.create_task(client.compact_session_by_label(query, min_context_tokens=1))
+        await wait_for(lambda: CompactingClient.compacts == ["/compact"])
+        turn = await client.start_turn_by_label(query, {"prompt": "Create in folder A"})
+        for prompt in ["Use folder B instead", "Use folder C instead"]:
+            accepted = await client.start_turn_by_label(query, {"prompt": prompt})
+            assert accepted["confirmed"] and accepted["buffered"]
+        CompactingClient.release.set()
+        await asyncio.wait_for(first_written.wait(), 3)
+        newest = asyncio.create_task(client.start_turn_by_label(query, {"prompt": "Use folder D instead"}))
+        # Fixed behaviour: D joins the ordered buffer behind C instead of
+        # reaching the transport's write lock (the reviewer's original gate
+        # waited for D's write to start, which the fix prevents).
+        done, _ = await asyncio.wait(
+            {newest, asyncio.ensure_future(newest_waiting.wait())}, timeout=3, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert done
+        release_first_write.set()
+        assert (await newest)["confirmed"]
+        await wait_for(lambda: store.get_turn(turn["turnId"]).status == "completed")
+        sent = [p.rsplit("\n\n", 1)[-1] for p in FakeClaudeSDKClient.prompts]
+        assert sent == ["Create in folder A", "Use folder B instead", "Use folder C instead", "Use folder D instead"], (
+            sent
+        )
+    finally:
+        CompactingClient.release.set()
+        release_first_write.set()
+        if compaction:
+            await asyncio.wait_for(compaction, 3)
+        if newest:
+            await asyncio.wait_for(newest, 3)
+        await client.close()

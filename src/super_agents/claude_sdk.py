@@ -878,13 +878,20 @@ class ClaudeAgentSdkClient(
                 last_useful_message = ""
                 self._register_pending_result(session_id)
                 await sdk_client.query(prompt)
-                self._initial_query_sent.add(turn_id)
                 # Corrections accepted while this turn waited (behind a
                 # compaction, another turn, or a cold connect) follow its own
-                # prompt, in the order they arrived (voice review finding 12).
-                for buffered in self._buffered_steers.pop(turn_id, []):
+                # prompt in arrival order. The turn stays "not ready" until the
+                # buffer is empty, so corrections arriving during this drain
+                # join the same queue instead of racing past an older one on
+                # the SDK's write lock (voice review finding 12, A/B/D/C). No
+                # await separates the final empty check from the ready flag.
+                buffer = self._buffered_steers.setdefault(turn_id, [])
+                while buffer:
+                    buffered = buffer.pop(0)
                     self._register_pending_result(session_id)
                     await sdk_client.query(buffered)
+                self._buffered_steers.pop(turn_id, None)
+                self._initial_query_sent.add(turn_id)
                 # Every query sent into this session (this turn's prompt plus
                 # any steers that joined while it ran) produces a response on
                 # the shared SDK stream — except that the CLI can COALESCE
