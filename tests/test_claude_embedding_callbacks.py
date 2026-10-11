@@ -180,8 +180,8 @@ async def test_unverified_or_cancelled_results_skip_validation(tmp_path, outcome
     await client.close()
 
 
-@pytest.mark.parametrize("outcome", ["failure", "cancelled", "new_response"])
-async def test_validator_cannot_commit_success_after_failure_cancel_or_new_work(tmp_path, outcome):
+@pytest.mark.parametrize("outcome", ["failure", "cancelled"])
+async def test_validator_cannot_commit_success_after_failure_or_cancel(tmp_path, outcome):
     store = Store(tmp_path / "store.sqlite3")
     seen = []
 
@@ -193,8 +193,6 @@ async def test_validator_cannot_commit_success_after_failure_cancel_or_new_work(
             raise ValueError("Application validation failed")
         if outcome == "cancelled":
             store.update_turn(turn.id, status="cancelled")
-        else:
-            client._register_pending_result(session.id)
 
     client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader, validate_turn_result=validate)
     thread = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
