@@ -26,8 +26,16 @@ _UNAVAILABLE_MARKERS = (
     "transport is not ready",
     "cannot write to terminated process",
     "process exited",
+    # The SDK's ProcessError when the CLI dies mid-turn (killed, crashed).
+    "command failed with exit code",
 )
-_UNAVAILABLE_TYPES = ("CLIConnectionError", "CLINotFoundError", "ConnectionRefusedError", "FileNotFoundError")
+_UNAVAILABLE_TYPES = (
+    "CLIConnectionError",
+    "CLINotFoundError",
+    "ProcessError",
+    "ConnectionRefusedError",
+    "FileNotFoundError",
+)
 
 
 def classify_turn_failure(exc: BaseException) -> str | None:

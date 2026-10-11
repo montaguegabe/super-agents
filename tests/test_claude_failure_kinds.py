@@ -25,6 +25,10 @@ def test_classify_known_failures():
         classify_turn_failure(RuntimeError("Codex app-server is not running or not reachable at /s"))
         == BACKEND_UNAVAILABLE
     )
+    # The CLI killed mid-turn (steer harness injection, 2026-10-11).
+    assert (
+        classify_turn_failure(RuntimeError("Command failed with exit code -9 (exit code: -9)")) == BACKEND_UNAVAILABLE
+    )
     assert classify_turn_failure(RuntimeError("stream ended without a terminal result")) is None
 
 
