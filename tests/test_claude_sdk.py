@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import ANY
+
 import asyncio
 import json
 import os
@@ -186,7 +188,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "high",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
     # The process environment is never mutated; the key is blanked for the
     # spawned CLI through the SDK env option instead.
@@ -195,6 +197,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
     assert FakeClaudeSDKClient.options_seen[-1].kwargs["env"] == {
         "ANTHROPIC_API_KEY": "",
         "AGENT_MODEL": "sonnet",
+        "SUPER_AGENTS_THREAD_ID": started["threadId"],
     }
     assert os.environ["ANTHROPIC_API_KEY"] == "must-not-reach-sdk"
     assert store.get_turn(result["turnId"]).status == "completed"
@@ -262,7 +265,7 @@ async def test_local_and_cloud_claude_clients_keep_distinct_sdk_options(
 
     local_options, cloud_options = [item.kwargs for item in FakeClaudeSDKClient.options_seen]
     assert local_options["model"] == "sonnet"
-    assert local_options["env"] == {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"}
+    assert local_options["env"] == {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY}
     assert cloud_options["model"] == "claude-sonnet-5"
     assert cloud_options["env"]["ANTHROPIC_AUTH_TOKEN"] == "cloud-machine-token"
     assert cloud_options["env"]["ANTHROPIC_BASE_URL"].endswith("/api/openbase/llm/anthropic")
@@ -300,7 +303,7 @@ async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "low",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "low"
 
@@ -331,7 +334,7 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "xhigh",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "xhigh"
 
@@ -358,7 +361,7 @@ async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "low",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
     assert store.get_turn(result["turnId"]).reasoning_effort == "high"
     assert store.get_turn(result["turnId"]).service_tier == "fast"
@@ -387,7 +390,7 @@ async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "high",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
     assert store.get_turn(result["turnId"]).service_tier == "standard"
 
@@ -414,7 +417,7 @@ async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "xhigh",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
 
 
@@ -688,7 +691,7 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
         "cwd": str(tmp_path),
         "permission_mode": "bypassPermissions",
         "effort": "high",
-        "env": {"CLAUDE_CONFIG_DIR": str(config_dir), "ANTHROPIC_API_KEY": ""},
+        "env": {"CLAUDE_CONFIG_DIR": str(config_dir), "ANTHROPIC_API_KEY": "", "SUPER_AGENTS_THREAD_ID": ANY},
         "setting_sources": ["user", "project"],
         "system_prompt": {
             "type": "preset",
@@ -876,7 +879,7 @@ async def test_claude_sdk_steer_by_label_uses_native_active_turn_steering(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "high",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
     }
 
 
@@ -959,7 +962,7 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
         "setting_sources": ["user", "project"],
         "system_prompt": {"type": "preset", "preset": "claude_code"},
         "effort": "low",
-        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet"},
+        "env": {"ANTHROPIC_API_KEY": "", "AGENT_MODEL": "sonnet", "SUPER_AGENTS_THREAD_ID": ANY},
         "resume": "b01bd0f7-f1b0-485e-a47c-d831645174b9",
     }
 
@@ -1749,7 +1752,9 @@ async def test_turn_notifications_follow_persisted_state(tmp_path, outcome):
     result = await client.start_turn_by_label(LabelQueryInput(thread_id=thread_id), {"prompt": "hello"})
     await wait_for(lambda: len(events) == 3)
     assert [event[0] for event in events] == [
-        "turn/started", "item/completed", "turn/failed" if outcome == "failed" else "turn/completed"
+        "turn/started",
+        "item/completed",
+        "turn/failed" if outcome == "failed" else "turn/completed",
     ]
     assert events[1][1]["item"]["text"] == "first reply"
     assert events[-1][2] == outcome
