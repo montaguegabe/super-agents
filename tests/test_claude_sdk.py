@@ -1928,6 +1928,43 @@ async def test_warm_session_leaves_a_busy_session_alone(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_warm_session_after_close_never_leaves_a_cli_running(tmp_path):
+    """A voice transfer warms the target fire-and-forget; when the call hangs
+    up first, the warm-up must not connect a CLI its closed owner will never
+    disconnect (voice review, 2026-10-11)."""
+    store = Store(tmp_path / "closed.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
+    thread_id = started["threadId"]
+    await client.close()
+
+    result = await client.warm_session_by_label(LabelQueryInput(thread_id=thread_id))
+    assert result["warmed"] is False and result["reason"] == "closed"
+    assert thread_id not in client._sdk_clients
+
+
+@pytest.mark.asyncio
+async def test_warm_session_racing_close_disconnects_what_it_connected(tmp_path):
+    store = Store(tmp_path / "race.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
+    thread_id = started["threadId"]
+    original = client._sdk_client_for
+
+    async def connect_then_owner_closes(*args, **kwargs):
+        connected = await original(*args, **kwargs)
+        client._closed = True  # close() ran while the warm-up held the lock
+        return connected
+
+    client._sdk_client_for = connect_then_owner_closes
+    before = FakeClaudeSDKClient.disconnect_count
+    result = await client.warm_session_by_label(LabelQueryInput(thread_id=thread_id))
+    assert result["warmed"] is False and result["reason"] == "closed"
+    assert thread_id not in client._sdk_clients
+    assert FakeClaudeSDKClient.disconnect_count == before + 1
+
+
+@pytest.mark.asyncio
 async def test_failed_cli_start_disconnects_the_spawned_client(tmp_path):
     """VM2, 2026-10-11: Claude Code hung at startup ("Control request timeout:
     initialize"); every failed turn left that hung CLI process running."""

@@ -333,6 +333,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         """
         session = self._resolve_session(input_data)
         turn_input = turn_input or {}
+        if self._closed:
+            return self._warm_result(session, warmed=False, reason="closed")
         if self._transport_outside_context(session):
             return self._warm_result(session, warmed=False, reason="owner_outside_execution_context")
         if self._session_is_busy(session):
@@ -347,6 +349,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             session = self.store.get_session(session.id)
             if self._session_is_busy(session):
                 return self._warm_result(session, warmed=False, reason="busy")
+            if self._closed:
+                return self._warm_result(session, warmed=False, reason="closed")
             already = self._sdk_clients.get(session.id)
             client = await self._sdk_client_for(
                 session,
@@ -355,6 +359,12 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 service_tier,
                 sdk,
             )
+            if self._closed:
+                # close() skipped this session while the warm-up held its
+                # lock; a CLI connected after the owner closed would outlive
+                # it (voice review, 2026-10-11).
+                await self._disconnect_sdk_client(session.id)
+                return self._warm_result(session, warmed=False, reason="closed")
         connected = client is not already
         logger.info(
             "dispatch_timing stage=super_agent_session_warmed thread_id=%s connected=%s elapsed_ms=%d",
