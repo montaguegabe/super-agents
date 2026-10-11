@@ -843,6 +843,10 @@ async def test_claude_sdk_busy_session_start_steers_instead_of_queueing(
     assert [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["first", "second"]
     assert store.queued_turns(second["threadId"]) == []
     assert "second" in (store.get_turn(first["turnId"]).last_useful_message or "")
+    # The result is stamped even while a steer's follow-up may still be owed,
+    # so a process that dies in that window leaves finished work for the
+    # orphan sweep to complete rather than fail (VM2 2026-10-11, Cooper).
+    assert store.get_turn(first["turnId"]).response_finished_at is not None
 
 
 @pytest.mark.asyncio

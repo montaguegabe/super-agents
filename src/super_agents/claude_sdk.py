@@ -965,16 +965,17 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         # The default can recover finished model work after a
                         # process exit. An embedding validator must succeed
                         # before that recovery shortcut is safe to persist.
+                        # Every result counts, including one that may still
+                        # owe a steer's follow-up: a later response clears the
+                        # stamp again when its first content arrives, and a
+                        # process that dies in between leaves finished work,
+                        # which the orphan sweep then completes rather than
+                        # fails (VM2 2026-10-11, Cooper's steered turn).
                         await asyncio.to_thread(
                             self.store.update_turn,
                             turn_id,
                             only_if_active=True,
-                            response_finished_at=(
-                                iso_now()
-                                if self._validate_turn_result is None
-                                and self._session_pending_results.get(session_id, 0) <= 1
-                                else None
-                            ),
+                            response_finished_at=(iso_now() if self._validate_turn_result is None else None),
                         )
                         # A steer can register a pending result while the
                         # background drain is already reading; whichever cycle
