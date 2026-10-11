@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import (
+    recent_includes_inactive,
     DEFAULT_ACTIVE_AGENTS_LIMIT,
     DEFAULT_COMPACT_STATUS_LIMIT,
     DEFAULT_RECENT_AGENTS_LIMIT,
@@ -506,7 +507,7 @@ class ClaudeAgentSdkClient(
         query = input_data or LabelQueryInput()
         items = [
             self._agent_item(session, query)
-            for session in self._query_sessions(query, include_inactive=bool(query.include_inactive))
+            for session in self._query_sessions(query, include_inactive=recent_includes_inactive(query))
         ]
         return {
             "backend": self.backend,

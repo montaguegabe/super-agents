@@ -139,3 +139,31 @@ async def test_a_compaction_that_never_finishes_times_out_and_drops_the_client(c
     assert thread_id not in client._sdk_clients
     assert "Compacting" not in (store.get_session(thread_id).last_observed_state or "")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_lists_finished_agents_by_default(tmp_path):
+    """VM2, 2026-10-11 08:41Z: after a compaction the Dispatcher asked
+    super_agents_recent which agents exist and got only its own running turn,
+    because recent meant "active unless includeInactive"; it then told the user
+    no other Super Agents existed while four finished ones did."""
+    store = Store(tmp_path / "recent.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=CompactingSdk)
+    dispatcher = await client.start_thread({"name": "dispatcher", "cwd": str(tmp_path)})
+    workers = [
+        await client.start_thread({"name": f"worker-{n}", "agentName": name, "cwd": str(tmp_path)})
+        for n, name in enumerate(["Cory", "Lucy", "Daisy", "Renee"])
+    ]
+    for worker in workers:
+        store.update_session(worker["threadId"], status="completed")
+    live = store.create_turn(dispatcher["threadId"], "which agents exist?", status="running")
+    store.update_session(dispatcher["threadId"], status="running", active_turn_id=live.id)
+
+    everyone = await client.recent(LabelQueryInput())
+    names = {agent.get("agentName") for agent in everyone["agents"]}
+    assert {"Cory", "Lucy", "Daisy", "Renee"} <= names
+    running_only = await client.recent(LabelQueryInput(include_inactive=False))
+    assert [agent["threadId"] for agent in running_only["agents"]] == [dispatcher["threadId"]]
+    active = await client.active(LabelQueryInput())
+    assert [agent["threadId"] for agent in active["agents"]] == [dispatcher["threadId"]]
+    await client.close()

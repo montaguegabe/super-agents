@@ -674,7 +674,10 @@ def _tool_super_agents_recent(client: SuperAgentsClient) -> ToolDefinition:
     return ToolDefinition(
         name="super_agents_recent",
         title="Recent Super Agents",
-        description="List recent named Super Agents threads from the configured backend.",
+        description=(
+            "List recent named Super Agents threads from the configured backend, including finished ones "
+            "(pass includeInactive=false for running ones only; super_agents_active lists only running threads)."
+        ),
         input_schema=name_query_schema(),
         annotations={"readOnlyHint": True, "idempotentHint": True},
         handler=lambda input_data: client.recent(clean_name_query_input(input_data)),

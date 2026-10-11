@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from .app_formatting import apply_field_selection, without_none
 from .app_models import (
+    recent_includes_inactive,
     DEFAULT_ACTIVE_AGENTS_LIMIT,
     DEFAULT_COMPACT_STATUS_LIMIT,
     DEFAULT_RECENT_AGENTS_LIMIT,
@@ -67,7 +68,7 @@ class LabelQueryMixin:
         items = [
             item
             for item in await self.recent_items(query)
-            if query.include_inactive or is_active_status(str(item.get("status")))
+            if recent_includes_inactive(query) or is_active_status(str(item.get("status")))
         ][: query.limit or DEFAULT_RECENT_AGENTS_LIMIT]
         items = [self.compact_agent_item(item, query) for item in items]
         return {"count": len(items), "agents": items}
