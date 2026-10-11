@@ -160,3 +160,24 @@ async def test_turn_fails_with_the_blocked_kind_when_the_dialog_is_never_answere
     assert turn.error_kind == BLOCKED_PERMISSION_DIALOG
     assert "Click Allow" in (turn.last_error or "")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_steer_by_agent_name_reaches_the_agents_thread(tmp_path):
+    """376, 2026-10-11 04:16Z: the Dispatcher steered "Marian" by agent name;
+    the thread's name is a generated label, so the lookup raised KeyError and
+    the Dispatcher spawned a new agent instead of using Marian's thread."""
+    store = Store(tmp_path / "names.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    thread = await client.start_thread({"name": "marian-ios-steps", "agentName": "Marian", "cwd": str(tmp_path)})
+    older = await client.start_thread({"name": "marian-old", "agentName": "marian", "cwd": str(tmp_path)})
+    store.update_session(older["threadId"], updated_at="2000-01-01T00:00:00Z")
+
+    assert store.require_by_name("marian").id == thread["threadId"]
+    result = await client.steer_by_label(LabelQueryInput(label="Marian"), "Also add NOTES.md", {"cwd": str(tmp_path)})
+    assert result["threadId"] == thread["threadId"]
+    assert result.get("turnId")
+    await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
+    with pytest.raises(KeyError, match="No session named Nobody"):
+        store.require_by_name("Nobody")
+    await client.close()

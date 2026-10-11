@@ -403,8 +403,34 @@ class Store:
             )
         return holder
 
+    def get_by_agent_name(self, agent_name: str) -> Session | None:
+        """The session an agent name refers to, when no thread carries it as a name.
+
+        People and the Dispatcher address Super Agents by their agent name
+        ("tell Marian to…"), while thread names are generated labels. Matching
+        is case-insensitive; a session with a running turn wins, then the most
+        recently updated one.
+        """
+        wanted = agent_name.strip().lower()
+        if not wanted:
+            return None
+        with self.connect() as conn:
+            if self.backend:
+                clause, params = self._scope_sql()
+                rows = conn.execute(
+                    f"select * from sessions where lower(agent_name) = ? and {clause}",
+                    (wanted, *params),
+                ).fetchall()
+            else:
+                rows = conn.execute("select * from sessions where lower(agent_name) = ?", (wanted,)).fetchall()
+        sessions = [row_to_session(row) for row in rows]
+        if not sessions:
+            return None
+        sessions.sort(key=lambda session: (bool(session.active_turn_id), session.updated_at or ""), reverse=True)
+        return sessions[0]
+
     def require_by_name(self, name: str) -> Session:
-        session = self.get_by_name(name)
+        session = self.get_by_name(name) or self.get_by_agent_name(name)
         if session is None:
             raise KeyError(f"No session named {name}")
         return session
