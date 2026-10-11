@@ -199,6 +199,16 @@ class MultiBackendClient:
             lambda client: client.rename_by_label(input_data, new_name),
         )
 
+    async def archive_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+        async def archive(client: Any) -> JsonObject:
+            method = getattr(client, "archive_by_label", None)
+            if method is None:
+                # Codex threads are archived on the app-server by the caller.
+                return {"archived": False, "reason": "unsupported"}
+            return await method(input_data)
+
+        return await self._route_label(input_data, archive)
+
     async def resolve_label(self, input_data: LabelQueryInput) -> JsonObject:
         return await self._route_label(
             input_data,
@@ -314,8 +324,7 @@ class MultiBackendClient:
         for identity in self.engaged_backends():
             sessions.extend(await self._sessions_for_backend(identity))
         sessions_by_id = {
-            _session_thread_id(session) or f"index:{index}": session
-            for index, session in enumerate(sessions)
+            _session_thread_id(session) or f"index:{index}": session for index, session in enumerate(sessions)
         }
         sessions = list(sessions_by_id.values())
         # Most recently interacted-with first across every backend; without

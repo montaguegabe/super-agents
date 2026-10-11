@@ -51,9 +51,7 @@ def test_role_model_is_authoritative_over_caller_model(tmp_path, monkeypatch):
     from super_agents.defaults import default_super_agents_model
 
     roles = tmp_path / "dispatcher-config.json"
-    roles.write_text(
-        json.dumps({"backend_models": {"claude_code": {"super_agents": "haiku"}}})
-    )
+    roles.write_text(json.dumps({"backend_models": {"claude_code": {"super_agents": "haiku"}}}))
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(roles))
     monkeypatch.setenv("AGENT_MODEL", "opus")
 

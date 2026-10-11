@@ -101,6 +101,7 @@ async def test_other_event_loop_owner_is_unavailable_without_inbox(tmp_path, mon
             ready.set()
             await asyncio.to_thread(finish.wait)
             await owner.close()
+
         asyncio.run(run())
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -178,7 +179,7 @@ async def test_peer_consumes_then_closes_never_duplicates(tmp_path, monkeypatch,
 async def test_real_foreign_process_inbox_is_not_managed_continuation(tmp_path, monkeypatch):
     """A completed retained SDK in a different process cannot be borrowed."""
     monkeypatch.setenv("CLAUDE_INBOX_REGISTRY_DIR", str(tmp_path))
-    script = '''
+    script = """
 import asyncio,json,sys
 from pathlib import Path
 from super_agents.agent_store import Store
@@ -208,13 +209,23 @@ async def main():
     await owner.close()
     print(json.dumps({"frames":frames,"queries":len(FakeClaudeSDKClient.prompts)}), flush=True)
 asyncio.run(main())
-'''
+"""
     # Supply only the isolated source/tests to the fixture, never the real SDK.
     import os
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(Path(__file__).parent.parent / "src"), str(Path(__file__).parent)])}
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(Path(__file__).parent.parent / "src"), str(Path(__file__).parent)]),
+    }
     with tempfile.TemporaryDirectory(dir="/tmp") as sockets:
-        process = subprocess.Popen([sys.executable, "-c", script, str(tmp_path), f"{sockets}/s.sock"],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        process = subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), f"{sockets}/s.sock"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
         try:
             first = json.loads(await asyncio.wait_for(asyncio.to_thread(process.stdout.readline), 10))
             caller = ClaudeAgentSdkClient(store=Store(tmp_path / "state.sqlite3"), sdk_loader=fake_sdk_loader)

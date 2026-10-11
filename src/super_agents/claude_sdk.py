@@ -416,6 +416,24 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             "threadId": renamed.id,
         }
 
+    async def archive_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+        """Put a session away: hidden from listings and name lookups, readable by id.
+
+        The cli hid archived threads only on its own side, so the Dispatcher
+        kept finding an archived worker in super_agents_active and queued new
+        work onto it (376, 2026-10-11 05:02Z). A later turn started on the
+        thread by id (the user reopening it) clears the flag.
+        """
+        session = self._resolve_session(input_data)
+        archived = self.store.update_session(session.id, archived_at=session.archived_at or iso_now())
+        return {
+            "backend": self.backend,
+            "archived": True,
+            "name": archived.name,
+            "threadId": archived.id,
+            "archivedAt": archived.archived_at,
+        }
+
     async def answer_request(
         self,
         request_id: str | int,
@@ -562,6 +580,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
+        if session.archived_at:
+            # Only an explicit thread id reaches an archived session (name
+            # lookups skip it): the user reopened it, so it is live again.
+            session = self.store.update_session(session.id, archived_at=None)
         if self._transport_outside_context(session):
             return self._unavailable_transport_result(session)
         if self._session_is_busy(session):

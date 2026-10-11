@@ -45,12 +45,14 @@ class Session:
     raw_log_path: str | None = None
     title: str | None = None
     auto_title: bool = False
+    archived_at: str | None = None
 
     def to_json(self, include_paths: bool = True) -> JsonObject:
         data: JsonObject = {
             "id": self.id,
             "name": self.name,
             "title": self.title,
+            "archivedAt": self.archived_at,
             "agentName": self.agent_name,
             "developerInstructions": self.developer_instructions,
             "cwd": self.cwd,
@@ -269,6 +271,11 @@ class Store:
                 conn.execute("alter table sessions add column title text")
             if "auto_title" not in session_columns:
                 conn.execute("alter table sessions add column auto_title integer not null default 0")
+            if "archived_at" not in session_columns:
+                # An archived session stays readable by id (history) but is
+                # hidden from listings and name lookups, so a Dispatcher never
+                # steers or queues work onto a thread the user put away.
+                conn.execute("alter table sessions add column archived_at text")
             if conn.execute("pragma user_version").fetchone()[0] < 1:
                 _strip_session_id_suffixes(conn)
                 conn.execute("pragma user_version = 1")
@@ -362,16 +369,17 @@ class Store:
             raise KeyError(f"No session with id {session_id}")
         return row_to_session(row)
 
-    def get_by_name(self, name: str) -> Session | None:
+    def get_by_name(self, name: str, *, include_archived: bool = False) -> Session | None:
+        archived = "" if include_archived else " and archived_at is null"
         with self.connect() as conn:
             if self.backend:
                 clause, params = self._scope_sql()
                 row = conn.execute(
-                    f"select * from sessions where name = ? and {clause}",
+                    f"select * from sessions where name = ? and {clause}{archived}",
                     (name, *params),
                 ).fetchone()
             else:
-                row = conn.execute("select * from sessions where name = ?", (name,)).fetchone()
+                row = conn.execute(f"select * from sessions where name = ?{archived}", (name,)).fetchone()
         return row_to_session(row) if row else None
 
     def get_name_holder(self, name: str) -> Session | None:
@@ -418,11 +426,13 @@ class Store:
             if self.backend:
                 clause, params = self._scope_sql()
                 rows = conn.execute(
-                    f"select * from sessions where lower(agent_name) = ? and {clause}",
+                    f"select * from sessions where lower(agent_name) = ? and archived_at is null and {clause}",
                     (wanted, *params),
                 ).fetchall()
             else:
-                rows = conn.execute("select * from sessions where lower(agent_name) = ?", (wanted,)).fetchall()
+                rows = conn.execute(
+                    "select * from sessions where lower(agent_name) = ? and archived_at is null", (wanted,)
+                ).fetchall()
         sessions = [row_to_session(row) for row in rows]
         if not sessions:
             return None
@@ -435,10 +445,14 @@ class Store:
             raise KeyError(f"No session named {name}")
         return session
 
-    def list_sessions(self, include_inactive: bool = True, status: str | None = None) -> list[Session]:
+    def list_sessions(
+        self, include_inactive: bool = True, status: str | None = None, *, include_archived: bool = False
+    ) -> list[Session]:
         query = "select * from sessions"
         params: list[object] = []
         clauses: list[str] = []
+        if not include_archived:
+            clauses.append("archived_at is null")
         if not include_inactive:
             clauses.append("status in ('running', 'waiting')")
         if status:
@@ -478,6 +492,7 @@ class Store:
             # re-clobbered by unchanged transcript titles.
             "name",
             "transcript_title",
+            "archived_at",
             # Explicit updated_at lets administrative writes (for example
             # orphan reconciliation) preserve the session's real last-activity
             # time instead of bumping it to "now".
@@ -801,6 +816,7 @@ def row_to_session(row: sqlite3.Row) -> Session:
         raw_log_path=row["raw_log_path"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        archived_at=row["archived_at"],
     )
 
 

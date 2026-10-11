@@ -186,9 +186,7 @@ def cancel_queued_turn(
                     return remove_cancelable_queue_item(path, current_thread_id, items, index)
                 continue
 
-            visible_items = [
-                (index, item) for index, item in enumerate(items) if item.status in {"queued", "starting"}
-            ]
+            visible_items = [(index, item) for index, item in enumerate(items) if item.status in {"queued", "starting"}]
             if position is None or len(visible_items) < position:
                 continue
             index, _item = visible_items[position - 1]

@@ -190,9 +190,7 @@ def test_import_title_uses_real_request_after_context(projects, tmp_path, conten
         entries[0]["message"]["content"] = prompt
     elif content_kind == "split-blocks":
         context, request = prompt.rsplit("\n\n", 1)
-        entries[0]["message"]["content"] = [
-            {"type": "text", "text": context}, {"type": "text", "text": request}
-        ]
+        entries[0]["message"]["content"] = [{"type": "text", "text": context}, {"type": "text", "text": request}]
     path = _transcript_path(projects, "/workspace/project", SESSION_UUID)
     _write_entries(path, entries, time.time())
     original = path.read_bytes()
@@ -220,7 +218,9 @@ def test_context_only_import_uses_project_name(projects, tmp_path, closed):
 
 def test_context_only_first_entry_skips_to_first_real_request(projects, tmp_path):
     path = _transcript_path(projects, "/workspace/project", SESSION_UUID)
-    entries = _base_entries("/workspace/project", "<openbase-claude-code-context>private</openbase-claude-code-context>")
+    entries = _base_entries(
+        "/workspace/project", "<openbase-claude-code-context>private</openbase-claude-code-context>"
+    )
     entries += _base_entries("/workspace/project", "Are you there?")
     _write_entries(path, entries, time.time())
     store = Store(tmp_path / "state.sqlite3", backend="claude_code")
@@ -233,7 +233,9 @@ def test_existing_context_name_is_repaired_once_when_transcript_is_idle(projects
     from super_agents.agent_store import preview
     from super_agents.claude_prompts import with_claude_turn_context
 
-    prompt = with_claude_turn_context("Are you there?", cwd="/workspace/project", developer_instructions="private " * 30)
+    prompt = with_claude_turn_context(
+        "Are you there?", cwd="/workspace/project", developer_instructions="private " * 30
+    )
     path = _transcript_path(projects, "/workspace/project", SESSION_UUID)
     _write_entries(path, _base_entries("/workspace/project", prompt), time.time() - 3600)
     original = path.read_bytes()
@@ -243,7 +245,9 @@ def test_existing_context_name_is_repaired_once_when_transcript_is_idle(projects
     # Reproduce an existing import from the old implementation, including its
     # already-synced empty custom title and unchanged transcript mtime.
     with store.connect() as conn:
-        conn.execute("update sessions set name = ?, transcript_title = '' where id = ?", (preview(prompt, 80), session.id))
+        conn.execute(
+            "update sessions set name = ?, transcript_title = '' where id = ?", (preview(prompt, 80), session.id)
+        )
 
     assert refresh_last_interaction_index(store, now=time.monotonic() + 100) == 1
     repaired = store.get_session(session.id)

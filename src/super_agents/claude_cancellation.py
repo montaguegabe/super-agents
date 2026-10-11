@@ -18,9 +18,7 @@ class TurnCancellationMixin:
         if turn_id and (not input_data.turn_id or input_data.turn_id == turn_id):
             # Persist first: the owner can be a different client/process and
             # must stop even if an SDK interrupt acknowledgement never arrives.
-            turn = self.store.update_turn(
-                turn_id, only_if_active=True, status="cancelled", finished_at=iso_now()
-            )
+            turn = self.store.update_turn(turn_id, only_if_active=True, status="cancelled", finished_at=iso_now())
             cancelled = turn.status == "cancelled"
             if cancelled:
                 self._permission_gate.cancel_scope(thread_id=session.id, turn_id=turn_id)

@@ -33,13 +33,22 @@ def test_embedding_callback_capability_advertises_optional_constructor_contract(
 
 @pytest.mark.parametrize("permission_mode", ["default", "bypassPermissions"])
 async def test_configure_preserves_options_and_runs_before_fresh_and_resumed_connect(
-    tmp_path, monkeypatch, permission_mode,
+    tmp_path,
+    monkeypatch,
+    permission_mode,
 ):
     monkeypatch.setenv("SUPER_AGENTS_CLAUDE_PERMISSION_MODE", permission_mode)
     existing_server = {"command": "unrelated-server"}
-    (tmp_path / "isolated-claude-state.json").write_text(json.dumps({"mcpServers": {
-        "existing": existing_server, "super-agents": {"command": "super-agents-mcp"},
-    }}))
+    (tmp_path / "isolated-claude-state.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "existing": existing_server,
+                    "super-agents": {"command": "super-agents-mcp"},
+                }
+            }
+        )
+    )
     existing_hook = object()
     added_hook = object()
     calls = []
@@ -74,8 +83,10 @@ async def test_configure_preserves_options_and_runs_before_fresh_and_resumed_con
 
     store = Store(tmp_path / "store.sqlite3")
     client = ClaudeAgentSdkClient(
-        store=store, sdk_loader=lambda: sdk,
-        disallowed_tools_for_session=lambda _: ("Task",), configure_session=configure,
+        store=store,
+        sdk_loader=lambda: sdk,
+        disallowed_tools_for_session=lambda _: ("Task",),
+        configure_session=configure,
     )
     thread = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
     session = store.get_session(thread["threadId"])
@@ -111,13 +122,17 @@ async def test_validator_runs_after_background_work_and_before_completion(tmp_pa
         await release.wait()
 
     client = ClaudeAgentSdkClient(
-        store=store, sdk_loader=lambda: BackgroundTaskSdk(), validate_turn_result=validate,
+        store=store,
+        sdk_loader=lambda: BackgroundTaskSdk(),
+        validate_turn_result=validate,
     )
     client._background_task_poll_seconds = 0.01
     thread = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
     turn_id = (await client.start_turn_by_label(LabelQueryInput(label="worker"), {"prompt": "inspect"}))["turnId"]
     try:
-        await wait_for(lambda: "waiting on 2 background" in (store.get_session(thread["threadId"]).last_observed_state or ""))
+        await wait_for(
+            lambda: "waiting on 2 background" in (store.get_session(thread["threadId"]).last_observed_state or "")
+        )
         assert not entered.is_set()
         BackgroundTaskClaudeSDKClient.tasks_done.set()
         await asyncio.wait_for(entered.wait(), 2)
@@ -281,7 +296,8 @@ async def test_orphan_recovery_never_completes_unvalidated_work(tmp_path, monkey
         await asyncio.Event().wait()
 
     owner = ClaudeAgentSdkClient(
-        store=store, sdk_loader=lambda: BackgroundTaskSdk(),
+        store=store,
+        sdk_loader=lambda: BackgroundTaskSdk(),
         validate_turn_result=validate if with_validator else None,
     )
     thread_id = (await owner.start_thread({"name": "worker", "cwd": str(tmp_path)}))["threadId"]

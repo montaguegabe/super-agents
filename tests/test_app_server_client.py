@@ -3314,8 +3314,9 @@ def test_tool_surface_preserves_current_names_and_schemas() -> None:
     assert "approvalPolicy" in by_name["super_agents_start"].input_schema["properties"]
     assert "sandbox" in by_name["super_agents_start"].input_schema["properties"]
     assert "Usually omit model" in by_name["super_agents_start"].description
-    assert "honor the configured Super Agents default" in (
-        by_name["super_agents_start"].input_schema["properties"]["model"]["description"]
+    assert (
+        "honor the configured Super Agents default"
+        in (by_name["super_agents_start"].input_schema["properties"]["model"]["description"])
     )
     assert "approvalPolicy" in by_name["super_agents_start_turn"].input_schema["properties"]
     assert "sandboxType" in by_name["super_agents_start_turn"].input_schema["properties"]
@@ -3670,9 +3671,7 @@ async def test_resume_wedge_cooldown_fails_fast_after_timeout(tmp_path: Path) ->
             if method == "thread/resume":
                 self.resume_requests += 1
                 assert timeout_seconds == app_client_turns.RESUME_TIMEOUT_SECONDS
-                raise TimeoutError(
-                    "Timed out waiting for app-server response to thread/resume."
-                )
+                raise TimeoutError("Timed out waiting for app-server response to thread/resume.")
             return {}
 
     client = WedgedResumeClient("ws://unused", tmp_path / "state.json", "gpt-test")

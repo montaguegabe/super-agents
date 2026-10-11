@@ -243,6 +243,7 @@ def test_registry_dir_defaults_into_claude_home(tmp_path: Path, monkeypatch: pyt
 async def test_connect_failure_without_dead_socket_proof_does_not_allow_resume(monkeypatch, error):
     async def fail(*args, **kwargs):
         raise error
+
     monkeypatch.setattr(asyncio, "open_unix_connection", fail)
     result = await deliver_steer(InboxRecord(session_id="s", socket="unused"), "followup")
     assert result.reason == "connect_unavailable"

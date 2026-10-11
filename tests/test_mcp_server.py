@@ -14,8 +14,11 @@ from mcp.types import TextContent
 @pytest.mark.asyncio
 async def test_cli_entrypoint_serves_tools_over_stdio(tmp_path) -> None:
     env = {
-        **{key: value for key, value in os.environ.items()
-            if not (key.startswith("SUPER_AGENTS_") or key == "CODEX_APP_SERVER_URL")},
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if not (key.startswith("SUPER_AGENTS_") or key == "CODEX_APP_SERVER_URL")
+        },
         "OPENBASE_CODING_BACKEND": "codex",
         "SUPER_AGENTS_WS_URL": "ws://127.0.0.1:1",
         "SUPER_AGENTS_STATE_FILE": str(tmp_path / "state.json"),

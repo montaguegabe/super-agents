@@ -45,7 +45,7 @@ def _strip_internal_envelopes(value: str) -> str:
             # Claude can append system reminders as separate content blocks.
             start = trimmed.rfind("\n" + opening)
             if start >= 0:
-                block = trimmed[start + 1:]
+                block = trimmed[start + 1 :]
                 end = _envelope_end(block, opening, closing)
                 if end is None or end == len(block):
                     text = trimmed[:start].rstrip()

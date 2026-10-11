@@ -121,7 +121,8 @@ class InboxDeliveryResult:
 
     def to_json(self) -> dict[str, object]:
         payload: dict[str, object] = {
-            "written": self.written, "confirmed": self.confirmed,
+            "written": self.written,
+            "confirmed": self.confirmed,
             "mayHaveBeenWritten": self.written or self.may_have_been_written,
         }
         if self.message_id is not None:
@@ -246,7 +247,9 @@ async def deliver_steer(
         # or permission error must not authorize resuming a live conversation.
         dead = isinstance(exc, OSError) and exc.errno in {errno.ENOENT, errno.ECONNREFUSED}
         return InboxDeliveryResult(
-            written=False, reason="socket_unreachable" if dead else "connect_unavailable", message_id=message_id,
+            written=False,
+            reason="socket_unreachable" if dead else "connect_unavailable",
+            message_id=message_id,
         )
 
     try:
@@ -258,7 +261,10 @@ async def deliver_steer(
         logger.info("Claude inbox write failed at %s: %s", record.socket, exc)
         _close_writer(writer)
         return InboxDeliveryResult(
-            written=False, reason="write_failed", message_id=message_id, may_have_been_written=True,
+            written=False,
+            reason="write_failed",
+            message_id=message_id,
+            may_have_been_written=True,
         )
 
     # A peer can consume the frame and then close without an ACK. EOF cannot
@@ -268,7 +274,9 @@ async def deliver_steer(
     finally:
         _close_writer(writer)
     return InboxDeliveryResult(
-        written=True, message_id=message_id, may_have_been_written=True,
+        written=True,
+        message_id=message_id,
+        may_have_been_written=True,
         reason="peer_closed_without_ack" if closed else None,
     )
 
