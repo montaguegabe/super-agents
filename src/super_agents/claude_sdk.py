@@ -63,9 +63,9 @@ from super_agents.claude_options import (  # noqa: F401  (constants re-exported 
     CLAUDE_PERMISSION_MODE,
     CLAUDE_SDK_ENV_OVERRIDES,
     CLAUDE_SERVICE_TIER_EFFORTS,
+    _system_prompt_option,
 )
 from super_agents.claude_options import (
-    _system_prompt_option,
     agent_options as _agent_options,
 )
 from super_agents.claude_options import (
@@ -82,13 +82,13 @@ from super_agents.claude_prompts import (
 from super_agents.claude_prompts import (
     with_claude_turn_context as _with_claude_turn_context,
 )
+from super_agents.claude_steering import ActiveSteeringMixin
 from super_agents.claude_system_prompt import (
     compose_system_prompt,
     supports_refreshable_system_prompt,
     system_prompt_fingerprint,
 )
 from super_agents.claude_transcript import transcript_turn_views
-from super_agents.claude_steering import ActiveSteeringMixin
 from super_agents.claude_views import SessionViewMixin
 from super_agents.defaults import (
     default_super_agents_model,
@@ -993,7 +993,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                             "Claude Code stream ended without a terminal result; task completion is unverified."
                         )
                     if getattr(last_result_message, "is_error", False):
-                        raise RuntimeError("Claude Code returned an error result; task completion is unverified.")
+                        raise RuntimeError(_error_result_message(last_result_message))
                     if self._validate_turn_result is not None:
                         if active_background_tasks:
                             raise RuntimeError(
@@ -1550,6 +1550,19 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             "error": f"{tool} is only available through the Codex app-server backend.",
             **{key: value for key, value in extra.items() if value is not None},
         }
+
+
+_ERROR_RESULT_MESSAGE = "Claude Code returned an error result; task completion is unverified."
+
+
+def _error_result_message(message: Any) -> str:
+    """The failed turn's error, led by Claude Code's own result text when it gave
+    one (e.g. "Not logged in · Please run /login"), so callers can tell a dead
+    login or an API error apart from an unverified completion."""
+    result = getattr(message, "result", None)
+    if isinstance(result, str) and result.strip():
+        return f"{result.strip()} ({_ERROR_RESULT_MESSAGE})"
+    return _ERROR_RESULT_MESSAGE
 
 
 def _is_noop_result(message: Any) -> bool:
