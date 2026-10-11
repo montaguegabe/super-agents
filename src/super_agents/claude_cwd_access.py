@@ -99,13 +99,17 @@ class CwdAccessProbe:
         return self._finished.is_set()
 
     async def wait(self, seconds: float) -> bool:
-        deadline = time.monotonic() + seconds
-        while not self.done:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            await asyncio.sleep(min(POLL_SECONDS, remaining))
-        return True
+        """Wait up to ``seconds`` for the listing; return as soon as it finishes.
+
+        A readable folder answers in microseconds, so this must not round up
+        to a poll interval: a 0.5 s poll added half a second to every Claude
+        Code start (and broke the cli's socket-delivery timing tests).
+        """
+        if self.done:
+            return True
+        if seconds <= 0:
+            return False
+        return await asyncio.to_thread(self._finished.wait, seconds)
 
 
 async def await_cwd_access(
