@@ -765,7 +765,10 @@ def backend_option_properties() -> JsonObject:
                 "Optional advanced override. Usually omit this: passing model alone routes to a "
                 "compatible backend automatically, and an explicit backend that cannot run the "
                 "requested model fails immediately. On name-based operations, disambiguates "
-                "identical names."
+                "identical names. Values: codex = OpenAI Codex with the user's own account; "
+                "claude_code = Claude Code with the user's own account; openbase_cloud = Claude "
+                "Code through Openbase Cloud; openbase_cloud_codex = Codex through Openbase Cloud. "
+                "Map what the user said (including speech-recognition spellings) to one of these."
             ),
         }
     }

@@ -499,13 +499,19 @@ class TransportClientMixin:
                 )
             return
         turn = self.ensure_turn(thread_id, turn_id)
+        if method == "turn/started" and turn.status not in {"completed", "failed", "cancelled"}:
+            self.note_current_turn(thread_id, turn_id)
         received_at = iso_now()
         turn.events.append({"method": method, "params": params, "receivedAt": received_at})
         turn.notification_count += 1
         if len(turn.events) > 200:
             turn.events.pop(0)
         error_message = turn_error_message(params)
-        if method == "turn/completed":
+        if turn.status == "cancelled" and method == "turn/completed" and not error_message:
+            # The app-server finishes an interrupted turn after cancel_turn
+            # already recorded it as cancelled; that is not a completion.
+            pass
+        elif method == "turn/completed":
             # A "completed" lifecycle with a non-null error payload is a
             # failed turn (e.g. a model the account cannot run); recording
             # it as completed hides that the agent did no work.
@@ -532,6 +538,28 @@ class TransportClientMixin:
             )
 
         last_useful_message = error_message or text_preview(params) or method
+        if self.is_superseded_turn(thread_id, turn_id):
+            # A newer turn owns the session now: a late event from this one
+            # (typically the interrupted turn finishing after a Stop) updates
+            # only its own record. Writing the session's active/last turn
+            # here hid the new turn, which then never answered.
+            self._schedule_merge_session(
+                thread_id,
+                {
+                    "threadId": thread_id,
+                    "turns": {
+                        turn_id: turn_patch(
+                            turn_id,
+                            turn.status,
+                            turn=turn,
+                            updated_at=received_at,
+                            last_useful_message=last_useful_message,
+                            last_error=error_message,
+                        )
+                    },
+                },
+            )
+            return
         clear_fields = ["activeTurnId"] if turn.status in {"completed", "failed", "cancelled"} else []
         if clear_fields and not error_message:
             # A clean terminal turn supersedes any prior turn's error.
@@ -618,6 +646,15 @@ class TransportClientMixin:
         self._merge_session_tasks.add(task)
         task.add_done_callback(self._merge_session_tasks.discard)
         return task
+
+    def note_current_turn(self, thread_id: str, turn_id: str) -> None:
+        """Record ``turn_id`` as the newest turn started on ``thread_id``."""
+        self.__dict__.setdefault("_current_turn_ids", {})[thread_id] = turn_id
+
+    def is_superseded_turn(self, thread_id: str, turn_id: str) -> bool:
+        """Whether a newer turn has started on ``thread_id`` since ``turn_id``."""
+        current = self.__dict__.get("_current_turn_ids", {}).get(thread_id)
+        return current is not None and current != turn_id
 
     def ensure_turn(self, thread_id: str, turn_id: str) -> TurnState:
         key = turn_key(thread_id, turn_id)

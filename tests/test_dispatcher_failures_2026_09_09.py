@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from super_agents.agent_store import Store
-from super_agents.app_protocol import normalize_turn_status, turn_error_message
+from super_agents.app_protocol import normalize_turn_status, turn_error_message, unwrap_error_message
 from super_agents.app_server_client import CodexAppServerClient
 from super_agents.backend_config import (
     CLAUDE_CODE_BACKEND,
@@ -133,6 +133,15 @@ def test_turn_error_message_unwraps_provider_envelope() -> None:
     turn = {"id": "turn-1", "status": "completed", "error": {"message": ASTRA_ERROR_ENVELOPE}}
     message = turn_error_message(turn)
     assert message == "The 'astra' model is not supported when using Codex with a ChatGPT account."
+
+
+def test_unwrap_error_message_keeps_prefix_around_envelope() -> None:
+    text = 'API Error: 524 {"error": {"message": "A timeout occurred.", "code": "origin_response_timeout"}} (retry)'
+    assert unwrap_error_message(text) == "API Error: 524 A timeout occurred. (retry)"
+    assert unwrap_error_message("plain failure") == "plain failure"
+    assert unwrap_error_message('{"error": {"code": "x"}}') == '{"error": {"code": "x"}}'
+    assert unwrap_error_message("broken {not json") == "broken {not json"
+    assert unwrap_error_message("   ") is None
 
 
 def test_completed_turn_with_error_normalizes_to_failed() -> None:

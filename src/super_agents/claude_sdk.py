@@ -28,12 +28,20 @@ from super_agents.app_models import (
 from super_agents.app_protocol import (
     _without_super_agent_identity_lines,
     is_active_status,
+    unwrap_error_message,
     with_super_agent_identity_instructions,
 )
 from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
+from super_agents.claude_failure_kinds import classify_turn_failure
+from super_agents.claude_cwd_access import (
+    BLOCKED_PERMISSION_DIALOG,
+    MAX_WAIT_SECONDS,
+    PROBE_GRACE_SECONDS,
+    await_cwd_access,
+)
 from super_agents.claude_home_index import refresh_last_interaction_index
 from super_agents.claude_inbox import (
     deliver_steer as _deliver_inbox_steer,
@@ -88,7 +96,7 @@ from super_agents.claude_system_prompt import (
     supports_refreshable_system_prompt,
     system_prompt_fingerprint,
 )
-from super_agents.claude_transcript import transcript_turn_views
+from super_agents.claude_transcript import transcript_path, transcript_turn_views
 from super_agents.claude_views import SessionViewMixin
 from super_agents.defaults import (
     default_super_agents_model,
@@ -170,6 +178,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._session_interrupted_steer_followups: set[str] = set()
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
         self._interrupted_steer_start_timeout_seconds = 90.0
+        self._cwd_access_grace_seconds = PROBE_GRACE_SECONDS
+        self._cwd_access_max_wait_seconds = MAX_WAIT_SECONDS
         self._background_task_poll_seconds = _BACKGROUND_TASK_POLL_SECONDS
         self._orphan_sweep_done = False
         # Identifies this client instance in the shared store so instances in
@@ -477,6 +487,12 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         return self._status_item(self._resolve_session(input_data))
 
     async def progress_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+        # The voice worker polls this every second on the loop that carries
+        # live audio; the sqlite reads and the log-tail file read belong on a
+        # thread (VM2 2026-10-11: "event loop blocked" up to 1.1 s mid-call).
+        return await asyncio.to_thread(self._progress_by_label_sync, input_data)
+
+    def _progress_by_label_sync(self, input_data: LabelQueryInput) -> JsonObject:
         session = self._resolve_session(input_data)
         payload = self._status_item(session)
         if input_data.turn_id:
@@ -955,16 +971,17 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         # The default can recover finished model work after a
                         # process exit. An embedding validator must succeed
                         # before that recovery shortcut is safe to persist.
+                        # Every result counts, including one that may still
+                        # owe a steer's follow-up: a later response clears the
+                        # stamp again when its first content arrives, and a
+                        # process that dies in between leaves finished work,
+                        # which the orphan sweep then completes rather than
+                        # fails (VM2 2026-10-11, Cooper's steered turn).
                         await asyncio.to_thread(
                             self.store.update_turn,
                             turn_id,
                             only_if_active=True,
-                            response_finished_at=(
-                                iso_now()
-                                if self._validate_turn_result is None
-                                and self._session_pending_results.get(session_id, 0) <= 1
-                                else None
-                            ),
+                            response_finished_at=(iso_now() if self._validate_turn_result is None else None),
                         )
                         # A steer can register a pending result while the
                         # background drain is already reading; whichever cycle
@@ -1048,24 +1065,36 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 # receive_response(). Drop the client so the next turn
                 # resumes from the transcript tip on a clean stream.
                 await self._disconnect_sdk_client(session_id)
-                if _unresumable_session_error(exc):
-                    # The recorded backend session no longer exists on disk
-                    # (e.g. its transcript was orphaned by a config-directory
-                    # move), so resuming it fails identically on every turn —
-                    # forever. Drop the pointer so the next turn starts a
-                    # fresh backend session instead of replaying this failure
-                    # on every request.
+                current = self.store.get_session(session_id)
+                if _resume_transcript_missing(current):
+                    # The recorded backend session's transcript is gone (e.g.
+                    # orphaned by a config-directory move), so resuming it
+                    # fails identically on every turn — forever. Drop the
+                    # pointer so the next turn starts a fresh backend session.
+                    # Decided from the filesystem, never from error wording: a
+                    # transient failure with the transcript present keeps it.
                     append_log(
                         session.log_path,
                         f"[{iso_now()}] RECOVER clearing unresumable backend session "
-                        f"{session.backend_session_id}; the next turn starts fresh\n",
+                        f"{current.backend_session_id}: transcript not found; the next turn starts fresh\n",
                     )
                     self.store.update_session(session_id, backend_session_id=None)
                 if self._turn_was_cancelled(turn_id):
                     self._finish_cancelled_turn(session_id, turn_id)
                 else:
+                    failure_text = _turn_failure_text(exc)
+                    failure_fields: dict[str, object] = {}
+                    if not self.store.get_turn(turn_id).error_kind and (kind := classify_turn_failure(exc)):
+                        # A stable kind for retry/speech decisions; the stream
+                        # or the consent wait may already have set one.
+                        failure_fields["error_kind"] = kind
                     failed = self.store.update_turn(
-                        turn_id, only_if_active=True, status="failed", finished_at=iso_now(), last_error=str(exc)
+                        turn_id,
+                        only_if_active=True,
+                        status="failed",
+                        finished_at=iso_now(),
+                        last_error=failure_text,
+                        **failure_fields,
                     )
                     if failed.status == "cancelled":
                         self._finish_cancelled_turn(session_id, turn_id)
@@ -1075,7 +1104,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         turn_id,
                         status="failed",
                         active_turn_id=None,
-                        last_observed_state=str(exc),
+                        last_observed_state=failure_text,
                     )
             finally:
                 self._unregister_active_owner(session_id)
@@ -1112,6 +1141,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 backend_session_id=claude_session_id,
             )
         useful = _message_preview(message)
+        if isinstance(error_kind := getattr(message, "error", None), str) and error_kind:
+            # The SDK's structured failure reason (AssistantMessage.error),
+            # e.g. "authentication_failed" when Claude Code is signed out.
+            await asyncio.to_thread(self.store.update_turn, turn_id, only_if_active=True, error_kind=error_kind)
         if isinstance(getattr(message, "content", None), list) and not hasattr(message, "tool_use_result"):
             await asyncio.to_thread(
                 self.store.update_turn,
@@ -1243,7 +1276,12 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             self.store.update_session(session_id, **fields)
         status = fields.get("status")
         if status in {"completed", "cancelled", "failed"}:
-            error = {"message": fields.get("last_observed_state")} if status == "failed" else None
+            error = None
+            if status == "failed":
+                error = {"message": fields.get("last_observed_state")}
+                with contextlib.suppress(KeyError):
+                    if error_kind := self.store.get_turn(turn_id).error_kind:
+                        error["errorKind"] = error_kind
             self._notify_turn(
                 "turn/failed" if status == "failed" else "turn/completed",
                 session_id,
@@ -1317,6 +1355,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             self._record_session_leaf_owner(session.id)
             return existing
         await self._disconnect_sdk_client(session.id)
+        await self._await_cwd_access(session)
         options = await asyncio.to_thread(
             _agent_options,
             sdk,
@@ -1346,6 +1385,13 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             # cached yet. Clean up only the SDK instance we just created.
             await client.disconnect()
             raise
+        except Exception as exc:
+            # Same for a failed start (e.g. "Control request timeout:
+            # initialize" when the CLI hangs before answering): without this
+            # every failed turn left a hung Claude Code process behind.
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+            raise RuntimeError(f"Claude Code did not start in {session.cwd}: {exc}") from exc
         if disallowed_tools:
             logger.info(
                 "dispatch_timing stage=super_agent_tool_policy_connected thread_id=%s disallowed_tools=%s",
@@ -1361,6 +1407,65 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._sdk_client_models[session.id] = _openbase_cloud_claude_model(model, self.backend)
         self._record_session_leaf_owner(session.id)
         return client
+
+    async def _await_cwd_access(self, session: Session) -> None:
+        """Hold the start until the thread's folder can be opened.
+
+        A Claude Code process spawned into a folder whose macOS consent dialog
+        is still pending hangs in getcwd() and only fails a minute later as
+        "Control request timeout: initialize". Probing the folder here first
+        raises that same dialog at once, marks the active turn
+        ``blocked_permission_dialog`` within seconds so every surface can say
+        what to click, and lets the turn carry on by itself once the user
+        answers (see ``claude_cwd_access``).
+        """
+        turn_id = self._active_turn_id(session.id)
+
+        async def on_blocked(message: str) -> None:
+            logger.warning(
+                "dispatch_timing stage=claude_cwd_access_blocked thread_id=%s turn_id=%s cwd=%s",
+                session.id,
+                turn_id,
+                session.cwd,
+            )
+            if turn_id:
+                await asyncio.to_thread(
+                    self.store.update_turn, turn_id, only_if_active=True, error_kind=BLOCKED_PERMISSION_DIALOG
+                )
+            await asyncio.to_thread(self.store.update_session, session.id, last_observed_state=message)
+            if turn_id:
+                self._notify_turn(
+                    "turn/updated",
+                    session.id,
+                    turn_id,
+                    blocked={"errorKind": BLOCKED_PERMISSION_DIALOG, "message": message},
+                )
+
+        async def on_unblocked() -> None:
+            logger.info(
+                "dispatch_timing stage=claude_cwd_access_granted thread_id=%s turn_id=%s cwd=%s",
+                session.id,
+                turn_id,
+                session.cwd,
+            )
+            if turn_id:
+                await asyncio.to_thread(self.store.update_turn, turn_id, only_if_active=True, error_kind=None)
+            await asyncio.to_thread(
+                self.store.update_session,
+                session.id,
+                last_observed_state="Folder access granted; Claude Code is starting",
+            )
+            if turn_id:
+                self._notify_turn("turn/updated", session.id, turn_id)
+
+        await await_cwd_access(
+            session.cwd,
+            on_blocked=on_blocked,
+            on_unblocked=on_unblocked,
+            is_cancelled=lambda: bool(turn_id) and self._turn_was_cancelled(turn_id),
+            grace_seconds=self._cwd_access_grace_seconds,
+            max_wait_seconds=self._cwd_access_max_wait_seconds,
+        )
 
     def _owns_session_leaf(self, session: Session) -> bool:
         return session.last_client_instance in (None, self._instance_id)
@@ -1562,8 +1667,17 @@ def _error_result_message(message: Any) -> str:
     login or an API error apart from an unverified completion."""
     result = getattr(message, "result", None)
     if isinstance(result, str) and result.strip():
-        return f"{result.strip()} ({_ERROR_RESULT_MESSAGE})"
+        # Provider failures arrive as the raw error envelope (e.g. a Cloud
+        # proxy timeout's JSON); readers need its message, not its internals.
+        return f"{unwrap_error_message(result) or result.strip()} ({_ERROR_RESULT_MESSAGE})"
     return _ERROR_RESULT_MESSAGE
+
+
+def _turn_failure_text(exc: BaseException) -> str:
+    """What a failed turn shows for ``exc``: the readable core of a provider
+    envelope when there is one, else the exception text or type."""
+    text = str(exc)
+    return unwrap_error_message(text) or text or type(exc).__name__
 
 
 def _is_noop_result(message: Any) -> bool:
@@ -1606,15 +1720,10 @@ def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) 
         active_background_tasks.pop(task_id, None)
 
 
-# Claude Code's exact wording when `--resume <id>` targets a session whose
-# transcript is gone (deleted, or orphaned by a CLAUDE_CONFIG_DIR change).
-# This failure is deterministic and permanent for that id, unlike transient
-# launch/stream errors, which must NOT clear the resume pointer.
-_UNRESUMABLE_SESSION_MARKER = "no conversation found with session id"
-
-
-def _unresumable_session_error(exc: BaseException) -> bool:
-    return _UNRESUMABLE_SESSION_MARKER in str(exc).lower()
+def _resume_transcript_missing(session: Session) -> bool:
+    """True when the session points at a backend session whose transcript no
+    longer exists, so ``--resume`` can never succeed for that id."""
+    return bool(session.backend_session_id) and transcript_path(session) is None
 
 
 def _load_sdk() -> Any:

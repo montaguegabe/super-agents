@@ -4,6 +4,7 @@ from unittest.mock import ANY
 
 import asyncio
 import json
+import re
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -842,6 +843,10 @@ async def test_claude_sdk_busy_session_start_steers_instead_of_queueing(
     assert [_user_prompt(prompt) for prompt in FakeClaudeSDKClient.prompts] == ["first", "second"]
     assert store.queued_turns(second["threadId"]) == []
     assert "second" in (store.get_turn(first["turnId"]).last_useful_message or "")
+    # The result is stamped even while a steer's follow-up may still be owed,
+    # so a process that dies in that window leaves finished work for the
+    # orphan sweep to complete rather than fail (VM2 2026-10-11, Cooper).
+    assert store.get_turn(first["turnId"]).response_finished_at is not None
 
 
 @pytest.mark.asyncio
@@ -1539,19 +1544,27 @@ async def test_claude_sdk_startup_sweep_preserves_last_activity_time(
     assert session.updated_at == old
 
 
-def test_unresumable_session_error_detection() -> None:
-    """Only the deterministic missing-transcript resume failure clears the
-    pointer; transient launch/stream errors must never do so."""
-    from super_agents.claude_sdk import _unresumable_session_error
+def test_resume_pointer_cleared_only_when_transcript_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The decision comes from the filesystem, not from error wording: a
+    session whose transcript exists keeps its resume pointer whatever the
+    failure said."""
+    from super_agents.claude_sdk import _resume_transcript_missing
 
-    assert _unresumable_session_error(
-        RuntimeError(
-            "Command failed with exit code 1: No conversation found with "
-            "session ID: ee69d7eb-c602-47dd-bd41-7b11e41695ee"
-        )
-    )
-    assert not _unresumable_session_error(RuntimeError("stream disconnected"))
-    assert not _unresumable_session_error(TimeoutError("turn timed out"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    store = Store(tmp_path / "state.sqlite3")
+    session = store.create_session("sdk", cwd=str(tmp_path / "proj"))
+    assert not _resume_transcript_missing(session)
+
+    session = store.update_session(session.id, backend_session_id="ee69d7eb-c602-47dd-bd41-7b11e41695ee")
+    assert _resume_transcript_missing(session)
+
+    project_dir = tmp_path / "claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", session.cwd)
+    project_dir.mkdir(parents=True)
+    (project_dir / "ee69d7eb-c602-47dd-bd41-7b11e41695ee.jsonl").write_text("{}\n")
+    assert not _resume_transcript_missing(session)
 
 
 class _InboxProbeServer:
@@ -1826,4 +1839,48 @@ async def test_warm_session_leaves_a_busy_session_alone(tmp_path):
         "reason": "busy",
     }
     assert thread_id not in client._sdk_clients
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_cli_start_disconnects_the_spawned_client(tmp_path):
+    """VM2, 2026-10-11: Claude Code hung at startup ("Control request timeout:
+    initialize"); every failed turn left that hung CLI process running."""
+
+    class HangingStartClient(FakeClaudeSDKClient):
+        async def connect(self) -> None:
+            self.connected = True
+            raise Exception("Control request timeout: initialize")
+
+    class HangingSdk(FakeSdk):
+        ClaudeSDKClient = HangingStartClient
+
+    store = Store(tmp_path / "start.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=HangingSdk)
+    thread = await client.start_thread({"name": "hang", "cwd": str(tmp_path)})
+    before = FakeClaudeSDKClient.disconnect_count
+    with pytest.raises(RuntimeError, match="Claude Code did not start in .*initialize"):
+        await client._sdk_client_for(store.get_session(thread["threadId"]), None, None, None, HangingSdk())
+    assert FakeClaudeSDKClient.disconnect_count == before + 1
+    assert thread["threadId"] not in client._sdk_clients
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_status_resweeps_turns_orphaned_after_startup(monkeypatch, tmp_path):
+    """VM2 2026-10-11 04:30Z: a voice call's job process exited at hangup with
+    Cooper's steered turn still open; every reader kept showing it running
+    for two minutes because the sweep ran once per process. Later status
+    reads must reclaim it."""
+    monkeypatch.setattr("super_agents.claude_orphans._ORPHAN_RESWEEP_INTERVAL_SECONDS", 0)
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    await client.status()  # the startup sweep, nothing to reclaim yet
+    turn_id = _insert_ghost_turn(store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z")
+
+    await client.status()
+
+    assert store.get_turn(turn_id).status == "failed"
+    assert store.get_session(started["threadId"]).active_turn_id is None
     await client.close()

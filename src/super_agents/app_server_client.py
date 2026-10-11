@@ -299,6 +299,8 @@ class CodexAppServerClient(
         self._timed_out_requests: dict[str | int, JsonObject] = {}
         self._pending_server_requests: dict[str | int, PendingServerRequest] = {}
         self._turns: dict[str, TurnState] = {}
+        # The newest turn started on each thread (see is_superseded_turn).
+        self._current_turn_ids: dict[str, str] = {}
         self._connect_lock = asyncio.Lock()
         self._reader_task: asyncio.Task[None] | None = None
         self._state_lock = asyncio.Lock()
