@@ -166,3 +166,30 @@ async def _read_until_result(client: Any) -> None:
     async for message in client.receive_response():
         if getattr(message, "num_turns", None) is not None:
             return
+
+
+#: How far back (characters of transcript) an in-band instructions block may
+#: be and still count as present: about 50k tokens, so the Dispatcher's rules
+#: stay close to the request instead of drifting to the far end of the window.
+RECENT_INSTRUCTIONS_CHARS = 200_000
+
+
+def transcript_recently_contains(
+    path: Path | None, marker: str, *, tail_chars: int = RECENT_INSTRUCTIONS_CHARS
+) -> bool:
+    """Whether ``marker`` appears in the transcript's recent tail, after its last compaction."""
+    if path is None:
+        return False
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            # JSON escaping can roughly double the characters on disk.
+            handle.seek(max(0, size - tail_chars * 2))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    boundary = tail.rfind('"compact_boundary"')
+    if boundary >= 0:
+        tail = tail[boundary:]
+    return marker in tail[-tail_chars * 2 :]

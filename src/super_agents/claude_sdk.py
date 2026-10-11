@@ -36,7 +36,8 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
-from super_agents.claude_compaction import SessionCompactionMixin
+from super_agents.claude_compaction import SessionCompactionMixin, transcript_recently_contains
+from super_agents.claude_prompts import INSTRUCTIONS_FINGERPRINT_PREFIX, instructions_fingerprint
 from super_agents.claude_completion import ResultValidation
 from super_agents.claude_responses import PendingQuery, PendingResults
 from super_agents.claude_failure_kinds import classify_turn_failure
@@ -1708,12 +1709,18 @@ class ClaudeAgentSdkClient(
     def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
         # Also used by active steers: retain their existing per-query context;
         # never disconnect or replace a running client's system prompt mid-turn.
+        instructions = self._session_developer_instructions(
+            session, _optional_str(turn_input.get("developerInstructions"))
+        )
+        recent = bool(instructions) and transcript_recently_contains(
+            transcript_path(session) if session.backend_session_id else None,
+            INSTRUCTIONS_FINGERPRINT_PREFIX + instructions_fingerprint(instructions),
+        )
         return _with_claude_turn_context(
             str(turn_input["prompt"]),
             cwd=session.cwd,
-            developer_instructions=self._session_developer_instructions(
-                session, _optional_str(turn_input.get("developerInstructions"))
-            ),
+            developer_instructions=instructions,
+            instructions_in_recent_context=recent,
         )
 
     def _require_sdk(self) -> Any:
