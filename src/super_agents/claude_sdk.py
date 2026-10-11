@@ -354,7 +354,6 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 reasoning_effort,
                 service_tier,
                 sdk,
-                developer_instructions=_optional_str(turn_input.get("developerInstructions")),
             )
         connected = client is not already
         logger.info(
@@ -810,7 +809,6 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     reasoning_effort,
                     service_tier,
                     sdk,
-                    developer_instructions=developer_instructions,
                 )
                 if supports_refreshable_system_prompt(sdk) and not session.backend_session_id:
                     # A fresh session: policy/identity were rebuilt from the
@@ -824,7 +822,9 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     prompt = _with_claude_turn_context(
                         self.store.get_turn(turn_id).prompt,
                         cwd=session.cwd,
-                        developer_instructions=None,
+                        # Turn-local policy must still reach a fresh session;
+                        # only standing policy lives in the system prompt.
+                        developer_instructions=developer_instructions,
                     )
                 if announce_intro:
                     # The greeting precedes the first prompt so the user hears
@@ -1341,14 +1341,15 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
-        *,
-        developer_instructions: str | None = None,
     ) -> Any:
         if self._transport_outside_context(session):
             raise RuntimeError("Managed SDK transport belongs to another event loop; nothing was submitted.")
+        # Turn overlays (live routing data, voice context, etc.) belong in
+        # the appended message. Putting them before the conversation both
+        # invalidates its prompt cache and reconnects the CLI on every change.
         system_prompt = compose_system_prompt(
             _system_prompt_option(),
-            self._session_developer_instructions(session, developer_instructions),
+            self._session_developer_instructions(session),
             sdk,
         )
         prompt_fingerprint = system_prompt_fingerprint(system_prompt)
