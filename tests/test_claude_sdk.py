@@ -14,7 +14,11 @@ import pytest
 
 from super_agents.agent_store import Store
 from super_agents.app_models import LabelQueryInput, QueueCancelInput
-from super_agents.claude_sdk import ClaudeAgentSdkClient
+from super_agents.claude_sdk import UNTRACKABLE_SCHEDULER_TOOLS, ClaudeAgentSdkClient
+
+# Every managed session blocks the session-only schedulers super-agents
+# cannot observe (see UNTRACKABLE_SCHEDULER_TOOLS).
+SCHEDULERS_BLOCKED = {"disallowed_tools": list(UNTRACKABLE_SCHEDULER_TOOLS)}
 
 
 @dataclass
@@ -109,16 +113,16 @@ async def test_embedding_tool_policy_is_session_scoped_and_reconnects_on_change(
     worker = await client.start_thread({"name": "worker", "cwd": str(tmp_path)})
     sdk = fake_sdk_loader()
     first = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
-    assert first.options.kwargs["disallowed_tools"] == ["Agent", "Task"]
+    assert first.options.kwargs["disallowed_tools"] == [*UNTRACKABLE_SCHEDULER_TOOLS, "Agent", "Task"]
     child = await client._sdk_client_for(store.get_session(worker["threadId"]), None, None, None, sdk)
-    assert "disallowed_tools" not in child.options.kwargs
+    assert child.options.kwargs["disallowed_tools"] == list(UNTRACKABLE_SCHEDULER_TOOLS)
     same = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
     assert same is first
     blocked["router"] = ("Agent",)
     replacement = await client._sdk_client_for(store.get_session(router["threadId"]), None, None, None, sdk)
     assert replacement is not first
     assert not first.connected
-    assert replacement.options.kwargs["disallowed_tools"] == ["Agent"]
+    assert replacement.options.kwargs["disallowed_tools"] == [*UNTRACKABLE_SCHEDULER_TOOLS, "Agent"]
     await client.close()
 
 
@@ -183,6 +187,7 @@ async def test_claude_sdk_client_runs_turn_through_agent_sdk(monkeypatch: pytest
     assert len(FakeClaudeSDKClient.prompts) == 1
     assert_claude_prompt(FakeClaudeSDKClient.prompts[0], "hello", tmp_path)
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -298,6 +303,7 @@ async def test_claude_sdk_uses_super_agents_model_and_reasoning_defaults(
 
     assert store.get_session(started["threadId"]).model == "sonnet"
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -329,6 +335,7 @@ async def test_claude_sdk_client_passes_reasoning_effort_to_agent_sdk(
     await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
 
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -356,6 +363,7 @@ async def test_claude_sdk_maps_fast_service_tier_to_low_effort(
     await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
 
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -385,6 +393,7 @@ async def test_claude_sdk_maps_standard_service_tier_to_high_effort(
     await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
 
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -412,6 +421,7 @@ async def test_claude_sdk_explicit_non_high_effort_overrides_service_tier(
     await wait_for(lambda: store.get_turn(result["turnId"]).status == "completed")
 
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -689,6 +699,7 @@ async def test_claude_sdk_uses_managed_claude_config_dir(
 
     options = FakeClaudeSDKClient.options_seen[-1].kwargs
     assert options == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "permission_mode": "bypassPermissions",
         "effort": "high",
@@ -878,6 +889,7 @@ async def test_claude_sdk_steer_by_label_uses_native_active_turn_steering(
     assert FakeClaudeSDKClient.interrupted_prompts == []
     assert store.get_turn(steered["turnId"]).reasoning_effort == "high"
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -961,6 +973,7 @@ async def test_claude_sdk_queued_turn_preserves_reasoning_effort(
     assert queued["queued"] is True
     assert store.get_turn(queued["turnId"]).reasoning_effort == "low"
     assert FakeClaudeSDKClient.options_seen[-1].kwargs == {
+        **SCHEDULERS_BLOCKED,
         "cwd": str(tmp_path),
         "model": "sonnet",
         "permission_mode": "bypassPermissions",
@@ -2014,3 +2027,57 @@ def test_pending_wakeup_stops_on_request_and_expires_when_it_never_fires(monkeyp
     now[0] += 2
     tasks.expire_wakeup()
     assert claude_sdk._WAKEUP not in tasks
+
+
+@pytest.mark.asyncio
+async def test_steer_during_wakeup_wait_preserves_pending_wakeup(tmp_path):
+    """Voice review 2026-10-11 (HIGH): the drain reader decided "unsolicited"
+    before awaiting, so a steer arriving during the wakeup wait had its
+    response read as the wakeup firing and the turn completed with the
+    wakeup still scheduled. Reproduction contributed by the reviewer."""
+    waiting = asyncio.Event()
+    steered = asyncio.Event()
+
+    class Transport(FakeClaudeSDKClient):
+        receive_calls = 0
+
+        async def query(self, prompt):
+            await super().query(prompt)
+            if waiting.is_set():
+                steered.set()
+
+        async def receive_response(self):
+            Transport.receive_calls += 1
+            if Transport.receive_calls == 2:
+                waiting.set()
+            if Transport.receive_calls == 1:
+                yield FakeAssistantMessage([FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 600})])
+                yield FakeResultMessage("Scheduled for ten minutes from now.")
+                return
+            await steered.wait()
+            if Transport.receive_calls > 2:
+                # One response per query: nothing more until the wakeup fires.
+                await asyncio.Event().wait()
+            yield FakeAssistantMessage([FakeTextBlock("Understood your correction.")])
+            yield FakeResultMessage("Understood your correction.")
+
+    class Sdk:
+        ClaudeAgentOptions = FakeClaudeAgentOptions
+        ClaudeSDKClient = Transport
+
+    store = Store(tmp_path / "race.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=Sdk)
+    try:
+        await client.start_thread({"name": "race", "cwd": str(tmp_path)})
+        start = await client.start_turn_by_label(
+            LabelQueryInput(label="race"), {"prompt": "wait ten minutes then do work"}
+        )
+        await asyncio.wait_for(waiting.wait(), 3)
+        await client.start_turn_by_label(
+            LabelQueryInput(label="race"), {"prompt": "Use the other filename when you wake up"}
+        )
+        await asyncio.sleep(0.2)
+        turn = store.get_turn(start["turnId"])
+        assert turn.status == "running", f"Wakeup has not fired, but turn is {turn.status}"
+    finally:
+        await client.close()

@@ -9,7 +9,7 @@ import pytest
 
 from super_agents.agent_store import Store
 from super_agents.app_models import LabelQueryInput
-from super_agents.claude_sdk import ClaudeAgentSdkClient
+from super_agents.claude_sdk import UNTRACKABLE_SCHEDULER_TOOLS, ClaudeAgentSdkClient
 from test_claude_sdk import (
     BackgroundTaskClaudeSDKClient,
     BackgroundTaskSdk,
@@ -67,7 +67,7 @@ async def test_configure_preserves_options_and_runs_before_fresh_and_resumed_con
             assert options.mcp_servers["extension"] == {"type": "sdk", "name": "extension"}
             assert options.cwd == str(tmp_path)
             assert options.model == "model-a"
-            assert options.disallowed_tools == ["Task"]
+            assert options.disallowed_tools == [*UNTRACKABLE_SCHEDULER_TOOLS, "Task"]
             assert options.setting_sources == ["user", "project"]
             assert options.permission_mode == permission_mode
             assert callable(getattr(options, "can_use_tool", None)) == (permission_mode != "bypassPermissions")

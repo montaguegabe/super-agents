@@ -995,7 +995,15 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                         # no task completion preceded is the scheduled wakeup
                         # firing; a steer's or a task follow-up's response is
                         # not, and must not clear it (376, 2026-10-11 05:53Z).
-                        active_background_tasks.end_cycle(unsolicited=draining_background_tasks)
+                        # Decided now, not when the reader opened: a steer that
+                        # arrived during the wait registered a pending query
+                        # whose response lands on this same reader, and must
+                        # never be taken for the wakeup (voice review,
+                        # 2026-10-11).
+                        active_background_tasks.end_cycle(
+                            unsolicited=draining_background_tasks
+                            and self._session_pending_results.get(session_id, 0) <= 0
+                        )
                         last_result_message = result_message
                         consumed_any_result = True
                         # The default can recover finished model work after a
@@ -1355,7 +1363,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         prompt_fingerprint = system_prompt_fingerprint(system_prompt)
         effective_effort = _claude_effort(reasoning_effort, service_tier)
         policy = self._disallowed_tools_for_session
-        disallowed_tools = tuple(policy(session)) if policy else ()
+        disallowed_tools = tuple(dict.fromkeys((*UNTRACKABLE_SCHEDULER_TOOLS, *(policy(session) if policy else ()))))
         existing = self._sdk_clients.get(session.id)
         if existing is not None and not self._owns_session_leaf(session):
             # A client instance in another process ran the last turn, so this
@@ -1719,6 +1727,16 @@ def _is_noop_result(message: Any) -> bool:
 # Statuses on which a spawned task is finished for good, mirroring the SDK's
 # TERMINAL_TASK_STATUSES ("pending"/"running"/"paused" are non-terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
+# Claude Code tools that schedule work for later inside the CLI session
+# without any event super-agents can observe. Their jobs are session-only
+# (they die whenever the managed CLI is reconnected, which happens on model,
+# effort or leaf-owner changes) and they let a turn report "completed" while
+# work is still pending: on 376 (2026-10-11 06:13Z) an agent asked for five
+# timed appends used CronCreate five times and its turn completed at once.
+# Managed sessions get them disallowed; the model falls back to ScheduleWakeup
+# (tracked, see _BackgroundTasks) or a shell wait inside the turn.
+UNTRACKABLE_SCHEDULER_TOOLS: tuple[str, ...] = ("CronCreate", "CronDelete", "CronList")
+
 # Pseudo task id for a pending ScheduleWakeup (see _BackgroundTasks).
 _WAKEUP = "wakeup"
 # A wakeup that has not fired this long after its scheduled time is dropped,
