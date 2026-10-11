@@ -487,6 +487,12 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         return self._status_item(self._resolve_session(input_data))
 
     async def progress_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+        # The voice worker polls this every second on the loop that carries
+        # live audio; the sqlite reads and the log-tail file read belong on a
+        # thread (VM2 2026-10-11: "event loop blocked" up to 1.1 s mid-call).
+        return await asyncio.to_thread(self._progress_by_label_sync, input_data)
+
+    def _progress_by_label_sync(self, input_data: LabelQueryInput) -> JsonObject:
         session = self._resolve_session(input_data)
         payload = self._status_item(session)
         if input_data.turn_id:

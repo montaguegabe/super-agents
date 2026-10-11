@@ -60,7 +60,8 @@ class ActiveSteeringMixin:
         # This is only in-process evidence. Never use a foreign loop's client,
         # and exclude registries inherited across fork by comparing process IDs.
         return any(
-            other_key[:-1] == key[:-1] and other_key[-1] is not key[-1]
+            other_key[:-1] == key[:-1]
+            and other_key[-1] is not key[-1]
             and owner._sdk_clients.get(session.id) is not None
             for other_key, owner in list(_TRANSPORT_OWNERS.items())
         )
@@ -70,12 +71,31 @@ class ActiveSteeringMixin:
 
     def _unavailable_transport_result(self, session: Session) -> JsonObject:
         return {
-            "backend": self.backend, "threadId": session.id, "name": session.name,
-            "turnId": None, "queued": False, "steered": False,
-            "startedImmediately": False, "confirmed": False,
-            "delivery": "unavailable", "reason": "owner_outside_execution_context",
+            "backend": self.backend,
+            "threadId": session.id,
+            "name": session.name,
+            "turnId": None,
+            "queued": False,
+            "steered": False,
+            "startedImmediately": False,
+            "confirmed": False,
+            "delivery": "unavailable",
+            "reason": "owner_outside_execution_context",
             "message": "Nothing was delivered or queued. The managed SDK transport belongs to another process or event loop.",
         }
+
+    def _record_steer(self, session_id: str, turn_id: str, prompt: str) -> Any:
+        """Store-side bookkeeping for a delivered steer; runs off the event loop."""
+        self.store.append_turn_steer(turn_id, prompt)
+        current_turn = self.store.get_turn(turn_id)
+        self.store.update_session(
+            session_id,
+            status="running",
+            active_turn_id=turn_id,
+            last_turn_id=turn_id,
+            last_observed_state="steering active turn via Claude Code",
+        )
+        return current_turn
 
     async def _steer_active_turn(
         self,
@@ -87,9 +107,7 @@ class ActiveSteeringMixin:
     ) -> JsonObject:
         owner = self._active_owner(session.id)
         if owner is not None and owner is not self:
-            return await owner._steer_active_turn(
-                session, prompt, turn_input, requested_turn_id=requested_turn_id
-            )
+            return await owner._steer_active_turn(session, prompt, turn_input, requested_turn_id=requested_turn_id)
         active_turn_id = session.active_turn_id
         if not active_turn_id:
             return await self.start_turn_by_label(
@@ -161,15 +179,7 @@ class ActiveSteeringMixin:
         # Persist the steering text on the turn row so thread reads (and other
         # processes' reads — the voice pipeline steers from a different process
         # than the one serving history) can render every user input in order.
-        self.store.append_turn_steer(active_turn_id, prompt)
-        current_turn = self.store.get_turn(active_turn_id)
-        self.store.update_session(
-            session.id,
-            status="running",
-            active_turn_id=active_turn_id,
-            last_turn_id=active_turn_id,
-            last_observed_state="steering active turn via Claude Code",
-        )
+        current_turn = await asyncio.to_thread(self._record_steer, session.id, active_turn_id, prompt)
         return {
             "backend": self.backend,
             "threadId": session.id,
@@ -186,12 +196,8 @@ class ActiveSteeringMixin:
             "drain": "steered_active_turn",
         }
 
-    async def _queue_unavailable_steer(
-        self, session: Session, prompt: str, turn_input: JsonObject
-    ) -> JsonObject:
-        result = await self.queue_turn_by_label(
-            LabelQueryInput(thread_id=session.id), {**turn_input, "prompt": prompt}
-        )
+    async def _queue_unavailable_steer(self, session: Session, prompt: str, turn_input: JsonObject) -> JsonObject:
+        result = await self.queue_turn_by_label(LabelQueryInput(thread_id=session.id), {**turn_input, "prompt": prompt})
         return {
             **result,
             "steered": False,
@@ -201,8 +207,8 @@ class ActiveSteeringMixin:
             "message": (
                 "Steering was unavailable. The instruction was saved as a queued follow-up turn; "
                 "the current work was not interrupted."
-                if result.get("queued") else
-                "The active turn finished. The instruction started as a new turn."
+                if result.get("queued")
+                else "The active turn finished. The instruction started as a new turn."
             ),
         }
 
@@ -216,4 +222,3 @@ class ActiveSteeringMixin:
                 return client
             await asyncio.sleep(0.01)
         return None
-
