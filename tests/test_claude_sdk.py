@@ -2081,3 +2081,69 @@ async def test_steer_during_wakeup_wait_preserves_pending_wakeup(tmp_path):
         assert turn.status == "running", f"Wakeup has not fired, but turn is {turn.status}"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_steer_bookkeeping_cannot_resurrect_completed_session(tmp_path, monkeypatch):
+    """Voice review finding 7 (HIGH), 2026-10-11: steer bookkeeping that lands
+    after the turn completed rewrote the session to running, and the next
+    request was steered into a turn with no reader and lost. Reproduction
+    contributed by the reviewer."""
+    import threading
+
+    receiving = asyncio.Event()
+    release_responses = asyncio.Event()
+    record_entered = threading.Event()
+    release_record = threading.Event()
+
+    class Transport(FakeClaudeSDKClient):
+        async def receive_response(self):
+            receiving.set()
+            await release_responses.wait()
+            yield FakeAssistantMessage([FakeTextBlock("Done")])
+            yield FakeResultMessage("Done")
+
+    class Sdk:
+        ClaudeAgentOptions = FakeClaudeAgentOptions
+        ClaudeSDKClient = Transport
+
+    store = Store(tmp_path / "record.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=Sdk)
+    original = client._record_steer
+
+    def delayed_record(*args):
+        record_entered.set()
+        assert release_record.wait(5)
+        return original(*args)
+
+    monkeypatch.setattr(client, "_record_steer", delayed_record)
+    steering = None
+    try:
+        thread = await client.start_thread({"name": "record", "cwd": str(tmp_path)})
+        start = await client.start_turn_by_label(LabelQueryInput(label="record"), {"prompt": "Do the work"})
+        await asyncio.wait_for(receiving.wait(), 3)
+        steering = asyncio.create_task(client.steer_by_label(LabelQueryInput(label="record"), "Use another name"))
+        assert await asyncio.to_thread(record_entered.wait, 3)
+        release_responses.set()
+        for _ in range(200):
+            if store.get_session(thread["threadId"]).status == "completed":
+                break
+            await asyncio.sleep(0.01)
+        assert store.get_turn(start["turnId"]).status == "completed"
+        assert store.get_session(thread["threadId"]).status == "completed"
+        release_record.set()
+        await steering
+        assert store.get_session(thread["threadId"]).status == "completed"
+        monkeypatch.setattr(client, "_record_steer", original)
+        next_request = await client.start_turn_by_label(
+            LabelQueryInput(label="record"), {"prompt": "Now do a different task"}
+        )
+        assert next_request["turnId"] != start["turnId"], (
+            "next caller request was steered into a completed turn with no reader"
+        )
+    finally:
+        release_record.set()
+        release_responses.set()
+        if steering:
+            await steering
+        await client.close()

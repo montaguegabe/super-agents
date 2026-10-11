@@ -636,6 +636,27 @@ class Store:
             )
         return self.get_turn(turn_id)
 
+    def mark_session_steering(self, session_id: str, turn_id: str, observed_state: str) -> bool:
+        """Record that a steer reached ``turn_id``, only while that turn is live.
+
+        Atomic and conditional: the write happens only when the turn is still
+        running/waiting and the session is not already on a different turn.
+        Steer bookkeeping runs off the event loop and can land after the turn
+        completed; an unconditional write resurrected the finished session as
+        "running", and the next request was then steered into a turn with no
+        reader and lost (voice review finding 7, 2026-10-11).
+        """
+        now = iso_now()
+        with self.connect() as conn:
+            updated = conn.execute(
+                "update sessions set status = 'running', active_turn_id = ?, last_turn_id = ?, "
+                "last_observed_state = ?, updated_at = ? "
+                "where id = ? and (active_turn_id is null or active_turn_id = ?) "
+                "and exists (select 1 from turns where id = ? and status in ('running', 'waiting'))",
+                (turn_id, turn_id, observed_state, now, session_id, turn_id, turn_id),
+            ).rowcount
+        return bool(updated)
+
     def list_turns(self, session_id: str, limit: int = 20) -> list[Turn]:
         with self.connect() as conn:
             rows = conn.execute(

@@ -88,13 +88,8 @@ class ActiveSteeringMixin:
         """Store-side bookkeeping for a delivered steer; runs off the event loop."""
         self.store.append_turn_steer(turn_id, prompt)
         current_turn = self.store.get_turn(turn_id)
-        self.store.update_session(
-            session_id,
-            status="running",
-            active_turn_id=turn_id,
-            last_turn_id=turn_id,
-            last_observed_state="steering active turn via Claude Code",
-        )
+        # Never rewrites lifecycle state of a turn that finished meanwhile.
+        self.store.mark_session_steering(session_id, turn_id, "steering active turn via Claude Code")
         return current_turn
 
     async def _steer_active_turn(
