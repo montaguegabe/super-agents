@@ -1710,6 +1710,50 @@ def _is_noop_result(message: Any) -> bool:
 # Statuses on which a spawned task is finished for good, mirroring the SDK's
 # TERMINAL_TASK_STATUSES ("pending"/"running"/"paused" are non-terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
+# Pseudo task ids for a scheduled wakeup (see _note_wakeup_lifecycle).
+_WAKEUP_SCHEDULED = "wakeup"
+_WAKEUP_ARMED = "wakeup:armed"
+
+
+def _note_wakeup_lifecycle(active_background_tasks: dict[str, str], message: Any) -> None:
+    """Keep a turn open across a ScheduleWakeup wait.
+
+    Claude Code's ScheduleWakeup ends the model's response ("Scheduled!") and
+    fires the scheduled prompt later inside the same still-connected CLI,
+    with no task_started/task_notification events. Treating that response's
+    result as the turn's end hid the real work: on 2026-10-11 an agent asked
+    to "wait 60 s then write bravo.txt" was reported completed at the
+    schedule, the file appeared two minutes later with no recorded turn, and
+    the Dispatcher relayed stale status. A ScheduleWakeup call now registers
+    a pseudo background task: the scheduling response's result arms it, the
+    wakeup response's result (or an explicit stop) clears it, and a wakeup
+    that schedules again keeps the turn open.
+    """
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if getattr(block, "name", None) != "ScheduleWakeup":
+                continue
+            tool_input = getattr(block, "input", None)
+            tool_input = tool_input if isinstance(tool_input, dict) else {}
+            if tool_input.get("stop") is True:
+                active_background_tasks.pop(_WAKEUP_SCHEDULED, None)
+                active_background_tasks.pop(_WAKEUP_ARMED, None)
+                continue
+            delay = tool_input.get("delaySeconds")
+            active_background_tasks[_WAKEUP_SCHEDULED] = (
+                f"scheduled wakeup in {delay:g} s" if isinstance(delay, (int, float)) else "scheduled wakeup"
+            )
+        return
+    if getattr(message, "num_turns", None) is None:
+        return
+    # A response ended. A wakeup scheduled during it is now armed; a wakeup
+    # that was armed before this response has fired and finished.
+    if _WAKEUP_SCHEDULED in active_background_tasks:
+        active_background_tasks.pop(_WAKEUP_ARMED, None)
+        active_background_tasks[_WAKEUP_ARMED] = active_background_tasks.pop(_WAKEUP_SCHEDULED)
+    elif _WAKEUP_ARMED in active_background_tasks:
+        active_background_tasks.pop(_WAKEUP_ARMED, None)
 
 
 def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) -> None:
@@ -1720,7 +1764,9 @@ def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) 
     can arrive on EITHER a ``task_notification`` or a ``task_updated`` message
     (a killed task may emit only the latter). Falls back to the raw system
     payload so tracking also works when the SDK does not type these messages.
+    Scheduled wakeups are tracked the same way (:func:`_note_wakeup_lifecycle`).
     """
+    _note_wakeup_lifecycle(active_background_tasks, message)
     data = getattr(message, "data", None)
     payload = data if isinstance(data, dict) else {}
     subtype = getattr(message, "subtype", None) or payload.get("subtype")

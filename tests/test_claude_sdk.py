@@ -1307,6 +1307,78 @@ class BackgroundTaskClaudeSDKClient(FakeClaudeSDKClient):
         await asyncio.Event().wait()
 
 
+@dataclass
+class FakeToolUseBlock:
+    name: str
+    input: dict
+    id: str = "toolu_fake"
+
+
+class WakeupClaudeSDKClient(FakeClaudeSDKClient):
+    """The response ends right after a ScheduleWakeup call; the wakeup's own
+    response (the real work) arrives on a later read of the same stream."""
+
+    fired: asyncio.Event = asyncio.Event()
+    reschedule_once: bool = False
+
+    def __init__(self, options: FakeClaudeAgentOptions) -> None:
+        super().__init__(options)
+        self.phase = 0
+
+    async def receive_response(self):
+        if self.phase == 0:
+            self.phase = 1
+            yield FakeAssistantMessage(
+                [FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 60, "prompt": "write bravo.txt"})]
+            )
+            yield FakeAssistantMessage([FakeTextBlock("Scheduled! I'll write bravo.txt in 60 seconds.")])
+            yield FakeResultMessage("Scheduled! I'll write bravo.txt in 60 seconds.")
+            return
+        await WakeupClaudeSDKClient.fired.wait()
+        if self.phase == 1 and WakeupClaudeSDKClient.reschedule_once:
+            self.phase = 2
+            yield FakeAssistantMessage(
+                [FakeToolUseBlock("ScheduleWakeup", {"delaySeconds": 30, "prompt": "check again"})]
+            )
+            yield FakeResultMessage("Not ready yet; checking again in 30 s.")
+            return
+        self.phase = 3
+        yield FakeAssistantMessage([FakeTextBlock("Done. Created bravo.txt.")])
+        yield FakeResultMessage("Done. Created bravo.txt.")
+
+
+class WakeupSdk:
+    ClaudeAgentOptions = FakeClaudeAgentOptions
+    ClaudeSDKClient = WakeupClaudeSDKClient
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reschedule", [False, True])
+async def test_claude_sdk_turn_stays_running_across_a_scheduled_wakeup(tmp_path: Path, reschedule: bool) -> None:
+    """376, 2026-10-11 05:23Z: "wait 60 s then write bravo.txt" used
+    ScheduleWakeup; the turn was reported completed at "Scheduled!", the file
+    appeared two minutes later with no recorded turn, and the Dispatcher
+    relayed stale status."""
+    WakeupClaudeSDKClient.fired = asyncio.Event()
+    WakeupClaudeSDKClient.reschedule_once = reschedule
+    store = Store(tmp_path / "wakeup.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: WakeupSdk())
+    client._background_task_poll_seconds = 0.05
+    await client.start_thread({"name": "bravo", "cwd": str(tmp_path)})
+    started = await client.start_turn_by_label(LabelQueryInput(label="bravo"), {"prompt": "wait then write"})
+    turn_id = started["turnId"]
+
+    await wait_for(lambda: "scheduled wakeup" in (store.get_session(started["threadId"]).last_observed_state or ""))
+    assert store.get_turn(turn_id).status == "running"
+    await asyncio.sleep(0.2)
+    assert store.get_turn(turn_id).status == "running"
+
+    WakeupClaudeSDKClient.fired.set()
+    await wait_for(lambda: store.get_turn(turn_id).status == "completed", timeout=5.0)
+    assert "Created bravo.txt" in (store.get_turn(turn_id).last_useful_message or "")
+    await client.close()
+
+
 class BackgroundTaskSdk:
     ClaudeAgentOptions = FakeClaudeAgentOptions
     ClaudeSDKClient = BackgroundTaskClaudeSDKClient
