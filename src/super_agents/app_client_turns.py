@@ -257,7 +257,8 @@ class TurnLifecycleMixin:
         )
         if existing_turn is None:
             self._turns[key] = turn
-        elif turn.reasoning_effort is None:
+        self.note_current_turn(thread_id, turn_id)
+        if existing_turn is not None and turn.reasoning_effort is None:
             turn.reasoning_effort = reasoning_effort
         if turn.status in {"completed", "failed", "cancelled"}:
             status: TrackedStatus = turn.status

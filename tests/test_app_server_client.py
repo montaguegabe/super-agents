@@ -3702,3 +3702,52 @@ async def test_resume_wedge_cooldown_fails_fast_after_timeout(tmp_path: Path) ->
         await client._refresh_thread_environment("thread-wedged", params)
     assert client.resume_requests == 3
     app_client_turns._resume_wedged_threads.clear()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_turn_finishing_late_never_hides_the_next_turn(tmp_path: Path) -> None:
+    """Stop, then a new message (VM2, 2026-10-11): the app-server finishes the
+    interrupted turn only after the next turn has started. Its late
+    turn/completed used to rewrite the session's last/active turn back to the
+    cancelled one, so the new turn was never followed and the caller hung."""
+    captured: list[dict[str, Any]] = []
+    turn_index = 0
+
+    def handler(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal turn_index
+        if message.get("method") == "thread/start":
+            return {"threadId": "thread-stop", "cwd": message["params"]["cwd"], "model": "gpt-test"}
+        if message.get("method") == "turn/start":
+            turn_index += 1
+            return {"turnId": f"turn-{turn_index}"}
+        return {"ok": True}
+
+    server = await start_fake_app_server(captured, handler)
+    client = ReadyClient(server.ws_url, tmp_path / "state.json", "gpt-test")
+    try:
+        await client.start_thread({"label": "stop", "cwd": "/tmp/project"})
+        await client.start_turn({"threadId": "thread-stop", "label": "stop", "prompt": "long task"})
+        await client.cancel_turn("thread-stop", "turn-1")
+        await client.start_turn({"threadId": "thread-stop", "label": "stop", "prompt": "next question"})
+
+        client.handle_notification(
+            "turn/completed",
+            {"threadId": "thread-stop", "turn": {"id": "turn-1", "status": "interrupted"}},
+        )
+        await asyncio.sleep(0.05)
+
+        session = (await client.read_state()).sessions["thread-stop"]
+        assert session.active_turn_id == "turn-2"
+        assert session.last_turn_id == "turn-2"
+        assert session.last_status == "running"
+        assert session.turns["turn-1"].status == "cancelled"
+
+        client.handle_notification("turn/completed", {"threadId": "thread-stop", "turnId": "turn-2"})
+        await asyncio.sleep(0.05)
+        session = (await client.read_state()).sessions["thread-stop"]
+        assert session.active_turn_id is None
+        assert session.last_turn_id == "turn-2"
+        assert session.last_status == "completed"
+    finally:
+        await client.close()
+        await server.close()
