@@ -166,3 +166,11 @@ async def test_client_exposes_and_answers_only_its_own_requests(tmp_path: Path) 
     answered = await first.answer_request(request_id, {"decision": "accept"})
     assert answered["answered"] is True
     assert (await task).decision == "accept"
+
+
+def test_agent_options_expose_the_thread_id_to_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPER_AGENTS_CLAUDE_PERMISSION_MODE", "bypassPermissions")
+    options = agent_options(FAKE_SDK, "/tmp", None, None, resume=None, thread_id="s_abc")
+    assert options.kwargs["env"]["SUPER_AGENTS_THREAD_ID"] == "s_abc"
+    plain = agent_options(FAKE_SDK, "/tmp", None, None, resume=None)
+    assert "SUPER_AGENTS_THREAD_ID" not in plain.kwargs["env"]

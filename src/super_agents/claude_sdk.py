@@ -1333,6 +1333,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             backend=self.backend,
             disallowed_tools=disallowed_tools,
             system_prompt=system_prompt,
+            thread_id=session.id,
         )
         replace_super_agents_stdio_server(options, client=self)
         if self._configure_session is not None:

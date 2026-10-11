@@ -58,6 +58,9 @@ OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN_ENV = "OPENBASE_CLOUD_ANTHROPIC_AUTH_TOKEN"
 OPENBASE_CODER_CLI_WEB_BACKEND_URL_ENV = "OPENBASE_CODER_CLI_WEB_BACKEND_URL"
 
 
+SUPER_AGENTS_THREAD_ID_ENV = "SUPER_AGENTS_THREAD_ID"
+
+
 def resolve_permission_mode() -> str:
     """Resolve the process-wide Claude permission posture."""
     return os.environ.get(CLAUDE_PERMISSION_MODE_ENV, "").strip() or CLAUDE_PERMISSION_MODE
@@ -74,6 +77,7 @@ def agent_options(
     backend: str | None = None,
     disallowed_tools: tuple[str, ...] = (),
     system_prompt: Any = _UNSET_SYSTEM_PROMPT,
+    thread_id: str | None = None,
 ) -> Any:
     managed_options = managed_claude_config_options()
     if system_prompt is not _UNSET_SYSTEM_PROMPT:
@@ -84,6 +88,9 @@ def agent_options(
     # AGENT_MODEL mirrors the Codex-side shell injection: agents that spawn
     # Super Agents inherit their own model as the child default.
     model_env = {"AGENT_MODEL": str(model)} if model else {}
+    # The session's own thread id, like Codex's CODEX_THREAD_ID: tools the
+    # agent runs can address a follow-up turn to the thread they belong to.
+    thread_env = {SUPER_AGENTS_THREAD_ID_ENV: thread_id} if thread_id else {}
     kwargs: JsonObject = {
         "cwd": cwd,
         "permission_mode": permission_mode,
@@ -93,6 +100,7 @@ def agent_options(
             **CLAUDE_SDK_ENV_OVERRIDES,
             **openbase_cloud_claude_env(backend),
             **model_env,
+            **thread_env,
         },
     }
     if permission_mode != "bypassPermissions":
