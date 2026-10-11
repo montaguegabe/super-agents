@@ -1,4 +1,5 @@
 """Blocked-tool steering and truthful terminal-result regression tests."""
+
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,7 +54,7 @@ class BlockedToolClient:
             return
         if self.suppress_followup:
             await asyncio.Event().wait()
-        await asyncio.sleep(.04)
+        await asyncio.sleep(0.04)
         yield SimpleNamespace(content=[SimpleNamespace(text=prompt.split("\n\n")[-1])])
         if not self.missing_terminal:
             yield SimpleNamespace(result=prompt.split("\n\n")[-1], num_turns=1, is_error=self.terminal_error)
@@ -71,7 +72,7 @@ def sdk():
 async def terminal(store, turn_id):
     async with asyncio.timeout(2):
         while store.get_turn(turn_id).status == "running":
-            await asyncio.sleep(.005)
+            await asyncio.sleep(0.005)
     return store.get_turn(turn_id)
 
 
@@ -79,15 +80,17 @@ async def terminal(store, turn_id):
 async def test_explicit_interrupt_stops_tool_and_preserves_delayed_correction(tmp_path: Path, sdk):
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: sdk)
-    client._steer_drain_timeout_seconds = .01
-    client._interrupted_steer_start_timeout_seconds = .3
+    client._steer_drain_timeout_seconds = 0.01
+    client._interrupted_steer_start_timeout_seconds = 0.3
     await client.start_thread({"name": "elm", "cwd": str(tmp_path)})
     initial = await client.start_turn_by_label(LabelQueryInput(label="elm"), {"prompt": "blocked tool"})
     while not BlockedToolClient.instances:
-        await asyncio.sleep(.005)
+        await asyncio.sleep(0.005)
     transport = BlockedToolClient.instances[0]
     await asyncio.wait_for(transport.started.wait(), 1)
-    result = await client.steer_by_label(LabelQueryInput(label="elm"), "corrected result", {"interruptCurrentWork": True})
+    result = await client.steer_by_label(
+        LabelQueryInput(label="elm"), "corrected result", {"interruptCurrentWork": True}
+    )
     completed = await terminal(store, initial["turnId"])
     assert result["turnId"] == initial["turnId"]
     assert result["interruptedCurrentWork"] is True
@@ -119,11 +122,11 @@ async def test_interrupted_followup_timeout_is_not_coalesced_success(tmp_path: P
     BlockedToolClient.suppress_followup = True
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: sdk)
-    client._interrupted_steer_start_timeout_seconds = .03
+    client._interrupted_steer_start_timeout_seconds = 0.03
     await client.start_thread({"name": "elm", "cwd": str(tmp_path)})
     initial = await client.start_turn_by_label(LabelQueryInput(label="elm"), {"prompt": "blocked tool"})
     while not BlockedToolClient.instances:
-        await asyncio.sleep(.005)
+        await asyncio.sleep(0.005)
     await asyncio.wait_for(BlockedToolClient.instances[0].started.wait(), 1)
     await client.steer_by_label(LabelQueryInput(label="elm"), "corrected result", {"interruptCurrentWork": True})
     failed = await terminal(store, initial["turnId"])
@@ -142,12 +145,12 @@ async def test_steer_records_turn_steers_for_thread_reads(tmp_path: Path, sdk):
     """
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=lambda: sdk)
-    client._steer_drain_timeout_seconds = .01
-    client._interrupted_steer_start_timeout_seconds = .3
+    client._steer_drain_timeout_seconds = 0.01
+    client._interrupted_steer_start_timeout_seconds = 0.3
     await client.start_thread({"name": "elm", "cwd": str(tmp_path)})
     initial = await client.start_turn_by_label(LabelQueryInput(label="elm"), {"prompt": "blocked tool"})
     while not BlockedToolClient.instances:
-        await asyncio.sleep(.005)
+        await asyncio.sleep(0.005)
     transport = BlockedToolClient.instances[0]
     await asyncio.wait_for(transport.started.wait(), 1)
 

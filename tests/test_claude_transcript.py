@@ -187,7 +187,9 @@ async def test_read_by_label_falls_back_to_transcript_turns(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_session_list_view_includes_latest_turn_model_and_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_session_list_view_includes_latest_turn_model_and_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude_config"))
     store = Store(tmp_path / "state.sqlite3")
     session = store.create_session("worked", cwd=str(tmp_path), command=["claude-agent-sdk"])
@@ -209,7 +211,9 @@ async def test_session_list_view_includes_latest_turn_model_and_effort(tmp_path:
 @pytest.mark.parametrize("content_blocks", [False, True])
 @pytest.mark.asyncio
 async def test_imported_voice_history_hides_internal_envelopes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content_blocks: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content_blocks: bool,
 ) -> None:
     config_dir = tmp_path / "claude_config"
     cwd = "/workspace/tic-tac-toe"
@@ -225,9 +229,14 @@ async def test_imported_voice_history_hides_internal_envelopes(
     if content_blocks:
         user["message"]["content"] = [{"type": "text", "text": part} for part in parts]
     reply = "Example: <voice>tags</voice> and [Openbase system note: literal example]"
-    path = _write_transcript(config_dir, cwd, [
-        user, _assistant_entry(reply, uuid="reply", timestamp="2026-10-09T06:49:01Z"),
-    ])
+    path = _write_transcript(
+        config_dir,
+        cwd,
+        [
+            user,
+            _assistant_entry(reply, uuid="reply", timestamp="2026-10-09T06:49:01Z"),
+        ],
+    )
     original = path.read_bytes()
     store = Store(tmp_path / "state.sqlite3")
     session = _imported_session(store, cwd)
@@ -239,7 +248,8 @@ async def test_imported_voice_history_hides_internal_envelopes(
         assert turn["turnId"] == "voice"
         assert turn["promptPreview"] == "Tic tac toe & chess"
         assert turn["items"][0] == {
-            "type": "userMessage", "content": [{"type": "text", "text": "Tic tac toe & chess"}],
+            "type": "userMessage",
+            "content": [{"type": "text", "text": "Tic tac toe & chess"}],
         }
         assert turn["lastUsefulMessage"] == reply
     assert path.read_bytes() == original
@@ -248,12 +258,16 @@ async def test_imported_voice_history_hides_internal_envelopes(
 def test_internal_only_imported_turn_keeps_its_reply_separate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude_config"))
     cwd = "/workspace/project"
-    _write_transcript(tmp_path / "claude_config", cwd, [
-        _user_entry("real request", uuid="u1", timestamp="2026-10-09T06:49:00Z"),
-        _assistant_entry("first answer", uuid="a1", timestamp="2026-10-09T06:49:01Z"),
-        _user_entry("[Openbase system note: truncated", uuid="u2", timestamp="2026-10-09T06:49:02Z"),
-        _assistant_entry("second answer", uuid="a2", timestamp="2026-10-09T06:49:03Z"),
-    ])
+    _write_transcript(
+        tmp_path / "claude_config",
+        cwd,
+        [
+            _user_entry("real request", uuid="u1", timestamp="2026-10-09T06:49:00Z"),
+            _assistant_entry("first answer", uuid="a1", timestamp="2026-10-09T06:49:01Z"),
+            _user_entry("[Openbase system note: truncated", uuid="u2", timestamp="2026-10-09T06:49:02Z"),
+            _assistant_entry("second answer", uuid="a2", timestamp="2026-10-09T06:49:03Z"),
+        ],
+    )
     session = _imported_session(Store(tmp_path / "state.sqlite3"), cwd)
     newest, oldest = transcript_turn_views(session)
     assert newest["turnId"] == "u2"

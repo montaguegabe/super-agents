@@ -140,3 +140,14 @@ class ResolvedSession:
     session: SessionRecord
     status: StoredStatus
     turn_id: str | None = None
+
+
+def recent_includes_inactive(query: LabelQueryInput) -> bool:
+    """``recent`` lists finished threads too unless the caller opts out.
+
+    It used to mean "active unless includeInactive", the same as ``active``:
+    a Dispatcher asked which agents exist called super_agents_recent, got
+    only its own running turn, and answered that no other Super Agents
+    existed while four finished ones did (VM2, 2026-10-11 08:41Z).
+    """
+    return query.include_inactive is not False

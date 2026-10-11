@@ -181,3 +181,33 @@ async def test_steer_by_agent_name_reaches_the_agents_thread(tmp_path):
     with pytest.raises(KeyError, match="No session named Nobody"):
         store.require_by_name("Nobody")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_archived_session_is_hidden_from_listings_and_name_lookups(tmp_path):
+    """376, 2026-10-11 05:02Z: the user archived the stray "marian-step-files"
+    worker in the app, but super-agents still listed it and the Dispatcher
+    queued new work onto it."""
+    store = Store(tmp_path / "archive.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    stray = await client.start_thread({"name": "marian-step-files", "agentName": "Siobhan", "cwd": str(tmp_path)})
+    marian = await client.start_thread({"name": "qa-label", "agentName": "Marian", "cwd": str(tmp_path)})
+
+    result = await client.archive_by_label(LabelQueryInput(thread_id=stray["threadId"]))
+    assert result["archived"] is True and result["archivedAt"]
+
+    listed = {session.id for session in store.list_sessions()}
+    assert stray["threadId"] not in listed and marian["threadId"] in listed
+    assert store.get_by_name("marian-step-files") is None
+    assert store.get_by_name("marian-step-files", include_archived=True) is not None
+    with pytest.raises(KeyError):
+        store.require_by_name("marian-step-files")
+    with pytest.raises(KeyError):
+        store.require_by_name("Siobhan")
+    assert store.require_by_name("Marian").id == marian["threadId"]
+    # Still readable by id, and a turn started by id reopens it.
+    assert store.get_session(stray["threadId"]).archived_at
+    turn = await client.start_turn_by_label(LabelQueryInput(thread_id=stray["threadId"]), {"prompt": "hello"})
+    await wait_for(lambda: store.get_turn(turn["turnId"]).status == "completed")
+    assert store.get_session(stray["threadId"]).archived_at is None
+    await client.close()

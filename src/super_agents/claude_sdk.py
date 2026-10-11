@@ -11,6 +11,7 @@ import contextlib
 import importlib
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from super_agents.agent_store import Session, Store, Turn, iso_now
 from super_agents.app_formatting import apply_field_selection, without_none
 from super_agents.app_models import (
+    recent_includes_inactive,
     DEFAULT_ACTIVE_AGENTS_LIMIT,
     DEFAULT_COMPACT_STATUS_LIMIT,
     DEFAULT_RECENT_AGENTS_LIMIT,
@@ -35,6 +37,10 @@ from super_agents.app_sessions import required_label
 from super_agents.approval_gate import DEFAULT_APPROVAL_TIMEOUT_SECONDS, ToolApprovalGate, decision_from_answer
 from super_agents.backend_config import CLAUDE_CODE_BACKEND, execution_backend, normalize_backend
 from super_agents.claude_cancellation import TurnCancellationMixin
+from super_agents.claude_compaction import SessionCompactionMixin, transcript_recently_contains
+from super_agents.claude_prompts import INSTRUCTIONS_FINGERPRINT_PREFIX, instructions_fingerprint
+from super_agents.claude_completion import ResultValidation
+from super_agents.claude_responses import PendingQuery, PendingResults
 from super_agents.claude_failure_kinds import classify_turn_failure
 from super_agents.claude_cwd_access import (
     BLOCKED_PERMISSION_DIALOG,
@@ -131,7 +137,9 @@ async def _chain_async(first: Any, rest: Any):
         yield item
 
 
-class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin):
+class ClaudeAgentSdkClient(
+    ActiveSteeringMixin, TurnCancellationMixin, OrphanReconciliationMixin, SessionViewMixin, SessionCompactionMixin
+):
     """Super Agents backend using Claude Code without Anthropic API keys."""
 
     backend = "claude_code"
@@ -161,6 +169,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         self._disallowed_tools_for_session = disallowed_tools_for_session
         self._configure_session = configure_session
         self._validate_turn_result = validate_turn_result
+        self._result_validation = ResultValidation()
         self._sdk_client_tool_policies: dict[str, tuple[str, ...]] = {}
         self._sdk_client_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._sdk_client_models: dict[str, str | None] = {}
@@ -172,10 +181,18 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         # been consumed from the SDK stream. Every query (turn prompt or
         # steer) must be matched by one consumed result, or the unread
         # response shifts every later turn's answer by one (off-by-one).
-        # The CLI may coalesce rapid queries into one response, so extra
-        # reads are bounded by this timeout instead of blocking forever.
-        self._session_pending_results: dict[str, int] = {}
+        # Queries already present at result receipt may have coalesced;
+        # only those extra reads use the short drain timeout.
+        self._session_pending_results = PendingResults()
         self._session_interrupted_steer_followups: set[str] = set()
+        # Turns whose own first prompt is already in the SDK stream. A steer
+        # may join an active turn only after that, so it can never overtake
+        # the request it corrects (voice review finding 12, 2026-10-11).
+        self._initial_query_sent: set[str] = set()
+        # Turns launched by this process whose first prompt is not sent yet,
+        # and corrections accepted for them meanwhile (sent right after it).
+        self._launched_turns: set[str] = set()
+        self._buffered_steers: dict[str, list[str]] = {}
         self._steer_drain_timeout_seconds = _STEER_DRAIN_TIMEOUT_SECONDS
         self._interrupted_steer_start_timeout_seconds = 90.0
         self._cwd_access_grace_seconds = PROBE_GRACE_SECONDS
@@ -332,6 +349,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         """
         session = self._resolve_session(input_data)
         turn_input = turn_input or {}
+        if self._closed:
+            return self._warm_result(session, warmed=False, reason="closed")
         if self._transport_outside_context(session):
             return self._warm_result(session, warmed=False, reason="owner_outside_execution_context")
         if self._session_is_busy(session):
@@ -346,6 +365,8 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             session = self.store.get_session(session.id)
             if self._session_is_busy(session):
                 return self._warm_result(session, warmed=False, reason="busy")
+            if self._closed:
+                return self._warm_result(session, warmed=False, reason="closed")
             already = self._sdk_clients.get(session.id)
             client = await self._sdk_client_for(
                 session,
@@ -353,8 +374,13 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 reasoning_effort,
                 service_tier,
                 sdk,
-                developer_instructions=_optional_str(turn_input.get("developerInstructions")),
             )
+            if self._closed:
+                # close() skipped this session while the warm-up held its
+                # lock; a CLI connected after the owner closed would outlive
+                # it (voice review, 2026-10-11).
+                await self._disconnect_sdk_client(session.id)
+                return self._warm_result(session, warmed=False, reason="closed")
         connected = client is not already
         logger.info(
             "dispatch_timing stage=super_agent_session_warmed thread_id=%s connected=%s elapsed_ms=%d",
@@ -416,6 +442,24 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
             "threadId": renamed.id,
         }
 
+    async def archive_by_label(self, input_data: LabelQueryInput) -> JsonObject:
+        """Put a session away: hidden from listings and name lookups, readable by id.
+
+        The cli hid archived threads only on its own side, so the Dispatcher
+        kept finding an archived worker in super_agents_active and queued new
+        work onto it (376, 2026-10-11 05:02Z). A later turn started on the
+        thread by id (the user reopening it) clears the flag.
+        """
+        session = self._resolve_session(input_data)
+        archived = self.store.update_session(session.id, archived_at=session.archived_at or iso_now())
+        return {
+            "backend": self.backend,
+            "archived": True,
+            "name": archived.name,
+            "threadId": archived.id,
+            "archivedAt": archived.archived_at,
+        }
+
     async def answer_request(
         self,
         request_id: str | int,
@@ -463,7 +507,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         query = input_data or LabelQueryInput()
         items = [
             self._agent_item(session, query)
-            for session in self._query_sessions(query, include_inactive=bool(query.include_inactive))
+            for session in self._query_sessions(query, include_inactive=recent_includes_inactive(query))
         ]
         return {
             "backend": self.backend,
@@ -562,6 +606,10 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     async def start_turn_by_label(self, input_data: LabelQueryInput, turn_input: JsonObject) -> JsonObject:
         self._reconcile_orphaned_turns_once()
         session = self._resolve_session(input_data)
+        if session.archived_at:
+            # Only an explicit thread id reaches an archived session (name
+            # lookups skip it): the user reopened it, so it is live again.
+            session = self.store.update_session(session.id, archived_at=None)
         if self._transport_outside_context(session):
             return self._unavailable_transport_result(session)
         if self._session_is_busy(session):
@@ -753,6 +801,7 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 developer_instructions=developer_instructions,
             )
         )
+        self._launched_turns.add(turn_id)
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
 
@@ -787,7 +836,6 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     reasoning_effort,
                     service_tier,
                     sdk,
-                    developer_instructions=developer_instructions,
                 )
                 if supports_refreshable_system_prompt(sdk) and not session.backend_session_id:
                     # A fresh session: policy/identity were rebuilt from the
@@ -801,7 +849,22 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     prompt = _with_claude_turn_context(
                         self.store.get_turn(turn_id).prompt,
                         cwd=session.cwd,
-                        developer_instructions=None,
+                        # Turn-local policy must still reach a fresh session;
+                        # only standing policy lives in the system prompt.
+                        developer_instructions=developer_instructions,
+                    )
+                elif session.backend_session_id:
+                    # Rebuilt under the session lock from the current
+                    # transcript: a turn that waited (behind a compaction or
+                    # another turn) must not send an instruction reference
+                    # whose block was just compacted away (voice review
+                    # finding 14, 2026-10-11).
+                    prompt = self._prompt_for_session(
+                        session,
+                        {
+                            "prompt": self.store.get_turn(turn_id).prompt,
+                            "developerInstructions": developer_instructions,
+                        },
                     )
                 if announce_intro:
                     # The greeting precedes the first prompt so the user hears
@@ -816,6 +879,20 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 last_useful_message = ""
                 self._register_pending_result(session_id)
                 await sdk_client.query(prompt)
+                # Corrections accepted while this turn waited (behind a
+                # compaction, another turn, or a cold connect) follow its own
+                # prompt in arrival order. The turn stays "not ready" until the
+                # buffer is empty, so corrections arriving during this drain
+                # join the same queue instead of racing past an older one on
+                # the SDK's write lock (voice review finding 12, A/B/D/C). No
+                # await separates the final empty check from the ready flag.
+                buffer = self._buffered_steers.setdefault(turn_id, [])
+                while buffer:
+                    buffered = buffer.pop(0)
+                    self._register_pending_result(session_id)
+                    await sdk_client.query(buffered)
+                self._buffered_steers.pop(turn_id, None)
+                self._initial_query_sent.add(turn_id)
                 # Every query sent into this session (this turn's prompt plus
                 # any steers that joined while it ran) produces a response on
                 # the shared SDK stream — except that the CLI can COALESCE
@@ -838,173 +915,191 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                 # the CLI later starts a follow-up response on this same stream
                 # when they finish. Reporting the turn "completed" before this
                 # drains empty is a lie, and the tasks' results rot unread.
-                active_background_tasks: dict[str, str] = {}
+                active_background_tasks = _BackgroundTasks()
                 background_wait_logged = False
-                while self._session_pending_results.get(session_id, 0) > 0 or (
-                    consumed_any_result and active_background_tasks and not self._turn_was_cancelled(turn_id)
-                ):
-                    result_message: Any = None
-                    draining_background_tasks = self._session_pending_results.get(session_id, 0) <= 0
-                    background_stream_ended = False
-                    stream = sdk_client.receive_response()
-                    next_message = None
-                    try:
-                        if draining_background_tasks:
-                            # Every expected response is consumed but spawned
-                            # tasks still run. Wait for their terminal events
-                            # and the follow-up response, polling so
-                            # cancellation stays responsive and a terminal
-                            # event with no follow-up response (e.g. a killed
-                            # watch) cannot hang the turn.
-                            if not background_wait_logged:
-                                background_wait_logged = True
-                                waiting_on = ", ".join(
-                                    description or task_id for task_id, description in active_background_tasks.items()
-                                )
-                                await asyncio.to_thread(
-                                    self.store.update_session,
-                                    session_id,
-                                    last_observed_state=(
-                                        f"Claude Code response finished; waiting on "
-                                        f"{len(active_background_tasks)} background task(s): {waiting_on}"
-                                    ),
-                                )
-                            # Poll with asyncio.wait, not wait_for: a timed-out
-                            # wait_for CANCELS __anext__, which terminates the
-                            # generator and would read as a false end-of-stream.
-                            next_message = asyncio.ensure_future(stream.__anext__())
-                            while True:
-                                done, _ = await asyncio.wait(
-                                    {next_message},
-                                    timeout=self._background_task_poll_seconds,
-                                )
-                                if not done:
-                                    if self._turn_was_cancelled(turn_id) or not active_background_tasks:
-                                        next_message.cancel()
-                                        with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
-                                            await next_message
-                                        # The stream may still owe a follow-up
-                                        # response; a reused client would hand
-                                        # it to the next turn (off-by-one).
-                                        # Drop the client so the next turn
-                                        # starts on a clean stream.
-                                        await self._disconnect_sdk_client(session_id)
-                                        break
-                                    continue
-                                try:
-                                    message = next_message.result()
-                                except StopAsyncIteration:
-                                    background_stream_ended = True
-                                    break
-                                if useful := await self._consume_stream_message(
-                                    session, session_id, turn_id, message, active_background_tasks
-                                ):
-                                    last_useful_message = useful
-                                if getattr(message, "num_turns", None) is not None:
-                                    result_message = message
-                                    break
-                                next_message = asyncio.ensure_future(stream.__anext__())
-                        else:
+                # Validation is a provisional drain phase. New work cancels
+                # its side effects and returns us to the same response reader.
+                while True:
+                    while self._session_pending_results.count(session_id) > 0 or (
+                        consumed_any_result and active_background_tasks and not self._turn_was_cancelled(turn_id)
+                    ):
+                        # Queries registered after the last result need a new
+                        # terminal response, regardless of how long it takes.
+                        if self._session_pending_results.requires_result(session_id):
                             if consumed_any_result:
-                                try:
-                                    first_message = await asyncio.wait_for(
-                                        stream.__anext__(),
-                                        timeout=(
-                                            self._interrupted_steer_start_timeout_seconds
-                                            if session_id in self._session_interrupted_steer_followups
-                                            else self._steer_drain_timeout_seconds
+                                self._session_interrupted_steer_followups.discard(session_id)
+                            consumed_any_result = False
+                            last_result_message = None
+                        result_message: Any = None
+                        draining_background_tasks = self._session_pending_results.count(session_id) <= 0
+                        active_background_tasks.begin_cycle()
+                        background_stream_ended = False
+                        stream = sdk_client.receive_response()
+                        next_message = None
+                        try:
+                            if draining_background_tasks:
+                                # Every expected response is consumed but spawned
+                                # tasks still run. Wait for their terminal events
+                                # and the follow-up response, polling so
+                                # cancellation stays responsive and a terminal
+                                # event with no follow-up response (e.g. a killed
+                                # watch) cannot hang the turn.
+                                if not background_wait_logged:
+                                    background_wait_logged = True
+                                    waiting_on = ", ".join(
+                                        description or task_id
+                                        for task_id, description in active_background_tasks.items()
+                                    )
+                                    await asyncio.to_thread(
+                                        self.store.update_session,
+                                        session_id,
+                                        last_observed_state=(
+                                            f"Claude Code response finished; waiting on "
+                                            f"{len(active_background_tasks)} background task(s): {waiting_on}"
                                         ),
                                     )
-                                except (TimeoutError, StopAsyncIteration):
-                                    if session_id in self._session_interrupted_steer_followups:
-                                        raise RuntimeError(
-                                            "Interrupted steer did not begin its follow-up response; task completion is unverified."
-                                        )
-                                    # No further response is coming: the
-                                    # remaining queries were coalesced into an
-                                    # already-consumed response.
-                                    self._clear_pending_results(session_id)
-                                    if active_background_tasks:
-                                        # Spawned tasks still run on this
-                                        # stream; keep the client alive and
-                                        # fall through to the background-task
-                                        # drain above.
+                                # Poll with asyncio.wait, not wait_for: a timed-out
+                                # wait_for CANCELS __anext__, which terminates the
+                                # generator and would read as a false end-of-stream.
+                                next_message = asyncio.ensure_future(stream.__anext__())
+                                while True:
+                                    done, _ = await asyncio.wait(
+                                        {next_message},
+                                        timeout=self._background_task_poll_seconds,
+                                    )
+                                    if not done:
+                                        active_background_tasks.expire_wakeup()
+                                        if self._turn_was_cancelled(turn_id) or not active_background_tasks:
+                                            next_message.cancel()
+                                            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                                                await next_message
+                                            # The stream may still owe a follow-up
+                                            # response; a reused client would hand
+                                            # it to the next turn (off-by-one).
+                                            # Drop the client so the next turn
+                                            # starts on a clean stream.
+                                            await self._disconnect_sdk_client(session_id)
+                                            break
                                         continue
-                                    # Reset on a clean stream.
-                                    await self._disconnect_sdk_client(session_id)
-                                    break
-                                self._session_interrupted_steer_followups.discard(session_id)
-                                messages = _chain_async(first_message, stream)
+                                    try:
+                                        message = next_message.result()
+                                    except StopAsyncIteration:
+                                        background_stream_ended = True
+                                        break
+                                    if useful := await self._consume_stream_message(
+                                        session, session_id, turn_id, message, active_background_tasks
+                                    ):
+                                        last_useful_message = useful
+                                    if getattr(message, "num_turns", None) is not None:
+                                        result_message = message
+                                        break
+                                    next_message = asyncio.ensure_future(stream.__anext__())
                             else:
-                                messages = stream
-                            async for message in messages:
-                                if useful := await self._consume_stream_message(
-                                    session, session_id, turn_id, message, active_background_tasks
-                                ):
-                                    last_useful_message = useful
-                                if getattr(message, "num_turns", None) is not None:
-                                    result_message = message
-                    finally:
-                        if next_message is not None:
-                            next_message.cancel()
-                            await asyncio.gather(next_message, return_exceptions=True)
-                        aclose = getattr(stream, "aclose", None)
-                        if aclose is not None:
-                            with contextlib.suppress(Exception):
-                                await aclose()
-                    if result_message is None:
-                        if draining_background_tasks:
-                            if background_stream_ended:
-                                # The stream is gone; no more task events can
-                                # arrive here. Finish on what was consumed.
-                                break
-                            # Cancelled, or the last task went terminal with
-                            # no follow-up response; the loop condition
-                            # decides which.
-                            continue
-                        # Stream ended without a result; nothing more to read.
-                        self._clear_pending_results(session_id)
-                        break
-                    if not _is_noop_result(result_message):
-                        last_result_message = result_message
-                        consumed_any_result = True
-                        # The default can recover finished model work after a
-                        # process exit. An embedding validator must succeed
-                        # before that recovery shortcut is safe to persist.
-                        # Every result counts, including one that may still
-                        # owe a steer's follow-up: a later response clears the
-                        # stamp again when its first content arrives, and a
-                        # process that dies in between leaves finished work,
-                        # which the orphan sweep then completes rather than
-                        # fails (VM2 2026-10-11, Cooper's steered turn).
-                        await asyncio.to_thread(
-                            self.store.update_turn,
-                            turn_id,
-                            only_if_active=True,
-                            response_finished_at=(iso_now() if self._validate_turn_result is None else None),
-                        )
-                        # A steer can register a pending result while the
-                        # background drain is already reading; whichever cycle
-                        # consumes a response settles the debt.
-                        if self._session_pending_results.get(session_id, 0) > 0:
-                            self._consume_pending_result(session_id)
-                        if active_background_tasks:
-                            self._notify_turn("turn/updated", session_id, turn_id)
-                        # A follow-up response ran; if tasks remain, the next
-                        # drain cycle re-announces what it is waiting on.
-                        background_wait_logged = False
+                                if consumed_any_result:
+                                    try:
+                                        first_message = await asyncio.wait_for(
+                                            stream.__anext__(),
+                                            timeout=(
+                                                self._interrupted_steer_start_timeout_seconds
+                                                if session_id in self._session_interrupted_steer_followups
+                                                else self._steer_drain_timeout_seconds
+                                            ),
+                                        )
+                                    except (TimeoutError, StopAsyncIteration):
+                                        if self._session_pending_results.requires_result(session_id):
+                                            # A query joined this timed read after
+                                            # the previous result. It cannot be
+                                            # dismissed as coalesced work.
+                                            continue
+                                        if session_id in self._session_interrupted_steer_followups:
+                                            raise RuntimeError(
+                                                "Interrupted steer did not begin its follow-up response; task completion is unverified."
+                                            )
+                                        # No further response is coming: the
+                                        # remaining queries were coalesced into an
+                                        # already-consumed response.
+                                        self._clear_pending_results(session_id)
+                                        if active_background_tasks:
+                                            # Spawned tasks still run on this
+                                            # stream; keep the client alive and
+                                            # fall through to the background-task
+                                            # drain above.
+                                            continue
+                                        # Reset on a clean stream.
+                                        await self._disconnect_sdk_client(session_id)
+                                        break
+                                    self._session_interrupted_steer_followups.discard(session_id)
+                                    messages = _chain_async(first_message, stream)
+                                else:
+                                    messages = stream
+                                async for message in messages:
+                                    if useful := await self._consume_stream_message(
+                                        session, session_id, turn_id, message, active_background_tasks
+                                    ):
+                                        last_useful_message = useful
+                                    if getattr(message, "num_turns", None) is not None:
+                                        result_message = message
+                        finally:
+                            if next_message is not None:
+                                next_message.cancel()
+                                await asyncio.gather(next_message, return_exceptions=True)
+                            aclose = getattr(stream, "aclose", None)
+                            if aclose is not None:
+                                with contextlib.suppress(Exception):
+                                    await aclose()
+                        if result_message is None:
+                            if draining_background_tasks:
+                                if background_stream_ended:
+                                    # The stream is gone; no more task events can
+                                    # arrive here. Finish on what was consumed.
+                                    break
+                                # Cancelled, or the last task went terminal with
+                                # no follow-up response; the loop condition
+                                # decides which.
+                                continue
+                            if self._session_pending_results.requires_result(session_id):
+                                raise RuntimeError(
+                                    "Claude Code stream ended without a terminal result; task completion is unverified."
+                                )
+                            # Stream ended without a result; nothing more to read.
+                            self._clear_pending_results(session_id)
+                            break
+                        if not _is_noop_result(result_message):
+                            last_result_message = result_message
+                            consumed_any_result = True
+                            # The default can recover finished model work after a
+                            # process exit. An embedding validator must succeed
+                            # before that recovery shortcut is safe to persist.
+                            # Every result counts, including one that may still
+                            # owe a steer's follow-up: a later response clears the
+                            # stamp again when its first content arrives, and a
+                            # process that dies in between leaves finished work,
+                            # which the orphan sweep then completes rather than
+                            # fails (VM2 2026-10-11, Cooper's steered turn).
+                            await asyncio.to_thread(
+                                self.store.update_turn,
+                                turn_id,
+                                only_if_active=True,
+                                response_finished_at=(iso_now() if self._validate_turn_result is None else None),
+                            )
+                            if self._session_pending_results.requires_result(session_id):
+                                # Registration may have cleared this stamp while
+                                # the older result's write was still in flight.
+                                await asyncio.to_thread(
+                                    self.store.update_turn, turn_id, only_if_active=True, response_finished_at=None
+                                )
+                            if active_background_tasks:
+                                self._notify_turn("turn/updated", session_id, turn_id)
+                            # A follow-up response ran; if tasks remain, the next
+                            # drain cycle re-announces what it is waiting on.
+                            background_wait_logged = False
+                        if self._turn_was_cancelled(turn_id):
+                            break
                     if self._turn_was_cancelled(turn_id):
                         break
-                if self._turn_was_cancelled(turn_id):
-                    # The cancelled query's response may still be unread on
-                    # the stream (cancellation can be flagged from another
-                    # process without a local interrupt). Drop the client so
-                    # the next turn starts on a clean stream instead of
-                    # inheriting a stale response.
-                    cancellation_watch.cancel()
-                    self._finish_cancelled_turn(session_id, turn_id)
-                    await self._stop_cancelled_sdk_client(session_id)
-                else:
+                    if self._session_pending_results.requires_result(session_id):
+                        # Stream cleanup can also yield after a timed drain.
+                        continue
                     if last_result_message is None:
                         raise RuntimeError(
                             "Claude Code stream ended without a terminal result; task completion is unverified."
@@ -1018,17 +1113,31 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                             )
                         if self._turn_was_cancelled(turn_id):
                             raise asyncio.CancelledError
-                        await self._validate_turn_result(
-                            self.store.get_session(session_id),
-                            self.store.get_turn(turn_id),
-                            last_result_message,
+                        validated = await self._result_validation.run(
+                            session_id,
+                            self._validate_turn_result(
+                                self.store.get_session(session_id),
+                                self.store.get_turn(turn_id),
+                                last_result_message,
+                            ),
                         )
                         if self._turn_was_cancelled(turn_id):
                             raise asyncio.CancelledError
-                        if self._session_pending_results.get(session_id, 0):
-                            raise RuntimeError(
-                                "Claude Code received new work during result validation; task completion is unverified."
-                            )
+                        if not validated:
+                            # The same ownership check handles new queries at
+                            # every boundary, including validation cancellation.
+                            continue
+                    break
+                if self._turn_was_cancelled(turn_id):
+                    # The cancelled query's response may still be unread on
+                    # the stream (cancellation can be flagged from another
+                    # process without a local interrupt). Drop the client so
+                    # the next turn starts on a clean stream instead of
+                    # inheriting a stale response.
+                    cancellation_watch.cancel()
+                    self._finish_cancelled_turn(session_id, turn_id)
+                    await self._stop_cancelled_sdk_client(session_id)
+                else:
                     completed = self.store.update_turn(
                         turn_id,
                         only_if_active=True,
@@ -1108,6 +1217,16 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
                     )
             finally:
                 self._unregister_active_owner(session_id)
+                self._initial_query_sent.discard(turn_id)
+                self._launched_turns.discard(turn_id)
+                if dropped := self._buffered_steers.pop(turn_id, None):
+                    logger.warning(
+                        "Claude turn ended before its first prompt was sent; %d buffered correction(s) "
+                        "remain recorded on it thread_id=%s turn_id=%s",
+                        len(dropped),
+                        session_id,
+                        turn_id,
+                    )
                 cancellation_watch.cancel()
                 await asyncio.gather(cancellation_watch, return_exceptions=True)
                 self._permission_gate.cancel_scope(thread_id=session_id, turn_id=turn_id)
@@ -1133,6 +1252,13 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         """
         if self._turn_was_cancelled(turn_id):
             raise asyncio.CancelledError
+        if getattr(message, "num_turns", None) is not None and not _is_noop_result(message):
+            # This runs before the first await after receipt. Classification and
+            # query consumption must share that event-loop operation: logging,
+            # store writes and generator cleanup can all accept a newer steer.
+            solicited = self._session_pending_results.receive(session_id)
+            if isinstance(active_background_tasks, _BackgroundTasks):
+                active_background_tasks.end_cycle(unsolicited=not solicited)
         await asyncio.to_thread(append_log, session.log_path, _message_to_log(message))
         if claude_session_id := _message_session_id(message):
             await asyncio.to_thread(
@@ -1311,20 +1437,21 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
         reasoning_effort: str | None,
         service_tier: str | None,
         sdk: Any,
-        *,
-        developer_instructions: str | None = None,
     ) -> Any:
         if self._transport_outside_context(session):
             raise RuntimeError("Managed SDK transport belongs to another event loop; nothing was submitted.")
+        # Turn overlays (live routing data, voice context, etc.) belong in
+        # the appended message. Putting them before the conversation both
+        # invalidates its prompt cache and reconnects the CLI on every change.
         system_prompt = compose_system_prompt(
             _system_prompt_option(),
-            self._session_developer_instructions(session, developer_instructions),
+            self._session_developer_instructions(session),
             sdk,
         )
         prompt_fingerprint = system_prompt_fingerprint(system_prompt)
         effective_effort = _claude_effort(reasoning_effort, service_tier)
         policy = self._disallowed_tools_for_session
-        disallowed_tools = tuple(policy(session)) if policy else ()
+        disallowed_tools = tuple(dict.fromkeys((*UNTRACKABLE_SCHEDULER_TOOLS, *(policy(session) if policy else ()))))
         existing = self._sdk_clients.get(session.id)
         if existing is not None and not self._owns_session_leaf(session):
             # A client instance in another process ran the last turn, so this
@@ -1473,21 +1600,16 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     def _record_session_leaf_owner(self, session_id: str) -> None:
         self.store.update_session(session_id, last_client_instance=self._instance_id)
 
-    def _register_pending_result(self, session_id: str) -> None:
-        self._session_pending_results[session_id] = self._session_pending_results.get(session_id, 0) + 1
+    def _register_pending_result(self, session_id: str) -> PendingQuery:
+        self._result_validation.invalidate(session_id)
+        query = self._session_pending_results.register(session_id)
         session = self.store.get_session(session_id)
         if session.active_turn_id:
             self.store.update_turn(session.active_turn_id, only_if_active=True, response_finished_at=None)
-
-    def _consume_pending_result(self, session_id: str) -> None:
-        pending = self._session_pending_results.get(session_id, 0)
-        if pending > 1:
-            self._session_pending_results[session_id] = pending - 1
-        else:
-            self._session_pending_results.pop(session_id, None)
+        return query
 
     def _clear_pending_results(self, session_id: str) -> None:
-        self._session_pending_results.pop(session_id, None)
+        self._session_pending_results.clear(session_id)
         self._session_interrupted_steer_followups.discard(session_id)
 
     async def _disconnect_sdk_client(self, session_id: str) -> None:
@@ -1634,12 +1756,18 @@ class ClaudeAgentSdkClient(ActiveSteeringMixin, TurnCancellationMixin, OrphanRec
     def _prompt_for_session(self, session: Session, turn_input: JsonObject) -> str:
         # Also used by active steers: retain their existing per-query context;
         # never disconnect or replace a running client's system prompt mid-turn.
+        instructions = self._session_developer_instructions(
+            session, _optional_str(turn_input.get("developerInstructions"))
+        )
+        recent = bool(instructions) and transcript_recently_contains(
+            transcript_path(session) if session.backend_session_id else None,
+            INSTRUCTIONS_FINGERPRINT_PREFIX + instructions_fingerprint(instructions),
+        )
         return _with_claude_turn_context(
             str(turn_input["prompt"]),
             cwd=session.cwd,
-            developer_instructions=self._session_developer_instructions(
-                session, _optional_str(turn_input.get("developerInstructions"))
-            ),
+            developer_instructions=instructions,
+            instructions_in_recent_context=recent,
         )
 
     def _require_sdk(self) -> Any:
@@ -1688,6 +1816,112 @@ def _is_noop_result(message: Any) -> bool:
 # Statuses on which a spawned task is finished for good, mirroring the SDK's
 # TERMINAL_TASK_STATUSES ("pending"/"running"/"paused" are non-terminal).
 _TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
+# Claude Code tools that schedule work for later inside the CLI session
+# without any event super-agents can observe. Their jobs are session-only
+# (they die whenever the managed CLI is reconnected, which happens on model,
+# effort or leaf-owner changes) and they let a turn report "completed" while
+# work is still pending: on 376 (2026-10-11 06:13Z) an agent asked for five
+# timed appends used CronCreate five times and its turn completed at once.
+# Managed sessions get them disallowed; the model falls back to ScheduleWakeup
+# (tracked, see _BackgroundTasks) or a shell wait inside the turn.
+UNTRACKABLE_SCHEDULER_TOOLS: tuple[str, ...] = ("CronCreate", "CronDelete", "CronList")
+
+# Pseudo task id for a pending ScheduleWakeup (see _BackgroundTasks).
+_WAKEUP = "wakeup"
+# A wakeup that has not fired this long after its scheduled time is dropped,
+# so a missed or cancelled-elsewhere wakeup cannot hold a turn open forever.
+_WAKEUP_GRACE_SECONDS = 120.0
+_WAKEUP_IN_RE = re.compile(r"Next wakeup scheduled for [^(]*\(in (\d+)s\)")
+
+
+class _BackgroundTasks(dict):
+    """Tasks that can outlive a response, plus a pending ScheduleWakeup.
+
+    Claude Code's ScheduleWakeup ends the model's response and fires the
+    scheduled prompt later inside the same still-connected CLI, with no task
+    events; it has a single slot (a new call replaces the pending one). The
+    turn stays open while one is pending. Only an *unsolicited* response
+    (none of our queries pending) that no task completion preceded counts as
+    the wakeup firing: on 376 (2026-10-11 05:53Z) treating any later result
+    as the fire let a steer's response (and, on another agent, a background
+    task's follow-up) close the turn while the wakeup was still pending, and
+    the agent then ran an untracked self-rescheduling chain that ignored the
+    "stop at H" steer.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wakeup_generation = 0
+        self.wakeup_deadline: float | None = None
+        self._cycle_generation = 0
+        self._cycle_saw_task_end = False
+
+    def schedule_wakeup(self, description: str, delay_seconds: float | None) -> None:
+        self[_WAKEUP] = description
+        self.wakeup_generation += 1
+        delay = max(float(delay_seconds or 0), 60.0)
+        self.wakeup_deadline = time.monotonic() + delay
+
+    def note_wakeup_confirmation(self, text: str) -> None:
+        if _WAKEUP not in self:
+            return
+        if match := _WAKEUP_IN_RE.search(text):
+            self.wakeup_deadline = time.monotonic() + float(match.group(1))
+
+    def stop_wakeup(self) -> None:
+        self.pop(_WAKEUP, None)
+        self.wakeup_deadline = None
+
+    def note_task_end(self) -> None:
+        self._cycle_saw_task_end = True
+
+    def begin_cycle(self) -> None:
+        self._cycle_generation = self.wakeup_generation
+        self._cycle_saw_task_end = False
+
+    def end_cycle(self, *, unsolicited: bool) -> None:
+        if (
+            unsolicited
+            and _WAKEUP in self
+            and not self._cycle_saw_task_end
+            and self.wakeup_generation == self._cycle_generation
+        ):
+            self.stop_wakeup()
+
+    def expire_wakeup(self) -> None:
+        if (
+            _WAKEUP in self
+            and self.wakeup_deadline is not None
+            and time.monotonic() > self.wakeup_deadline + _WAKEUP_GRACE_SECONDS
+        ):
+            self.stop_wakeup()
+
+
+def _note_wakeup_lifecycle(active_background_tasks: dict[str, str], message: Any) -> None:
+    """Record ScheduleWakeup calls and their confirmations (see _BackgroundTasks)."""
+    if not isinstance(active_background_tasks, _BackgroundTasks):
+        return
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if getattr(block, "name", None) == "ScheduleWakeup":
+            tool_input = getattr(block, "input", None)
+            tool_input = tool_input if isinstance(tool_input, dict) else {}
+            if tool_input.get("stop") is True:
+                active_background_tasks.stop_wakeup()
+                continue
+            delay = tool_input.get("delaySeconds")
+            delay = delay if isinstance(delay, (int, float)) else None
+            active_background_tasks.schedule_wakeup(
+                f"scheduled wakeup in {delay:g} s" if delay is not None else "scheduled wakeup", delay
+            )
+            continue
+        result_text = getattr(block, "content", None)
+        if isinstance(result_text, list):
+            result_text = " ".join(str(getattr(part, "text", None) or part) for part in result_text)
+        if isinstance(result_text, str) and "Next wakeup scheduled" in result_text:
+            active_background_tasks.note_wakeup_confirmation(result_text)
 
 
 def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) -> None:
@@ -1698,7 +1932,9 @@ def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) 
     can arrive on EITHER a ``task_notification`` or a ``task_updated`` message
     (a killed task may emit only the latter). Falls back to the raw system
     payload so tracking also works when the SDK does not type these messages.
+    Scheduled wakeups are tracked the same way (:func:`_note_wakeup_lifecycle`).
     """
+    _note_wakeup_lifecycle(active_background_tasks, message)
     data = getattr(message, "data", None)
     payload = data if isinstance(data, dict) else {}
     subtype = getattr(message, "subtype", None) or payload.get("subtype")
@@ -1718,6 +1954,8 @@ def _note_task_lifecycle(active_background_tasks: dict[str, str], message: Any) 
             status = patch.get("status")
     if status in _TERMINAL_TASK_STATUSES:
         active_background_tasks.pop(task_id, None)
+        if isinstance(active_background_tasks, _BackgroundTasks):
+            active_background_tasks.note_task_end()
 
 
 def _resume_transcript_missing(session: Session) -> bool:

@@ -507,8 +507,7 @@ async def test_start_with_prompt_runs_the_first_turn_on_the_thread_backend(
 async def test_first_turn_defaults_follow_explicit_thread_backend(tmp_path, clients, monkeypatch):
     config_path = tmp_path / "dispatcher-config.json"
     config_path.write_text(
-        '{"backend_models": {"codex": {"super_agents": "gpt-6.1"}, '
-        '"claude_code": {"super_agents": "opus"}}}',
+        '{"backend_models": {"codex": {"super_agents": "gpt-6.1"}, "claude_code": {"super_agents": "opus"}}}',
         encoding="utf-8",
     )
     monkeypatch.setenv("SUPER_AGENTS_DEFAULT_CONFIG_PATH", str(config_path))

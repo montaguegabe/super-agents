@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 
 CLAUDE_CONTEXT_OPEN = "<openbase-claude-code-context>"
 CLAUDE_CONTEXT_CLOSE = "</openbase-claude-code-context>"
@@ -45,7 +47,7 @@ def _strip_internal_envelopes(value: str) -> str:
             # Claude can append system reminders as separate content blocks.
             start = trimmed.rfind("\n" + opening)
             if start >= 0:
-                block = trimmed[start + 1:]
+                block = trimmed[start + 1 :]
                 end = _envelope_end(block, opening, closing)
                 if end is None or end == len(block):
                     text = trimmed[:start].rstrip()
@@ -69,12 +71,30 @@ def _envelope_end(text: str, opening: str, closing: str) -> int | None:
     return end + len(closing) if end >= 0 else None
 
 
+INSTRUCTIONS_FINGERPRINT_PREFIX = "Instructions fingerprint: "
+
+
+def instructions_fingerprint(developer_instructions: str) -> str:
+    """Short stable id of an instructions text, written into its in-band block."""
+    return hashlib.sha256(developer_instructions.strip().encode("utf-8")).hexdigest()[:12]
+
+
 def with_claude_turn_context(
     prompt: str,
     *,
     cwd: str,
     developer_instructions: str | None,
+    instructions_in_recent_context: bool = False,
 ) -> str:
+    """Wrap a turn prompt in the Openbase context block.
+
+    The full instructions carry a fingerprint line. When the caller has seen
+    that same fingerprint recently in this conversation (and no compaction
+    since), only a one-line reference is sent: re-sending ~63k characters of
+    Dispatcher instructions with every request filled a 200k-token window in
+    about ten requests and forced hourly mid-request compactions (VM2,
+    2026-10-11).
+    """
     context_parts = [
         CLAUDE_CONTEXT_OPEN,
         f"Current working directory: {cwd}",
@@ -84,13 +104,26 @@ def with_claude_turn_context(
         ),
     ]
     if developer_instructions:
-        context_parts.extend(
-            [
-                "",
-                "Developer instructions for this Openbase thread:",
-                developer_instructions.strip(),
-            ]
-        )
+        fingerprint = instructions_fingerprint(developer_instructions)
+        if instructions_in_recent_context:
+            context_parts.extend(
+                [
+                    "",
+                    # Must not contain the full marker itself, or references
+                    # would keep "finding" it after the block scrolled away.
+                    "Developer instructions for this Openbase thread: unchanged. Follow the block "
+                    f"with fingerprint {fingerprint} earlier in this conversation; it is still fully in effect.",
+                ]
+            )
+        else:
+            context_parts.extend(
+                [
+                    "",
+                    "Developer instructions for this Openbase thread:",
+                    f"{INSTRUCTIONS_FINGERPRINT_PREFIX}{fingerprint}",
+                    developer_instructions.strip(),
+                ]
+            )
     context_parts.append(CLAUDE_CONTEXT_CLOSE)
     return "\n".join(context_parts) + "\n\n" + prompt
 

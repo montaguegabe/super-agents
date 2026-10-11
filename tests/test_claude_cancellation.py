@@ -125,6 +125,7 @@ async def test_cancel_stops_silent_owner_and_never_inherits_previous_answer(tmp_
 
     def loader():
         return SimpleNamespace(ClaudeSDKClient=SDK, ClaudeAgentOptions=lambda **kw: kw)
+
     store = Store(tmp_path / "state.sqlite3")
     owner = Client(store=store, sdk_loader=loader)
     canceller = Client(store=Store(store.path), sdk_loader=loader) if foreign else owner

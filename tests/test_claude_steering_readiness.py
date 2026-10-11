@@ -28,10 +28,14 @@ async def test_second_client_steers_owner_during_background_drain(tmp_path, back
     caller = ClaudeAgentSdkClient(store=Store(store.path), sdk_loader=fake_sdk_loader, backend_identity=backend)
     thread = await owner.start_thread({"name": "birch", "cwd": str(tmp_path)})
     first = await owner.start_turn_by_label(LabelQueryInput(label="birch"), {"prompt": "list test files"})
-    await wait_for(lambda: "waiting on 2 background" in (store.get_session(thread["threadId"]).last_observed_state or ""))
+    await wait_for(
+        lambda: "waiting on 2 background" in (store.get_session(thread["threadId"]).last_observed_state or "")
+    )
     assert caller._sdk_clients == {}
     try:
-        result = await _tool_super_agents_steer(caller).handler({"name": "birch", "prompt": "include byte sizes; birch-902"})
+        result = await _tool_super_agents_steer(caller).handler(
+            {"name": "birch", "prompt": "include byte sizes; birch-902"}
+        )
         assert result["steered"] is True
         assert result["queued"] is False
         assert result["turnId"] == first["turnId"]
@@ -58,7 +62,9 @@ async def test_unavailable_owner_queues_durable_followup_and_drains_once(tmp_pat
     first = store.create_turn(thread["threadId"], "working", status="running")
     store.update_session(thread["threadId"], status="running")
     async with owner._cross_process_session_lock(thread["threadId"]):
-        result = await caller.steer_by_label(LabelQueryInput(label="birch"), "byte sizes; birch-902", {"interruptCurrentWork": True})
+        result = await caller.steer_by_label(
+            LabelQueryInput(label="birch"), "byte sizes; birch-902", {"interruptCurrentWork": True}
+        )
         assert result["queued"] is True
         assert result["steered"] is False
         assert result["interruptedCurrentWork"] is False
@@ -123,8 +129,12 @@ async def test_connecting_owner_queues_without_losing_instruction(tmp_path):
     first = await owner.start_turn_by_label(LabelQueryInput(label="birch"), {"prompt": "initial"})
     try:
         result = await caller.steer_by_label(LabelQueryInput(label="birch"), "followup")
-        assert result["queued"] is True
-        assert store.get_turn(result["turnId"]).status == "queued"
+        # The owner has not sent its first prompt yet: the correction is held
+        # for that turn and sent right after its prompt, in the same turn,
+        # never ahead of it (voice review finding 12, 2026-10-11).
+        assert result["steered"] is True and result["confirmed"] is True and result["buffered"] is True
+        assert result["turnId"] == first["turnId"]
+        assert store.queued_turns(thread["threadId"]) == []
         assert store.get_turn(first["turnId"]).status == "running"
     finally:
         connected.set()
@@ -149,7 +159,9 @@ async def test_mcp_failed_steer_never_promises_delivery(tmp_path):
     store.create_turn(thread["threadId"], "working", status="running")
     store.update_session(thread["threadId"], status="running")
     async with create_connected_server_and_client_session(create_server(client)) as session:
-        result = await session.call_tool("super_agents_steer", {"name": "birch", "turnId": "wrong", "prompt": "new instruction"})
+        result = await session.call_tool(
+            "super_agents_steer", {"name": "birch", "turnId": "wrong", "prompt": "new instruction"}
+        )
     assert result.isError
     payload = json.loads(result.content[0].text)
     assert "Nothing was delivered or queued" in payload["error"]

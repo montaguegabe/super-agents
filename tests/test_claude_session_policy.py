@@ -180,7 +180,7 @@ async def test_new_process_resumes_same_history_with_latest_stored_policy(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_turn_overlay_is_scoped_and_warm_options_match(tmp_path):
+async def test_turn_overlay_is_scoped_without_invalidating_warmed_system_prompt(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     client = ClaudeAgentSdkClient(store=store, sdk_loader=CurrentSdk)
     thread = await client.start_thread(
@@ -196,11 +196,17 @@ async def test_turn_overlay_is_scoped_and_warm_options_match(tmp_path):
     warmed = client._sdk_clients[sid]
     await _turn(client, store, sid, **turn_options)
     assert client._sdk_clients[sid] is warmed
-    assert "Only this turn: stay silent." in warmed.options.kwargs["system_prompt"]["append"]
+    assert "Only this turn" not in warmed.options.kwargs["system_prompt"]["append"]
+    assert "Only this turn: stay silent." in FakeClaudeSDKClient.prompts[-1]
     assert "Only this turn" not in store.get_session(sid).developer_instructions
     await _turn(client, store, sid, "Next task.")
-    assert client._sdk_clients[sid] is not warmed
-    assert "Only this turn" not in client._sdk_clients[sid].options.kwargs["system_prompt"]["append"]
+    assert client._sdk_clients[sid] is warmed
+    assert "Only this turn" not in FakeClaudeSDKClient.prompts[-1]
+    await _turn(client, store, sid, "Route the next task.", developerInstructions="Current worker status: completed.")
+    assert client._sdk_clients[sid] is warmed
+    assert "Current worker status: completed." in FakeClaudeSDKClient.prompts[-1]
+    assert "Current worker status" not in warmed.options.kwargs["system_prompt"]["append"]
+    assert FakeClaudeSDKClient.disconnect_count == 0
     await client.close()
 
 
