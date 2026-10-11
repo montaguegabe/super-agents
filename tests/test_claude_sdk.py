@@ -1860,3 +1860,23 @@ async def test_failed_cli_start_disconnects_the_spawned_client(tmp_path):
     assert FakeClaudeSDKClient.disconnect_count == before + 1
     assert thread["threadId"] not in client._sdk_clients
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_status_resweeps_turns_orphaned_after_startup(monkeypatch, tmp_path):
+    """VM2 2026-10-11 04:30Z: a voice call's job process exited at hangup with
+    Cooper's steered turn still open; every reader kept showing it running
+    for two minutes because the sweep ran once per process. Later status
+    reads must reclaim it."""
+    monkeypatch.setattr("super_agents.claude_orphans._ORPHAN_RESWEEP_INTERVAL_SECONDS", 0)
+    store = Store(tmp_path / "state.sqlite3")
+    client = ClaudeAgentSdkClient(store=store, sdk_loader=fake_sdk_loader)
+    started = await client.start_thread({"name": "sdk", "cwd": str(tmp_path)})
+    await client.status()  # the startup sweep, nothing to reclaim yet
+    turn_id = _insert_ghost_turn(store, started["threadId"], updated_at="2026-01-01T00:00:00.000Z")
+
+    await client.status()
+
+    assert store.get_turn(turn_id).status == "failed"
+    assert store.get_session(started["threadId"]).active_turn_id is None
+    await client.close()

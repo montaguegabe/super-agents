@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 try:  # POSIX advisory locking; unavailable on Windows.
@@ -26,8 +27,14 @@ logger = logging.getLogger(__name__)
 # Minimum age before a running turn may be treated as orphaned. Rows are
 # written before the turn task acquires the session flock, so very fresh
 # turns can look unowned for a moment.
-_ORPHAN_SWEEP_MIN_AGE_SECONDS = 60.0
+_ORPHAN_SWEEP_MIN_AGE_SECONDS = 20.0
 _ORPHAN_RECLAIM_MIN_AGE_SECONDS = 5.0
+# How often the status/progress paths re-sweep after the startup sweep. A
+# turn owned by another process that exits mid-flight (a voice call's job
+# process ending at hangup, VM2 2026-10-11 04:30Z) otherwise stays "running"
+# for every reader until this process restarts, so the apps keep showing a
+# spinner and steers black-hole into a dead turn.
+_ORPHAN_RESWEEP_INTERVAL_SECONDS = 15.0
 
 
 class OrphanReconciliationMixin:
@@ -155,9 +162,18 @@ class OrphanReconciliationMixin:
         return reconciled
 
     def _reconcile_orphaned_turns_once(self) -> None:
-        if self._orphan_sweep_done:
+        """Sweep on first use, then again at most every re-sweep interval.
+
+        The name is historical: callers on the status, listing and progress
+        paths keep calling this, and it now also catches turns orphaned by
+        *other* processes while this one keeps running.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_orphan_sweep_at", None)
+        if self._orphan_sweep_done and last is not None and now - last < _ORPHAN_RESWEEP_INTERVAL_SECONDS:
             return
         self._orphan_sweep_done = True
+        self._orphan_sweep_at = now
         try:
             self.reconcile_orphaned_turns()
         except Exception:
