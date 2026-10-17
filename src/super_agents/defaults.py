@@ -152,3 +152,33 @@ def _model_for_backend(model: str | None, *, backend: str | None = None) -> str 
         )
         return None
     return model
+
+
+# Codex retired "gpt-5.5" for ChatGPT sign-ins: codex-cli 0.162.1 rejects it
+# with HTTP 400 "The 'gpt-5.5' model is not supported when using Codex with a
+# ChatGPT account", while API-key sign-ins and the Openbase Cloud proxy still
+# accept it. Only the personal Codex backend signed in through ChatGPT is
+# redirected, to the default codex-cli itself reports for such accounts.
+CHATGPT_REJECTED_CODEX_MODELS = frozenset({"gpt-5.5"})
+CHATGPT_DEFAULT_CODEX_MODEL = "gpt-6.1-sol"
+
+
+def codex_auth_mode() -> str | None:
+    """The ``auth_mode`` Codex recorded in its ``auth.json`` (never its tokens)."""
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "auth.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    mode = payload.get("auth_mode") if isinstance(payload, dict) else None
+    return mode.strip().lower() or None if isinstance(mode, str) else None
+
+
+def codex_model_for_account(model: str | None, *, backend: str | None = None) -> str | None:
+    """Swap a model the signed-in Codex account rejects for one it accepts."""
+    if not isinstance(model, str) or (backend or configured_backend_from_environment()) != CODEX_BACKEND:
+        return model
+    if model.strip().lower() in CHATGPT_REJECTED_CODEX_MODELS and codex_auth_mode() == "chatgpt":
+        logger.info("Codex is signed in with a ChatGPT account; using %s instead of %s", CHATGPT_DEFAULT_CODEX_MODEL, model)
+        return CHATGPT_DEFAULT_CODEX_MODEL
+    return model

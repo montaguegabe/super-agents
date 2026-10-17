@@ -27,6 +27,7 @@ from .app_protocol import (
 )
 from .app_sessions import turn_patch
 from .app_time import iso_now, path_basename, turn_key
+from .defaults import codex_model_for_account
 from .state import JsonObject, TrackedStatus
 from .thread_intro import announce_thread_intro, is_first_turn
 
@@ -93,7 +94,10 @@ class TurnLifecycleMixin:
         thread_id = str(input_data["threadId"])
         session = await self.get_session(thread_id)
         mode: Mode = input_data.get("mode") if input_data.get("mode") in {"default", "plan"} else "default"
-        model = input_data.get("model") or (session.model if session else None) or self.default_model
+        model = codex_model_for_account(
+            input_data.get("model") or (session.model if session else None) or self.default_model,
+            backend=self.backend,
+        )
         reasoning_effort = effective_reasoning_effort(input_data)
         label = super_agent_label(
             input_data.get("label")
