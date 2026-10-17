@@ -27,7 +27,7 @@ from .app_protocol import (
 )
 from .app_sessions import turn_patch
 from .app_time import iso_now, path_basename, turn_key
-from .defaults import codex_model_for_account
+from .defaults import account_default_model, codex_model_rejected_by_account
 from .state import JsonObject, TrackedStatus
 from .thread_intro import announce_thread_intro, is_first_turn
 
@@ -77,6 +77,20 @@ def _is_missing_rollout_error(exc: RuntimeError) -> bool:
 
 
 class TurnLifecycleMixin:
+    async def codex_model_for_account(self, model: str | None) -> str | None:
+        """Swap a model the signed-in Codex account rejects for the app-server's default for it."""
+        if not codex_model_rejected_by_account(model, backend=self.backend):
+            return model
+        replacement = getattr(self, "_account_default_model", None)
+        if replacement is None:
+            replacement = account_default_model(await self.request("model/list", {}))
+            if replacement is None:
+                logger.warning("Codex model/list offered no replacement for %s; sending it unchanged", model)
+                return model
+            self._account_default_model = replacement
+            logger.info("Codex is signed in with a ChatGPT account; using %s instead of %s", replacement, model)
+        return replacement
+
     async def start_turn(self, input_data: JsonObject) -> JsonObject:
         dispatch_id = str(input_data.get("_mcpCallId") or "")
         started = time.monotonic()
@@ -94,9 +108,8 @@ class TurnLifecycleMixin:
         thread_id = str(input_data["threadId"])
         session = await self.get_session(thread_id)
         mode: Mode = input_data.get("mode") if input_data.get("mode") in {"default", "plan"} else "default"
-        model = codex_model_for_account(
-            input_data.get("model") or (session.model if session else None) or self.default_model,
-            backend=self.backend,
+        model = await self.codex_model_for_account(
+            input_data.get("model") or (session.model if session else None) or self.default_model
         )
         reasoning_effort = effective_reasoning_effort(input_data)
         label = super_agent_label(

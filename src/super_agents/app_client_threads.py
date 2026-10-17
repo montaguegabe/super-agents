@@ -21,7 +21,6 @@ from .app_protocol import (
     with_super_agent_identity_instructions,
 )
 from .app_time import iso_now, path_basename
-from .defaults import codex_model_for_account
 from .rollout_history import needs_rollout_turn_fallback, rollout_fallback_turns
 from .state import JsonObject, get_string
 
@@ -43,7 +42,7 @@ class ThreadLifecycleMixin:
         await self.ensure_connected()
         name = super_agent_label(input_data.get("name") or input_data.get("label"))
         agent_name = super_agent_label(input_data.get("agentName"))
-        model = codex_model_for_account(input_data.get("model") or self.default_model, backend=self.backend)
+        model = await self.codex_model_for_account(input_data.get("model") or self.default_model)
         params: JsonObject = {
             "cwd": input_data.get("cwd") or str(Path.home()),
             "model": model,
