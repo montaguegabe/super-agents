@@ -728,8 +728,22 @@ def logs_dir() -> Path:
     return app_dir() / "logs"
 
 
-def default_cwd() -> str:
-    return os.getcwd()
+# A runtime that keeps its durable projects somewhere other than the home
+# directory (an Openbase cloud workspace keeps only /data across an image
+# upgrade; its entrypoint points this at /data/workspace) names the directory
+# a thread started without a cwd should land in. Unset elsewhere, so a Mac or
+# Linux install keeps its backend's own fallback.
+DEFAULT_CWD_ENV = "SUPER_AGENTS_DEFAULT_CWD"
+
+
+def default_cwd(fallback: str | None = None) -> str:
+    """Working directory for a thread started without one: the directory
+    named by SUPER_AGENTS_DEFAULT_CWD when it exists, else ``fallback``
+    (the backend's own default), else the process working directory."""
+    configured = os.environ.get(DEFAULT_CWD_ENV, "").strip()
+    if configured and os.path.isdir(configured):
+        return configured
+    return fallback or os.getcwd()
 
 
 def iso_now() -> str:

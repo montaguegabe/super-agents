@@ -6,6 +6,8 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from .agent_store import default_cwd
+
 from .app_client_turns import (
     RESUME_TIMEOUT_SECONDS,
     _raise_if_resume_wedged,
@@ -37,14 +39,14 @@ class ThreadLifecycleMixin:
             dispatch_id,
             input_data.get("name") or input_data.get("label") or "",
             input_data.get("agentName") or "",
-            path_basename(str(input_data.get("cwd") or Path.home())),
+            path_basename(input_data.get("cwd") or default_cwd(str(Path.home()))),
         )
         await self.ensure_connected()
         name = super_agent_label(input_data.get("name") or input_data.get("label"))
         agent_name = super_agent_label(input_data.get("agentName"))
         model = await self.codex_model_for_account(input_data.get("model") or self.default_model)
         params: JsonObject = {
-            "cwd": input_data.get("cwd") or str(Path.home()),
+            "cwd": input_data.get("cwd") or default_cwd(str(Path.home())),
             "model": model,
             "config": await self._login_shell_config_override(None, model if isinstance(model, str) else None),
             **self.permission_overrides(input_data),
