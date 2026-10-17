@@ -218,7 +218,7 @@ def _tool_super_agents_start(client: SuperAgentsClient) -> ToolDefinition:
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Project working directory. Defaults to the user's home directory.",
+                    "description": "Project working directory. Defaults to the runtime's default project directory (the user's home directory when none is configured).",
                 },
                 "developerInstructions": {
                     "type": "string",

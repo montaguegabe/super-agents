@@ -4,6 +4,8 @@ import logging
 import time
 from pathlib import Path
 
+from .agent_store import default_cwd
+
 from .app_formatting import (
     apply_field_selection,
     compact_json,
@@ -101,7 +103,7 @@ class TurnLifecycleMixin:
             input_data.get("threadId"),
             input_data.get("name") or input_data.get("label") or "",
             input_data.get("agentName") or "",
-            path_basename(str(input_data.get("cwd") or Path.home())),
+            path_basename(input_data.get("cwd") or default_cwd(str(Path.home()))),
             input_data.get("mode") or "default",
         )
         await self.ensure_connected()
@@ -212,7 +214,7 @@ class TurnLifecycleMixin:
     ) -> JsonObject:
         params: JsonObject = {
             "threadId": thread_id,
-            "cwd": input_data.get("cwd") or (session.cwd if session else None) or str(Path.home()),
+            "cwd": input_data.get("cwd") or (session.cwd if session else None) or default_cwd(str(Path.home())),
             "model": model,
             "serviceTier": input_data.get("serviceTier") or "standard",
             **self.permission_overrides(input_data),
